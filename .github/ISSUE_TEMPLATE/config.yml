@@ -1,0 +1,3 @@
+# Keep issue intake structured without assuming any external support URL exists.
+# GitHub maintainers can still choose a blank issue; this is not access control.
+blank_issues_enabled: false

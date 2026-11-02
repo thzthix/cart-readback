@@ -1,0 +1,57 @@
+name: Bounded research or feasibility
+description: Resolve one decision question with primary evidence and a stopping rule.
+title: "[Research] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Research is not customer validation or implementation by itself.
+        Do not attach secrets, unredacted personal/payment data, or private payloads.
+        Do not create accounts, incur costs, contact others, or perform external writes
+        just because this issue exists. Check applicable authority separately.
+  - type: textarea
+    id: question
+    attributes:
+      label: Decision question and owner
+      description: What specific decision will this evidence change, and who owns that decision? State unassigned if no accountable account is assigned yet.
+    validations:
+      required: true
+  - type: textarea
+    id: baseline
+    attributes:
+      label: Baseline, alternatives, and strongest counterexample
+      description: Include the non-AI or existing-tool alternative, current assumptions, and what would make the proposed direction unnecessary or infeasible.
+    validations:
+      required: true
+  - type: textarea
+    id: sources
+    attributes:
+      label: Evidence plan and allowed scope
+      description: Identify primary sources or safe offline probes, freshness/access limits, and excluded actions. API documentation proves capability, not user demand.
+    validations:
+      required: true
+  - type: textarea
+    id: completion
+    attributes:
+      label: Deliverable and stopping rule
+      description: Define the decision table, source links, uncertainties, and counterevidence to hand off. State when to stop and which missing access/evidence would make the result blocked.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification and review plan
+      description: Who separately checks consequential claims and exact artifact revision? Separate planned probes from executed results and agent opinion from observed user evidence.
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and bounded this to one decision question.
+          required: true
+        - label: I will distinguish primary evidence, inference, unknowns, and work not run.
+          required: true
+        - label: I removed secrets and unredacted personal/payment data.
+          required: true

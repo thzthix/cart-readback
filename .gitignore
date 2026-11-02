@@ -1,0 +1,31 @@
+# Local secrets and credential material: never track real values.
+.env
+.env.*
+*.pem
+*.key
+.aws/
+# Python / developer caches and environments.
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+.venv/
+venv/
+# Local fixture sessions, payment history and disposable outputs.
+.local/
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.db-wal
+*.db-shm
+*.log
+*.tmp
+# Editor and platform noise.
+.DS_Store
+.idea/
+.vscode/
+*~
