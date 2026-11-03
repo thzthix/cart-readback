@@ -2,116 +2,80 @@
 
 **Check the keyboard you chose before checkout.**
 
-CartReadback compares a selected product with up to two requirements the buyer
-already has, such as a UK keyboard layout or an included USB-C cable. It shows
-what the description supports, what conflicts, and what the seller has not stated.
+CartReadback compares a selected keyboard with up to two requirements the buyer
+already has: language layout and an included cable. It preserves what the source
+supports, conflicts with, or does not state.
 
-> **Documentation and API-contract scaffold only; no runnable app yet.**
-> The application, browser UI and evaluation tools are pending import.
+> **API-only local fixture server. Browser UI and evaluation tooling are not
+> imported on this branch. Genuine AI and PayPal sandbox are UNCONNECTED.**
 
-Start with the [project brief](PROJECT_BRIEF.md), [API contract](cart_readback/API_CONTRACT.md)
-or [contributing guide](CONTRIBUTING.md).
+Start with the [project brief](PROJECT_BRIEF.md), [API contract](cart_readback/API_CONTRACT.md),
+[architecture](cart_readback/ARCHITECTURE_ADR.md) or [contributing guide](CONTRIBUTING.md).
+The scaffold's stage-specific prose describes its earlier documentation-only
+revision; this README and the [import ledger](docs/IMPORT_PROVENANCE.md) record the
+current stacked server import. Scaffold PR #2 is still unmerged.
 
 ## Why this exists
 
-An ISO keyboard shape does not establish a UK language layout. A pictured or
-compatible cable does not establish that it is included. These distinctions can
-be easy to miss when checking a product description before paying.
+ISO keyboard shape does not establish a UK language layout. A pictured or
+compatible cable does not establish inclusion. First scope: one merchant, six
+synthetic keyboard SKUs, one item per order, and at most two typed conditions.
+This is not a recommendation engine, price finder, compatibility guarantee or
+connection to arbitrary shops.
 
-The first scope is deliberately small: one merchant, six synthetic keyboard SKUs,
-one item per order, and language-layout/included-cable conditions only. This is
-not a recommendation engine, price finder, compatibility guarantee, or connection
-to arbitrary shops.
+A clear option-and-included-items table using **identical source material** is the
+non-AI baseline. AI earns a place only if its benefit exceeds preparation, input,
+reading and correction effort. Customer demand and that benefit are unknown.
+The API exposes that same-source baseline; its browser presentation is pending.
 
-**Illustrative readback, not a fixture quotation or test result:** the buyer
-requires a UK language layout, but the description establishes only an ISO
-physical shape. The result should be `unknown`, not `match`. Acknowledging that
-unknown does not establish that the keyboard has a UK language layout.
+## What is available
 
-A clear option-and-included-items table is the baseline, using **the same source
-material** as the readback. AI earns a place only if it helps more than that table
-after preparation, requirement entry, reading and correction effort are included.
-Customer demand and that benefit have not been established.
+- A standard-library Python service bound only to literal `127.0.0.1`, with
+  SQLite sessions, consent, audit observations and durable operation identities.
+- Source-backed `match`, `conflict` and `unknown` proposals from a deterministic
+  test double, not genuine inference. Exact quotations/schema checks do not prove
+  semantic correctness. Each unknown/conflict requires separate acknowledgement;
+  acknowledgement never turns uncertainty into a match.
+- Consent bound to SKU, source, conditions, price and model/prompt identity;
+  changed facts invalidate old consent. The server owns integer USD cents and
+  quantity one; model/browser values cannot authorize money movement.
+- Separate simulated create, fixture approval, server verification and explicit
+  final capture. GET never captures. Owner, same-origin, CSRF, body and revision
+  guards reject unsupported requests.
+- Timeout/restart ambiguity stays `PAYMENT_UNKNOWN`. Reconciliation checks the
+  same known order; without a provider ID create recovery remains unknown.
+  No replacement payment or automatic capture retry clears uncertainty. There is
+  no cancel/restart flow after order creation.
 
-## What the local fixture demonstrates
+**All catalog data, proposals and payment responses are synthetic fixtures.
+No genuine model call, PayPal call or money movement occurs.** Real adapter
+interfaces are disabled and have no live fallback. This is a local/demo server,
+not a production-security endorsement.
 
-These features are **pending import here**, not capabilities of this scaffold:
+## API-only quickstart
 
-- Review the selected SKU against one or two explicit requirements, beside the
-  same-source product table.
-- Display `match`, `conflict` or `unknown` proposals, with exact source quotations
-  where evidence exists. The proposal adapter is a deterministic test double,
-  not genuine AI inference.
-- Require separate buyer acknowledgement of each conflict or unknown fact.
-  Acknowledging uncertainty never changes it into a match.
-- Bind confirmation to the reviewed SKU, source, conditions and prices. A changed
-  snapshot invalidates old consent.
-- Simulate order creation, approval, verification and final capture as separate
-  actions. The server owns quantity and integer USD cents; suggestions cannot
-  authorize a payment.
-- Persist operation identities in SQLite. An ambiguous outcome stays
-  `PAYMENT_UNKNOWN`; reconciliation checks the same known order rather than
-  creating a replacement payment. There is no cancel/restart flow after creation.
-
-**All catalog data, proposals and payment responses in that build are fixtures.
-No PayPal call, genuine model call or money movement occurs.**
-
-## Architecture
-
-One loopback Python service, SQLite and a same-origin vanilla browser UI. This
-diagram describes the local fixture design to be imported, not deployed services.
-
-```mermaid
-flowchart LR
-    B[Buyer] --> U[Browser UI]
-    U --> H[Loopback HTTP API]
-    H --> R[Review and consent service]
-    C[Six-SKU synthetic catalog] --> R
-    C --> T[Same-source option table]
-    T --> U
-    R --> P[Fixture proposal adapter]
-    P --> V[Schema and exact-quote validation]
-    V --> R
-    R --> O[Deterministic order service]
-    O --> F[Fake payment provider]
-    R --> D[(SQLite audit and operation ledger)]
-    O --> D
-```
-
-The proposal adapter has no payment authority or credentials. Exact-quote and
-schema validation cannot prove semantic correctness. Real-model and PayPal sandbox
-interfaces are disabled; there is no live-payment fallback.
-
-## Quickstart after the server and UI imports
-
-**Not available in this scaffold.** Use these commands only on a branch containing
-`cart_readback/cartreadback_app/` **and** `cart_readback/ui/`. A server-only import
-supports API testing, not the browser demo.
-
-Requirements: Python 3.11+ and a browser. Runtime uses the Python standard library;
-no package installation, API keys, accounts or UI build step are required.
-
-From the repository root:
+Python 3.11+ is required. Runtime has no third-party packages, API keys or account
+setup. From the repository root:
 
 ```sh
 cd cart_readback
 python -m cartreadback_app --port 8765 --db .local/cartreadback.sqlite3
 ```
 
-Open **http://127.0.0.1:8765**, not `localhost`: Host and Origin checks use that
-exact address. Choose a keyboard, add one or two requirements, compare the table
-and readback, then deliberately confirm any simulated checkout actions. Stop the
-server with `Ctrl-C`. Keep `.local/` private; its database stores local sessions
-and order history. Do not expose this demo server publicly or erase an unresolved
-checkout to manufacture a fresh success.
+The API is at `http://127.0.0.1:8765/api/bootstrap`; do not substitute `localhost`:
+Host/Origin checks use the exact configured address. `/` and the four allowlisted
+browser assets return 404 until the UI slice is imported. For an end-to-end
+API-only synthetic checkout, run `python scripts/smoke_http.py`; it owns a temporary
+server/database and carries cookies, CSRF, revision and deliberate action intent.
+It does not require a manually running server.
 
-## Checks after each component is imported
+Stop the server with `Ctrl-C`. Keep `.local/` private; it stores sessions and order
+history. Do not expose the service publicly or erase an unresolved checkout to
+manufacture a fresh success.
 
-The scaffold has no application tests to run. The commands below are the check
-entry points for later imports, **not results for this branch**. Run them from
-`cart_readback/`; they require no real model or payment service.
+## Backend checks
 
-**Server and independent Python checks:**
+Run from `cart_readback/`, with no UI/eval directory required:
 
 ```sh
 python -m unittest discover -s tests -v
@@ -123,63 +87,42 @@ python scripts/smoke_http.py --fault capture_timeout_before_success
 python scripts/smoke_http.py --fault create_timeout_after_success
 ```
 
-**UI checks:** Use [Node.js 22+](https://nodejs.org/download/release/v22.15.0/docs/api/globals.html)
-with global `fetch`, `structuredClone` and
-[`crypto.randomUUID`](https://nodejs.org/download/release/v22.15.0/docs/api/webcrypto.html#cryptorandomuuid)
-available. No `npm install` is needed. The wrapper starts an actual temporary
-loopback server for the HTTP cases; running the Node HTTP file alone without its
-test origin can skip those cases.
+The HTTP suite owns four temporary sentinel assets to test transport MIME and
+allowlist behavior. Those are not the production UI and do not replace later real
+asset/browser integration checks. Optional development lint is pinned to Ruff
+0.14.3 in `scripts/requirements-dev.txt`; it is not a runtime dependency. When
+available, use `ruff check cartreadback_app tests scripts review` and
+`ruff format --check cartreadback_app tests scripts review`.
+Record observed counts/exits against an exact revision rather than treating this
+command list or older local passes as evidence. This import's actual checks and
+separate-worker review are recorded in its draft PR.
 
-```sh
-python ui/check.py
-node --test review/test_independent_ui.mjs
-```
+## Evidence and remaining gates
 
-These cover static markup, logic, a minimal DOM and local HTTP, not real browser
-rendering, native keyboard behavior or accessibility certification.
+This is an **import of pre-existing local fixture work**. Its real issue-first
+GitHub pass covers import and subsequent review changes, not retroactive review
+of the original implementation. The ledger records source hashes and the genuine
+standalone-static-test correction. Imported independent tests are pre-existing
+work; fresh separate-worker execution, not their presence, supplies current
+review evidence.
 
-**Offline evaluation tooling:**
+Browser UI and evaluation/scorer tools are pending separate issue/branch/draft-PR
+imports. Real-model application integration/fresh semantic evaluation, PayPal
+sandbox lifecycle/recovery, rendered wide/narrow/native-keyboard/interrupted
+browser flows and customer baseline/value checks remain unverified. An earlier
+app-external uncontrolled pilot exposed synthetic regression material; it is not
+a hidden holdout, prompt-performance winner or real application integration.
 
-```sh
-python eval/score.py validate
-python -m unittest discover -s eval -p 'test_score.py' -v
-python -m compileall -q eval
-```
-
-The scorer validates and scores supplied predictions; it never calls a model.
-Optional development lint uses the pinned Ruff 0.14.3 requirement in the server
-import; it is not a runtime dependency. Record actual commands, exits, skipped
-cases and the exact reviewed revision rather than carrying old passes forward.
-
-## Evidence and release limits
-
-| Area | Current evidence or missing gate |
-| --- | --- |
-| This branch | Documentation/API-contract scaffold; no executable import or app-test claim. |
-| Local fixture | Pre-existing synthetic implementation and local checks; not validation of a future imported revision. |
-| Prompt exploration | An app-external, uncontrolled native-agent pilot used a synthetic set. That set is now exposed regression material, not a fresh hidden holdout; no prompt-performance winner is claimed. |
-| Real AI | Actual application model adapter and fresh semantic-grounding evaluation are still unverified. |
-| PayPal | Actual sandbox order/approval/requery/capture and timeout recovery are still unverified. |
-| Buyer experience | Rendered wide/narrow viewport, native keyboard, interrupted-flow and real-user baseline comparison remain open. No verified screenshot or working integration video is supplied. |
-| Publication | Open-source license/provenance, public release and contest submission require separate review and authority. |
-
-This is preparation for a contest project, **not a working AI + PayPal integration
-release or a production checkout system**.
+The server draft stacks on scaffold PR #2, not merged main. No independently
+merge-ready claim, formal APPROVE, merge/auto-merge, deployment, public visibility,
+license grant, cost, live payment or contest submission follows from these checks.
+This is **not a working AI + PayPal integration release**.
 
 ## Contributing and AI assistance
 
-The [import ledger](docs/IMPORT_PROVENANCE.md) records pre-existing local work,
-source revisions and subsequent import/review changes. An import does not
-retroactively establish issue-first development or reviewed GitHub history.
-
-Use a real issue, a scoped branch and a draft PR when repository work is
-authorized. A separate review worker checks the artifact and reruns relevant
-checks; findings can be discussed in the task, a shared review note or PR comments.
-The PR summarizes the evidence and unresolved items, not an invented approval.
-
-AI tools assisted planning, implementation, documentation and review of the local
-work. AI role names describe responsibilities, not separate human contributors or
-GitHub identities. Disclose material assistance and verification limits in the
-actual PR body; do not add AI authorship or coauthor commit trailers. A same-account
-worker review does not supply independent-account approval or permission to merge,
-publish, deploy, spend money or submit the project.
+Use real scoped issues, actual numbered branches and draft PRs. A separate review
+worker inspects the fixed artifact and reruns relevant checks; findings/fixes and
+unresolved facts are summarized truthfully. AI roles label responsibilities, not
+separate humans or GitHub accounts. Same-account worker evidence is not an
+independent-account approval. Material AI assistance belongs in PR descriptions,
+without AI-authorship/coauthor commit trailers or fabricated contributor history.
