@@ -1,9 +1,10 @@
 """Offline-only PayPal Orders wire mapping with injected fabricated exchanges.
 
-No HTTP implementation, credentials, OAuth flow, live fallback or CLI gate is
-shipped. The default fixture service never constructs this adapter. A future
-network transport and genuine buyer approval flow require separate authorization
-and review; these tests cannot establish genuine PayPal acceptance or settlement.
+This mapper has no HTTP implementation, credential loader or live-enable gate.
+The isolated HTTPS/OAuth groundwork cannot run directly under this offline label.
+The default fixture service never constructs this adapter. Genuine network and
+buyer approval require separate authorization/review; fabricated tests cannot
+establish PayPal acceptance or settlement.
 """
 
 import json
@@ -11,7 +12,7 @@ import queue
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import urlencode
 from uuid import UUID
@@ -283,7 +284,7 @@ class SandboxWireResponse:
     """Bounded in-memory fake response; no headers or credentials are exposed."""
 
     status_code: int
-    body: bytes
+    body: bytes = field(repr=False)
 
 
 class SandboxOfflineTransport(Protocol):
@@ -317,6 +318,13 @@ class OfflinePayPalSandboxAdapter:
 
     def __post_init__(self) -> None:
         """Validate local settings without inspecting environment or accounts."""
+        # A genuine-capable transport must never run under an offline label.
+        # Arbitrary injected Python remains trusted test code, not an I/O sandbox.
+        if (
+            getattr(self.transport, "requires_live_authorization", False)
+            is not False
+        ):
+            raise _invalid()
         _pattern(self.merchant_id, r"[2-9A-HJ-NP-Z]{13}")
         if self.buyer_return_origin is not None:
             _pattern(
