@@ -153,3 +153,88 @@ UNCONNECTED. Public deployment/security, semantic truth, customer benefit and
 real integration are not established; existing release/authorization gates stay
 in force. No AI/coauthor trailer, fictional identity or retroactive history claim
 is part of this import.
+
+
+## Buyer UI import — issue #5
+
+- Issue: https://github.com/thzthix/cart-readback/issues/5
+- Branch: `feat/5-buyer-review-ui`; draft target: `feat/3-fixture-server`.
+- Exact server base: `d2781cf7f603d83b552c9cd84371544357589bdd`, draft PR #4,
+  itself stacked on unmerged scaffold PR #2. Main is not an integrated build.
+- Import of pre-existing local fixture work; this issue-first GitHub pass covers
+  the import and subsequent review changes, not retroactive review of the original
+  implementation. Source: local `output/paypal-agent-contest/cart_readback/`.
+- Exactly ten new UI/design/test/check paths plus root README and this ledger.
+  No server/API, evaluation, archives, images, dependencies or provider changes.
+- Chloe | AI Design/Frontend (`import_buyer_interface`) assembled this import and
+  ran fresh checks. The imported independent UI suite is pre-existing work, not
+  newly written review or evidence of a second human/account's approval.
+
+### UI source and imported hashes (SHA-256)
+
+Source paths are the same paths under the local source root. Imported hashes bind
+bytes, not semantic correctness, browser rendering or real-provider behavior.
+This ledger cannot contain its own final hash/commit; the draft PR records the
+complete frozen manifest, actual head and separately performed review/retests.
+
+| Repository path | Original source SHA-256 | Imported SHA-256 | Treatment |
+| --- | --- | --- | --- |
+| `cart_readback/ui/DESIGN.md` | `160c710d8bfc3d712917e647742d9e4ddcd0f9cd4b3968e2b4b2fca8c4c1176f` | `2920a3493c7e017f6a642dfefead36d9813e703f92ed949f465bd9cd2a4a3eaa` | current import-context/archive-link correction; historical checks explicitly labelled |
+| `cart_readback/ui/index.html` | `39c9186ef002ce06e45372dfa8caf7dcb10b5925ae5db5e70c5f252cd6dd5d32` | `39c9186ef002ce06e45372dfa8caf7dcb10b5925ae5db5e70c5f252cd6dd5d32` | unchanged pre-existing local source |
+| `cart_readback/ui/styles.css` | `887cb132214e83c7d680d5dc7a100fcbff5206b0e0df61349114088101f19ba9` | `887cb132214e83c7d680d5dc7a100fcbff5206b0e0df61349114088101f19ba9` | unchanged pre-existing local source |
+| `cart_readback/ui/core.mjs` | `bed52c44271fa2d557c405c159237d4e97b2eeb31e3b2f074bdd8de222bb2842` | `bed52c44271fa2d557c405c159237d4e97b2eeb31e3b2f074bdd8de222bb2842` | unchanged pre-existing local source |
+| `cart_readback/ui/app.mjs` | `a2b29e403e4950bb8c60033fec55e9903efbee5d547e8c4e2fabd5db4d859e7a` | `6da3a1dc6017758d8178883b1309f36c662ec06778aeec092723d1256934ebea` | UI1 body-read deadline recovery correction |
+| `cart_readback/ui/core.test.mjs` | `051f648761cdd718c7303752152ef4b2ad7e00ef93287b3a8ebb409643fa22e9` | `051f648761cdd718c7303752152ef4b2ad7e00ef93287b3a8ebb409643fa22e9` | unchanged pre-existing local source |
+| `cart_readback/ui/app.test.mjs` | `dc5fc1a3bc88c4ed3c3fbbf76a108752d6e548a669f4e929d5c16f232ff1aff0` | `90aa17b32d04303a635a7bc8a5e6209231f7c21b6d3e615b4b64274ad39c25c8` | UI1 native Fetch partial-body timeout regression |
+| `cart_readback/ui/http.test.mjs` | `86315dd7ef76914102bfcf8a4bbd58cc41ab15bb524f985344c2e20336981d79` | `86315dd7ef76914102bfcf8a4bbd58cc41ab15bb524f985344c2e20336981d79` | unchanged pre-existing local source |
+| `cart_readback/ui/check.py` | `bfc5ed361d73aca592a91f09863f2abc55deca1380fe650e195d798b73026cd2` | `bfc5ed361d73aca592a91f09863f2abc55deca1380fe650e195d798b73026cd2` | unchanged pre-existing local source |
+| `cart_readback/review/test_independent_ui.mjs` | `2871e5956de2aaf30636828bd24152fa7f56d1afc5b1ff5bb6890da04ba502db` | `2871e5956de2aaf30636828bd24152fa7f56d1afc5b1ff5bb6890da04ba502db` | unchanged pre-existing local source |
+
+### Actual import adaptations and fresh evidence limits
+
+Seven UI/test/check inputs remain byte-identical to their local originals.
+`app.mjs` and `app.test.mjs` have the subsequent UI1 fix/regression below. DESIGN.md
+now identifies the real import issue/branch/base, distinguishes historical local
+checks from fresh import-head evidence, and renders excluded archival research
+references as plain context rather than broken repository links. Root README is
+adapted from the verified server base for actual UI quickstart/checks and status.
+The UI preserves the same-source non-AI comparison table and complete original
+description before analysis, explicit per-condition UNKNOWN/conflict review,
+codepoint quotations and separate deliberate fixture checkout actions. No new
+design, screenshots, users, runtime AI or PayPal integration is fabricated.
+
+Fresh final author execution observed 22 Node core/minimal-fake-DOM tests and three
+actual loopback HTTP/client cases via `python ui/check.py` (25 total, zero skips),
+seven imported independent Node checks, Python 41 domain/HTTP +29 independent
+tests, compile, four smoke modes, and existing Ruff 0.14.3 lint/format-check
+including `ui/check.py` (16 files formatted) all exiting 0. These are synthetic
+local checks, not native rendering/accessibility, semantic or real-provider proof.
+Final exact-artifact reruns and separate-worker findings belong in the draft PR.
+
+Separate read-only reviewer `review_buyer_interface_import` found UI1 (S2): the
+15-second AbortController deadline ended when response headers arrived, before
+JSON body completion. A flushed 200 response with a stalled body could leave a
+mutation busy forever and disable reload. Chloe changed only the client wrapper
+to await parsing inside the deadline, for bootstrap and mutations. The new
+regression uses native Node Fetch against a loopback partial-body server (not
+rendering): after native-Fetch warmup it accelerates only the app deadline,
+requires abort, one dispatch/no replay, an honest uncertainty pause, enabled
+reload and same-order recovery. In a disposable copy of original app.mjs it
+failed specifically because the signal was not aborted; the fixed case passes.
+No server/API semantics or operation/consent checks were weakened. The reviewer
+independently retests the new frozen revision; its separate create-specific
+partial-body probe is local review evidence, not shipped or invented browser QA.
+
+A fresh supported CUA HTTP attempt for this staged UI returned
+`net::ERR_CONNECTION_REFUSED` for `http://127.0.0.1:8765/`. The prior explicitly
+denied `file://` route was not retried; no alternate origin, proxy, host binding
+or browser-policy workaround was used. Native wide/narrow rendering, keyboard/
+focus, browser Back/Forward and interrupted real-browser flows remain not run.
+Static/contrast, fake-DOM and real HTTP tests are not substitutes for those gates.
+
+Evaluation tooling remains absent; the earlier server-only pending-UI statements
+above describe their original revision and are superseded by this section only.
+Genuine inference and PayPal sandbox remain UNCONNECTED. Same-source buyer value,
+production security, model semantics and real payment/recovery remain unverified.
+No merge, formal APPROVE, deployment, public release, license, account or spend
+authority follows from this fixture import.
