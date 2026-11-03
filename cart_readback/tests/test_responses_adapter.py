@@ -67,6 +67,7 @@ def envelope(results):
         "object": "response",
         "id": "resp_fabricated_test",
         "model": "gpt-6-luna",
+        "service_tier": "default",
         "status": "completed",
         "error": None,
         "incomplete_details": None,
@@ -193,6 +194,40 @@ class ResponsesTests(unittest.TestCase):
                     "MODEL_UNAVAILABLE", lambda: InferenceConfig(**kwargs)
                 )
 
+    def test_service_tier_is_explicit_and_mismatch_blocks_instance(self):
+        for tier in (None, "auto", "priority", "flex", "fast", 1, True):
+            with self.subTest(tier=tier):
+                value = envelope(self.results)
+                if tier is None:
+                    value.pop("service_tier")
+                else:
+                    value["service_tier"] = tier
+                adapter, fake = self.adapter(value)
+                self.assert_code(
+                    "MODEL_BUDGET_EXCEEDED",
+                    adapter.observe,
+                    self.source,
+                    self.conditions,
+                )
+                self.assert_code(
+                    "MODEL_UNAVAILABLE",
+                    adapter.observe,
+                    self.source,
+                    self.conditions,
+                )
+                self.assertEqual(1, len(fake.calls))
+        for tier in ("auto", "priority", "flex", None):
+            with self.subTest(requested=tier):
+                self.assert_code(
+                    "MODEL_UNAVAILABLE",
+                    lambda: InferenceConfig(service_tier=tier),
+                )
+        adapter, _ = self.adapter()
+        observed = adapter.observe(self.source, self.conditions)
+        self.assertEqual("default", adapter.metadata["service_tier"])
+        self.assertEqual("default", observed.service_tier_requested)
+        self.assertEqual("default", observed.service_tier_returned)
+
     def test_asset_hash_mismatch_fails_before_transport(self):
         original = Path.read_bytes
 
@@ -213,6 +248,7 @@ class ResponsesTests(unittest.TestCase):
             set(payload),
             {
                 "model",
+                "service_tier",
                 "instructions",
                 "input",
                 "text",
@@ -226,6 +262,7 @@ class ResponsesTests(unittest.TestCase):
             },
         )
         self.assertEqual(payload["model"], "gpt-6-luna")
+        self.assertEqual(payload["service_tier"], "default")
         self.assertEqual(payload["reasoning"], {"effort": "none"})
         self.assertEqual(payload["tools"], [])
         self.assertEqual(payload["prompt_cache_options"], {"mode": "explicit"})
