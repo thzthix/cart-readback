@@ -44,6 +44,19 @@ CREATE TABLE IF NOT EXISTS fixture_provider_orders (
     provider_order_id TEXT PRIMARY KEY, request_id TEXT UNIQUE NOT NULL,
     document TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS analysis_operations (
+    operation_id TEXT PRIMARY KEY, sid TEXT NOT NULL, review_id TEXT NOT NULL,
+    input_document TEXT NOT NULL, input_hash TEXT NOT NULL,
+    checkout_hash TEXT NOT NULL,
+    reserved_revision INTEGER NOT NULL, is_fixture INTEGER NOT NULL,
+    status TEXT NOT NULL, dispatch_token TEXT NOT NULL DEFAULT '',
+    reserved_at TEXT NOT NULL, dispatched_at TEXT NOT NULL DEFAULT '',
+    observed_at TEXT NOT NULL DEFAULT '', observation TEXT NOT NULL DEFAULT '',
+    error_code TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS single_accounted_analysis
+ON analysis_operations(is_fixture)
+WHERE is_fixture = 0 AND status IN ('RESERVED', 'DISPATCHED');
 CREATE TABLE IF NOT EXISTS events (
     event_id INTEGER PRIMARY KEY, sid TEXT NOT NULL, event TEXT NOT NULL,
     details TEXT NOT NULL,

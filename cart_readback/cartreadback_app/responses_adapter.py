@@ -1,7 +1,7 @@
 """Offline-tested Responses wire boundary with an explicitly injected transport.
 
-There is no network implementation, credential lookup, live runner or application
-integration here. Fabricated test envelopes exercise defensive local behavior,
+There is no network implementation, credential lookup or live runner here. The
+service can explicitly inject this adapter for offline lifecycle tests. Fabricated test envelopes exercise defensive local behavior,
 not genuine vendor behavior or provider schema acceptance.
 """
 
