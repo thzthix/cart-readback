@@ -93,45 +93,73 @@ class IntegratedBudgetTests(unittest.TestCase):
         self.assertNotIn("fabricated-price", canonical(self.flow.result))
         self.flow.confirm()
 
-    def test_count_error_or_wrong_exact_bytes_rolls_back_everything(self):
-        for counter in [
-            lambda _: None,
-            lambda _: dataclasses.replace(
-                self.budget.count(b"x"), request_sha256="0" * 64
-            ),
-        ]:
-            self.service.analysis_budget = OfflineAnalysisBudget(
-                self.budget.policy, counter
-            )
-            with self.assertRaises(AppError):
-                self.flow.analyze()
-            self.assertFalse(self.rows("analysis_operations"))
-            self.assertFalse(self.rows("budget_operations"))
-            self.assertFalse(self.rows("budget_identity"))
-            self.assertIsNone(self.service.bootstrap(self.flow.sid)["checkout"])
-
+    def test_count_error_or_wrong_exact_bytes_keeps_preflight_unknown(self):
         def failing(_):
             raise RuntimeError("synthetic secret must not escape")
 
-        self.service.analysis_budget = OfflineAnalysisBudget(
-            self.budget.policy, failing
-        )
-        with self.assertRaises(AppError) as caught:
-            self.flow.analyze()
-        self.assertNotIn("synthetic secret", str(caught.exception))
-        self.assertEqual(0, self.transport.calls)
+        for index, counter in enumerate(
+            [
+                lambda _: None,
+                lambda _: dataclasses.replace(
+                    self.budget.count(b"x"), request_sha256="0" * 64
+                ),
+                failing,
+            ]
+        ):
+            self.service.close()
+            self.store = Store(
+                Path(self.temp.name) / f"count-error-{index}.sqlite3"
+            )
+            self.transport = AuthoredTransport(self.store)
+            self.adapter = OfflineResponsesAdapter(self.transport)
+            self.budget = budget_for(self.adapter)
+            self.service = Service(
+                self.store,
+                self.adapter,
+                analysis_budget=OfflineAnalysisBudget(
+                    self.budget.policy, counter
+                ),
+            )
+            self.flow = Workflow(self.service)
+            with self.assertRaises(AppError) as caught:
+                self.flow.analyze()
+            self.assertNotIn("synthetic secret", str(caught.exception))
+            self.assertFalse(self.rows("analysis_operations"))
+            self.assertFalse(self.rows("budget_operations"))
+            self.assertEqual(1, len(self.rows("budget_identity")))
+            self.assertEqual(
+                "UNKNOWN", self.rows("analysis_preflights")[0]["status"]
+            )
+            current = self.service.bootstrap(self.flow.sid)["checkout"]
+            self.assertEqual("ANALYSIS_BLOCKED", current["state"])
+            self.assertIsNone(current["snapshot_hash"])
+            self.assertEqual(0, self.transport.calls)
 
-    def test_reservation_failure_rolls_back_budget_and_checkout(self):
+    def test_reservation_failure_rolls_back_budget_but_keeps_count_intent(self):
+        original = self.service._write_review
+        writes = 0
+
+        def fail_second(connection, session):
+            nonlocal writes
+            writes += 1
+            if writes == 2:
+                raise RuntimeError("fabricated generation write failure")
+            original(connection, session)
+
         with mock.patch.object(
-            self.service,
-            "_write_review",
-            side_effect=RuntimeError("fabricated write failure"),
+            self.service, "_write_review", side_effect=fail_second
         ):
             with self.assertRaises(RuntimeError):
                 self.flow.analyze()
         self.assertFalse(self.rows("analysis_operations"))
         self.assertFalse(self.rows("budget_operations"))
-        self.assertFalse(self.rows("budget_identity"))
+        self.assertEqual(1, len(self.rows("budget_identity")))
+        self.assertEqual(
+            "COUNTING", self.rows("analysis_preflights")[0]["status"]
+        )
+        current = self.service.bootstrap(self.flow.sid)["checkout"]
+        self.assertEqual("ANALYSIS_BLOCKED", current["state"])
+        self.assertIsNone(current["snapshot_hash"])
         self.assertEqual(0, self.transport.calls)
 
     def test_claim_write_failure_rolls_back_claim_then_restart_is_unknown(self):
@@ -180,7 +208,7 @@ class IntegratedBudgetTests(unittest.TestCase):
         )
         self.assertEqual(1, self.transport.calls)
 
-    def test_request_drift_before_claim_is_unknown_without_call(self):
+    def test_request_drift_before_count_claim_is_stale_without_call(self):
         original = self.adapter.build_request
         calls = 0
 
@@ -193,10 +221,11 @@ class IntegratedBudgetTests(unittest.TestCase):
         with mock.patch.object(
             self.adapter, "build_request", side_effect=changed
         ):
-            self.flow.analyze()
+            with self.assertRaises(AppError):
+                self.flow.analyze()
         self.assertEqual(0, self.transport.calls)
-        self.assertEqual("UNKNOWN", self.rows("budget_operations")[0]["status"])
-        self.assertIsNone(self.flow.checkout["snapshot_hash"])
+        self.assertFalse(self.rows("budget_operations"))
+        self.assertEqual("STALE", self.rows("analysis_preflights")[0]["status"])
 
     def test_request_drift_after_claim_is_rejected_before_transport(self):
         original = self.adapter.build_request
