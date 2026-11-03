@@ -10,7 +10,7 @@
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to review</a>
-  <div class="mode-strip"><strong>Fixture mode · sample shop</strong><span>No real AI inference, PayPal connection, or payment.</span></div>
+  <div class="mode-strip"><strong id="mode-label">Fixture mode · sample shop</strong><span>No real AI inference, PayPal connection, or payment.</span></div>
   <header class="masthead">
     <a class="wordmark" href="#main" aria-label="CartReadback home">CartReadback<span aria-hidden="true">↳</span></a>
     <span class="edition">A small-print review / 01</span>
@@ -37,19 +37,19 @@
           <fieldset><legend><label class="check-label"><input id="want-layout" type="checkbox"><span>Keyboard layout</span></label></legend><label for="layout" class="field-label">I want this key layout</label><select id="layout" disabled><option value="UK_QWERTY">UK QWERTY</option><option value="DE_QWERTZ">German QWERTZ</option><option value="US_QWERTY">US QWERTY</option></select><p class="caption">The printed key layout. Physical ANSI/ISO geometry alone does not establish this.</p></fieldset>
           <fieldset><legend><label class="check-label"><input id="want-cable" type="checkbox"><span>Included cable</span></label></legend><label for="cable" class="field-label">I want the box to include</label><select id="cable" disabled><option value="any cable">Any cable</option><option value="USB-C to USB-C">USB-C to USB-C</option><option value="USB-A to USB-C">USB-A to USB-C</option></select><p class="caption">A pictured cable is not evidence that it is included.</p></fieldset>
         </div>
-        <div class="action-row"><button id="analyze" type="submit" disabled>Read back this selection <span aria-hidden="true">→</span></button><span class="caption">Scripted fixture analysis · no model call</span></div>
+        <div class="action-row"><button id="analyze" type="submit" disabled>Read back this selection <span aria-hidden="true">→</span></button><span id="analysis-label" class="caption">Scripted fixture analysis · no model call</span></div>
       </form>
     </section>
     <section id="review-section" class="section" aria-labelledby="review-heading" hidden>
-      <div class="section-title"><span class="step" aria-hidden="true">03</span><div><h2 id="review-heading" tabindex="-1">Read the evidence, then decide</h2><p>Scripted fixture suggestions. A matching quote is not a guarantee about the product.</p></div></div>
+      <div class="section-title"><span class="step" aria-hidden="true">03</span><div><h2 id="review-heading" tabindex="-1">Read the evidence, then decide</h2><p id="suggestion-label">Scripted fixture suggestions. A matching quote is not a guarantee about the product.</p></div></div>
       <p id="source-changed" class="notice" hidden></p>
       <div class="review-columns">
         <article class="source-column" aria-labelledby="source-heading"><div class="column-heading"><h3 id="source-heading">Original product description</h3><span class="small-tag">Synthetic source</span></div><p id="source-meta" class="mono caption"></p><div id="source-text" class="source-text"></div><details><summary>Source fingerprint</summary><p id="source-hash" class="mono caption"></p></details></article>
-        <article class="readback-column" aria-labelledby="readback-heading"><div class="column-heading"><h3 id="readback-heading">Your conditions, read back</h3><span class="small-tag">Scripted · not AI</span></div><div id="readback-results"></div><p class="caption">Change the SKU or a condition above to start a fresh review. Previous confirmation will no longer apply.</p></article>
+        <article class="readback-column" aria-labelledby="readback-heading"><div class="column-heading"><h3 id="readback-heading">Your conditions, read back</h3><span id="analysis-badge" class="small-tag">Scripted · not AI</span></div><div id="readback-results"></div><p class="caption">Change the SKU or a condition above to start a fresh review. Previous confirmation will no longer apply.</p></article>
       </div>
       <div id="review-blocked" class="notice danger" hidden></div>
       <div id="snapshot" class="snapshot">
-        <div class="snapshot-title"><h3>Check the exact order</h3><span class="small-tag">Fixture review</span></div>
+        <div class="snapshot-title"><h3>Check the exact order</h3><span id="review-badge" class="small-tag">Fixture review</span></div>
         <dl id="snapshot-details" class="summary-list"></dl>
         <div id="acknowledgements"></div>
         <label class="check-label final-check"><input id="confirm-snapshot" type="checkbox"><span>I reviewed the exact SKU, item total, description, and all selected conditions above.</span></label>
@@ -57,11 +57,11 @@
       </div>
     </section>
     <section id="order-section" class="section" aria-labelledby="order-heading" hidden>
-      <div class="section-title"><span class="step" aria-hidden="true">04</span><div><h2 id="order-heading">Same reviewed item. Separate order approval.</h2><p>Fixture order rehearsal only. PayPal is not configured. No money moves.</p></div></div>
+      <div class="section-title"><span class="step" aria-hidden="true">04</span><div><h2 id="order-heading">Same reviewed item. Separate order approval.</h2><p id="payment-label">Fixture order rehearsal only. PayPal is not configured. No money moves.</p></div></div>
       <div class="order-workspace"><div><p id="order-state" class="order-state"></p><dl id="order-details" class="summary-list"></dl><p id="order-help" class="measure"></p><div id="order-controls" class="action-row"></div></div><aside class="order-note"><h3>What this does not prove</h3><p>A real checkout must create a PayPal sandbox order, return from buyer approval, recheck the same order on the server, and capture only after a fresh final confirmation.</p><p>This fixture cannot test those network or provider facts.</p></aside></div>
     </section>
     <noscript><p class="notice danger">JavaScript is needed for this local fixture. No checkout can run without it.</p></noscript>
   </main>
-  <footer><span>CartReadback / local prototype</span><span>Six SKUs · one item · fixture mode only</span></footer>
+  <footer><span>CartReadback / local prototype</span><span>Six SKUs · one item · offline only</span></footer>
 </body>
 </html>

@@ -8,9 +8,9 @@ Status: v1 implementation contract, frozen for Ryan/Chloe on 2026-11-02 UTC. Not
 - `GET /api/bootstrap` may initialize a random browser session and returns a session-bound CSRF token. Cookie: random opaque owner/session ID, `HttpOnly; SameSite=Strict; Path=/`; `Secure` when HTTPS. Do not put ownership/CSRF in URL/localStorage. Missing owner on later requests is not a wildcard owner.
 - `/api/orders` and `/capture` additionally require `Idempotency-Key`: a UUID generated once for each buyer create/capture action, reused for that action after transport retries or reload. Persist its binding to owner + route + canonical semantic payload hash (excluding expected_revision, which is checked independently); reuse with different semantic content is a 409 `IDEMPOTENCY_CONFLICT`. These browser keys are not upstream PayPal request IDs: upstream keys remain separate server-generated UUIDs and never derive money/authority from the client. Durable unique business-operation constraints remain necessary even if client sends a fresh key.
 - Every POST requires `Content-Type: application/json`, an exact allowed Origin and `X-CSRF-Token`. The expected owner is resolved from the cookie, never a JSON field. GET/HEAD never approve, verify, capture, reconcile or alter business state. Fixture approval is an explicit POST, never an automatic timer.
-- Body maximum 16 KiB; reject malformed UTF-8/JSON, duplicate JSON keys, NaN/Infinity, unexpected fields, wrong exact scalar types (`bool` is not an integer), unexpected nesting (maximum four levels) or oversized values and unsupported methods. Reject unknown route/query parameters. Client sends no money, currency, merchant, arbitrary provider URL or provider idempotency key.
+- Body maximum 16 KiB; reject malformed UTF-8/JSON, duplicate JSON keys, NaN/Infinity, unexpected fields, wrong exact scalar types (`bool` is not an integer), unexpected nesting (maximum four levels) or oversized values and unsupported methods. Reject unknown route/query parameters. Client sends no money, currency, merchant, arbitrary provider URL or provider idempotency key. C11 narrowly allows read-only buyer-return query fields and a correlated provider token in its explicit return POST.
 - All mutation requests include `expected_revision`: an integer >= 0, exact current **session aggregate** revision. Validate ownership and revision within the same SQLite write transaction as the transition. Every accepted state transition increments revision once; read-only bootstrap does not. Reserve pending provider work durably before dispatch; that transition also advances revision. Responses return the final current revision. Invalid requests cause no business-state transition; a detected stale business binding may explicitly transition to `REVIEW_REQUIRED` and return the new revision.
-- Success envelope: `{ "api_version":"1", "mode":"fixture", "revision":1, "checkout":{...} }`. Every displayed output retains the fixture/sandbox distinction. No field calls fixture output real AI or PayPal evidence.
+- Success envelope: `{ "api_version":"1", "mode":"fixture", "revision":1, "checkout":{...} }`. C11 adds independent provider descriptors and aggregate `offline` mode for injected nonfixture seams. Every displayed output retains the fixture/offline/sandbox distinction. No field calls fixture output real AI or PayPal evidence.
 - Error envelope: `{ "api_version":"1", "mode":"fixture", "revision":1, "error":{"code":"STALE_REVISION","message":"Reload the current review before continuing."} }`. Do not expose stack traces, secrets, provider credentials or complete provider request headers. Bootstrap after an error retrieves current authoritative state; do not silently replay a payment intent.
 - HTTP: 400 invalid schema/body, 403 CSRF/origin/owner failure (unknown or foreign entity may be 404), 404 missing owned resource, 409 stale revision/snapshot/state or payment uncertainty, 413 oversized body, 415 content type, 422 invalid source/model result, 503 disabled adapter/provider unavailable. Error codes are stable; UI does not parse English text.
 
@@ -150,3 +150,70 @@ Official sources inspected 2026-11-02 UTC: [Orders v2 reference](https://develop
 Local planning identifiers CR-001 (contract), CR-002 (backend), CR-003 (UI), and CR-004 (independent safety review) are historical planning labels, **not GitHub issue numbers**. The private repository now exists; issue #1 and branch `chore/1-repository-scaffold` cover this documentation/API-contract scaffold import. Executable imports require their own real issues and branches. Draft PR existence and final head must be verified in GitHub; this contract is not evidence of either. Ryan owns deterministic backend/fixture tests; Chloe owns UI and same-material baseline; Blair independently attacks stale/forged/unknown/race flows; dot resolves scope changes.
 
 Acceptance: six fixture SKUs; full no-money happy path; individually unchecked conflict/unknown acknowledgement; stale catalog/source/model/intent cannot capture; money forgery rejected; duplicate/foreign IDs rejected; CSRF/origin/body limits enforced; durable timeout/crash unknown path and no recreation; repeated/concurrent operations do not double-dispatch; malformed/injected model/source cannot cross payment boundary; UI Unicode highlights agree with backend source; no external calls in default mode. Report actual checks only. Real AI inference, real PayPal sandbox, customer demand/time savings and public deployment remain not run.
+
+
+## C11 — Offline buyer-return and independent provider modes
+
+Issue #19 extends v1 without enabling provider network I/O. Every server envelope,
+including errors, includes `providers` with independent `analysis` and `payment`
+objects and `network_enabled:false`. Analysis `mode` is `fixture` when metadata
+`is_fixture:true`, otherwise `injected-offline`; payment `mode` is the adapter's
+own identity (`fixture` or supported `paypal-sandbox-offline`). Both objects carry
+an exact boolean `is_fixture`. Aggregate `mode` is `fixture` only when both are
+fixtures, otherwise `offline`. Unsupported adapter identities fail closed in the
+UI. Legacy all-fixture client test envelopes may omit descriptors; offline ones
+cannot. These describe this build's configured offline seams, not a guarantee
+about arbitrary executable adapter code supplied by an embedding application.
+A future network-capable factory must revise/review this contract before use.
+
+Only an explicitly injected offline PayPal adapter may prepare buyer callbacks
+by setting `buyer_return_origin` to the exact literal-loopback server origin.
+`LocalServer` rejects an origin mismatch at construction. The CLI has no selector.
+The Service generates 32 random state bytes, stores an owner/order/snapshot-bound
+hash and 20-minute expiry in private checkout context, and freezes callback URLs
+in the existing create-operation wire ledger. Origin/configuration changes alter
+the adapter identity. The raw state is not in bootstrap/checkout/error/audit
+output; it is present only in the private durable callback request. Private DBs
+must remain private.
+
+Create preparation uses `payment_source.paypal.experience_context` with
+`user_action:CONTINUE`, `shipping_preference:NO_SHIPPING`, fixed return/cancel
+URLs under `/payment-return`, and outcome `approved`/`cancelled`. These are
+fabricated-envelope tests, not proof PayPal accepts this payload, literal-loopback
+URLs or the exact chosen callback query shape.
+
+`GET /payment-return?order_id=<uuid-v4>&state=<43-base64url>&outcome=approved|cancelled&token=<provider-id>`
+only serves the same static app. Optional bounded `PayerID` is ignored. Duplicate,
+unknown, missing, malformed or oversized fields fail closed. This GET does not
+resolve an owner, initialize a session, query a provider, consume state or capture.
+After immediate query removal, `/payment-return` remains a reloadable static
+route. Strict cookies are unchanged: the app obtains the existing owner/CSRF via
+same-origin bootstrap. No cookie relaxation is inferred from a return.
+
+The UI strips the callback query synchronously before bootstrap and keeps return
+values only in page memory. It checks the returned local/provider IDs against
+owned current state and offers an explicit return recheck button. It never
+navigates a fabricated sandbox URL, auto-POSTs on landing, restores a return from
+storage, or treats a callback as approval. Refresh/Back/Forward do not replay the
+POST and clear final capture intent.
+
+`POST /api/orders/{order_id}/buyer-return` requires the normal exact Origin,
+existing owner, CSRF, current revision/snapshot, and exactly these extra fields:
+`return_state`, `provider_order_id`, `outcome`. It accepts only ORDER_CREATED or
+PAYPAL_APPROVED, current configuration/source/consent and the unexpired,
+unconsumed matching state. It performs a read-only GET for the same stored
+provider order outside the DB lock, then revalidates all bindings before commit.
+
+Only complete verified APPROVED facts can establish SERVER_RECHECKED. A forged
+approved return while provider facts remain CREATED consumes state and retains
+ORDER_CREATED. Mismatch/timeout consumes state and preserves PAYMENT_UNKNOWN,
+with reconciliation on the same order. A successful cancellation return consumes
+state, records cancellation intent and preserves the existing CREATED or APPROVED
+order. It never asserts a remote void/refund/failure, unlocks editing, recreates an
+order or captures. All returns still require a separate fresh explicit final
+capture action, with the existing mandatory provider GET and durable reservation.
+
+Public `order.buyer_return` exposes only availability, expiry, consumed/cancelled
+flags. Validated `order.approval_url`, when prepared, is nonnavigable offline text.
+The exact required PayPal return parameters, actual session/cookie behavior,
+provider approval/capture/recovery and native browser behavior remain unverified.

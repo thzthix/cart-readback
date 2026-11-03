@@ -1,9 +1,30 @@
 import {conditionLabel, confirmPayload, displayValue, formatMoney, isOrderLocked, mergedEvidenceRanges,
-  operationKey, OUTCOMES, validateBootstrap, validateCheckout} from './core.mjs';
+  operationKey, OUTCOMES, validateBootstrap, validateCheckout, validateEnvelope, parseBuyerReturn, buyerReturnPayload} from './core.mjs';
 
 const $ = id => document.getElementById(id);
 const state = {catalog: [], revision: 0, csrf: '', checkout: null, selected: '', busy: false,
-  blocked: false, uncertain: false, epoch: 0, acknowledgements: new Set()};
+  providers: undefined, blocked: false, uncertain: false, epoch: 0, acknowledgements: new Set()};
+
+// Strip callback material synchronously before the first fetch. Never persist it.
+let pendingReturn = null;
+let returnError = null;
+if (globalThis.location?.pathname === '/payment-return') {
+  try { pendingReturn = parseBuyerReturn(location.pathname, location.search, location.hash); }
+  catch (error) { returnError = error; }
+  try { history.replaceState(null, '', '/payment-return'); }
+  catch { pendingReturn = null; returnError = new Error('Could not clear the return address. All actions are blocked.'); }
+}
+function renderModes() {
+  const injected = state.providers?.analysis.mode === 'injected-offline';
+  const paypal = state.providers?.payment.mode === 'paypal-sandbox-offline';
+  $('mode-label').textContent = injected || paypal ? 'Offline mode · sample shop' : 'Fixture mode · sample shop';
+  $('analysis-label').textContent = injected ? 'Injected-offline analysis · no genuine inference established' : 'Scripted fixture analysis · no model call';
+  $('suggestion-label').textContent = injected ? 'Injected-offline suggestions. Matching quotes do not prove semantic correctness.' : 'Scripted fixture suggestions. A matching quote is not a guarantee about the product.';
+  $('analysis-badge').textContent = injected ? 'Injected offline' : 'Scripted · not AI';
+  $('review-badge').textContent = injected ? 'Offline review' : 'Fixture review';
+  $('confirm').textContent = injected ? 'Confirm this offline review' : 'Confirm this fixture review';
+  $('payment-label').textContent = paypal ? 'Fabricated PayPal wire · offline only. No PayPal connection or money movement.' : 'Fixture order rehearsal only. PayPal is not configured. No money moves.';
+}
 
 /** Create elements without parsing catalog or model strings as HTML. */
 function node(tag, text, className) {
@@ -156,7 +177,7 @@ function renderReview() {
   $('confirm-snapshot').parentElement.hidden = !reviewing;
   $('confirm').hidden = !reviewing;
   $('confirmation-state').textContent = checkout.confirmation_id
-    ? 'This fixture review is confirmed. This is not PayPal approval or a payment.'
+    ? 'This review is confirmed. This is not PayPal approval or a payment.'
     : 'Confirmation is your decision, not the suggestion’s.';
   renderOrder(); updateControls();
 }
@@ -172,7 +193,8 @@ function renderOrder() {
   if (!checkout?.confirmation_id && !checkout?.order) return;
   const controls = $('order-controls'); controls.replaceChildren();
   const details = $('order-details'); details.replaceChildren();
-  summaryRow(details, 'Mode', 'Fixture provider — not PayPal');
+  const paypal = state.providers?.payment.mode === 'paypal-sandbox-offline';
+  summaryRow(details, 'Mode', paypal ? 'Fabricated PayPal wire — offline, not a PayPal observation' : 'Fixture provider — not PayPal');
   summaryRow(details, 'Order item', `${checkout.sku_id} × 1 / ${formatMoney(checkout.amount.minor, checkout.amount.currency)}`);
   summaryRow(details, 'Reviewed version', checkout.snapshot_hash, true);
   const order = checkout.order;
@@ -180,6 +202,8 @@ function renderOrder() {
     summaryRow(details, 'Local order', order.order_id, true);
     summaryRow(details, 'Synthetic provider ref.', order.provider_order_id || 'Not returned', true);
     summaryRow(details, 'Server state', checkout.state, true);
+    if (order.approval_url) summaryRow(details, 'Fabricated approval URL (not navigable)', order.approval_url, true);
+    if (order.buyer_return?.cancelled) summaryRow(details, 'Buyer return', 'Cancellation recorded. Existing order retained; no remote void or replacement.');
   }
   const base = order ? `/api/orders/${encodeURIComponent(order.order_id)}` : '';
   const states = {
@@ -193,35 +217,54 @@ function renderOrder() {
     COMPLETED: ['Fixture capture recorded — not a payment', 'The local simulation reached its completed state. No PayPal API was called and no money moved.'],
   };
   const [title, help] = states[checkout.state] || ['Order is held', 'This state is not supported by this UI. No new action is enabled.'];
-  $('order-state').textContent = title; $('order-help').textContent = help;
+  $('order-state').textContent = paypal ? title.replaceAll('Fixture', 'Offline').replaceAll('fixture', 'offline') : title;
+  $('order-help').textContent = paypal ? 'Fabricated PayPal wire only. No external approval window will open. Check this same stored order; browser return data does not prove approval. Capture requires a fresh final decision.' : help;
+  if (pendingReturn) {
+    try {
+      buyerReturnPayload(pendingReturn, checkout, state.revision, state.providers);
+      const returned = node('button', pendingReturn.outcome === 'cancelled' ? 'Record offline buyer cancellation' : 'Recheck this offline buyer return');
+      returned.type = 'button'; returned.dataset.orderAction = 'buyer-return';
+      returned.addEventListener('click', () => {
+        if (state.busy || state.blocked || state.uncertain || !pendingReturn) return;
+        try {
+          const payload = buyerReturnPayload(pendingReturn, state.checkout, state.revision, state.providers);
+          pendingReturn = null; // Even an uncertain response must not replay this return.
+          mutate(`${base}/buyer-return`, payload, {action: 'buyer-return'});
+        } catch (error) { pendingReturn = null; state.blocked = true; showError(error.message); updateControls(); }
+      });
+      controls.append(returned);
+      return;
+    } catch (error) { pendingReturn = null; returnError = error; state.blocked = true; showError(error.message); return; }
+  }
   if (checkout.stale === true && order) {
     if (checkout.state !== 'COMPLETED') {
       $('order-state').textContent = 'Reviewed item changed; capture is blocked';
       $('order-help').textContent = 'This order already exists, so the item cannot be changed here. Check this same order’s current state. The fixture has no cancel or new-order flow; no second order will be created.';
     }
     if (['PAYMENT_UNKNOWN', 'ORDER_CREATE_PENDING', 'CAPTURE_PENDING'].includes(checkout.state)) {
-      orderButton('Reconcile the same fixture order', 'reconcile', `${base}/reconcile`);
+      orderButton(paypal ? 'Reconcile the same offline order' : 'Reconcile the same fixture order', 'reconcile', `${base}/reconcile`);
     }
     const reload = node('button', 'Check current fixture state', 'secondary'); reload.type = 'button';
     reload.addEventListener('click', bootstrap); controls.append(reload);
     return;
   }
   if (checkout.state === 'SNAPSHOT_CONFIRMED') {
-    orderButton('Create fixture order', 'create', '/api/orders', {review_id: checkout.review_id, confirmation_id: checkout.confirmation_id}, true);
+    orderButton(paypal ? 'Create offline order' : 'Create fixture order', 'create', '/api/orders', {review_id: checkout.review_id, confirmation_id: checkout.confirmation_id}, true);
   } else if (checkout.state === 'ORDER_CREATED') {
-    orderButton('Simulate fixture buyer approval', 'approve', `${base}/fixture-approve`);
+    if (paypal) orderButton('Check this same offline order', 'verify', `${base}/verify`);
+    else orderButton('Simulate fixture buyer approval', 'approve', `${base}/fixture-approve`);
   } else if (checkout.state === 'PAYPAL_APPROVED') {
-    orderButton('Recheck this fixture order', 'verify', `${base}/verify`);
+    orderButton(paypal ? 'Check this same offline order' : 'Recheck this fixture order', 'verify', `${base}/verify`);
   } else if (checkout.state === 'SERVER_RECHECKED') {
     const label = node('label', undefined, 'check-label final-check');
     const input = node('input'); input.type = 'checkbox'; input.id = 'final-capture';
     input.addEventListener('change', updateControls);
-    label.append(input, node('span', 'I confirm this exact reviewed fixture order for simulated capture. No real payment will occur.'));
+    label.append(input, node('span', paypal ? 'I confirm this exact reviewed offline order for fabricated capture. No real payment will occur.' : 'I confirm this exact reviewed fixture order for simulated capture. No real payment will occur.'));
     controls.append(label);
-    const button = orderButton('Simulate fixture capture', 'capture', `${base}/capture`, {confirmation_id: checkout.confirmation_id, final_confirmation: true}, true);
+    const button = orderButton(paypal ? 'Simulate offline capture' : 'Simulate fixture capture', 'capture', `${base}/capture`, {confirmation_id: checkout.confirmation_id, final_confirmation: true}, true);
     button.id = 'capture';
   } else if (['PAYMENT_UNKNOWN', 'ORDER_CREATE_PENDING', 'CAPTURE_PENDING'].includes(checkout.state) && order) {
-    orderButton('Reconcile the same fixture order', 'reconcile', `${base}/reconcile`);
+    orderButton(paypal ? 'Reconcile the same offline order' : 'Reconcile the same fixture order', 'reconcile', `${base}/reconcile`);
   }
 }
 async function fixtureFetch(path, options = {}) {
@@ -238,24 +281,26 @@ async function readResponse(response) {
   try { data = await response.json(); } catch { throw new Error('The server returned an unreadable response. Reload current state before trying anything else.'); }
   if (Number.isSafeInteger(data.revision)) state.revision = data.revision;
   if (!response.ok && !(response.status === 422 && data.checkout?.state === 'ANALYSIS_BLOCKED')) throw new Error(`${data.error?.code || 'REQUEST_FAILED'}: ${data.error?.message || 'The server refused the request.'}`);
-  if (data.mode !== 'fixture' || data.api_version !== '1') throw new Error('Unsupported server mode or API version. All actions are blocked.');
+  validateEnvelope(data);
   return data;
 }
 async function mutate(path, payload, options = {}) {
   if (state.busy || state.blocked || state.uncertain) return;
   if (state.checkout?.stale === true && state.checkout.order && options.action !== 'reconcile') return;
   const epoch = state.epoch; state.busy = true; clearError(); updateControls();
-  status('Working on the local fixture…');
+  status('Working on the local offline server…');
   try {
     const headers = {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf};
     if (options.idempotent) {
       headers['Idempotency-Key'] = operationKey(sessionStorage, payload.snapshot_hash, options.action, () => crypto.randomUUID());
     }
     const data = await fixtureFetch(path, {method: 'POST', credentials: 'same-origin', headers, body: JSON.stringify(payload)});
-    const checkout = validateCheckout(data.checkout, state.catalog);
+    const providers = validateEnvelope(data);
+    const checkout = validateCheckout(data.checkout, state.catalog, providers);
     if (epoch !== state.epoch) { status('Selection changed during the request. Read the new selection back again.'); return; }
+    state.providers = providers; renderModes();
     state.checkout = checkout; state.acknowledgements.clear(); $('confirm-snapshot').checked = false;
-    renderReview(); status(`Fixture server state: ${checkout.state}. No real model or payment call.`);
+    renderReview(); status(`Local server state: ${checkout.state}. No genuine inference or payment established.`);
     if (options.action === 'analyze') $('review-heading').focus();
   } catch (error) {
     // Any uncertain mutation response freezes further mutations until a bootstrap read.
@@ -267,13 +312,14 @@ async function mutate(path, payload, options = {}) {
 async function bootstrap() {
   if (state.busy) return;
   state.busy = true; state.blocked = true; clearError(); updateControls();
-  status('Loading current fixture state…');
+  status('Loading current local state…');
   try {
     const data = validateBootstrap(await fixtureFetch('/api/bootstrap', {credentials: 'same-origin', cache: 'no-store'}));
+    state.providers = validateEnvelope(data); renderModes();
     state.catalog = data.catalog; state.csrf = data.csrf_token;
     const previous = data.checkout;
     const stalePreorder = previous?.stale === true && !isOrderLocked(previous);
-    state.checkout = stalePreorder ? null : validateCheckout(previous, state.catalog);
+    state.checkout = stalePreorder ? null : validateCheckout(previous, state.catalog, state.providers);
     state.selected = state.catalog.some(product => product.sku_id === previous?.sku_id) ? previous.sku_id : '';
     state.epoch += 1; state.acknowledgements.clear(); state.uncertain = false; state.blocked = false;
     $('confirm-snapshot').checked = false;
@@ -282,10 +328,12 @@ async function bootstrap() {
       if (condition.kind === 'layout') { $('want-layout').checked = true; $('layout').value = condition.value; }
       if (condition.kind === 'included_cable') { $('want-cable').checked = true; $('cable').value = condition.value; }
     }
+    if (pendingReturn) buyerReturnPayload(pendingReturn, state.checkout, state.revision, state.providers);
+    if (returnError) throw returnError;
     renderCatalog(); renderSelectedSource(); renderReview();
     status(stalePreorder ? 'The product description or price changed. Previous confirmation was cleared. Read this selection back again.'
-      : state.checkout ? `Current fixture state restored: ${state.checkout.state}. No real payment.` : 'Sample catalog ready. Choose one SKU and at least one condition.');
-  } catch (error) { state.blocked = true; showError(error.message); status('Catalog or server state unavailable. All review and order actions are blocked.'); }
+      : state.checkout ? `Current local state restored: ${state.checkout.state}. No real payment.` : 'Sample catalog ready. Choose one SKU and at least one condition.');
+  } catch (error) { pendingReturn = null; state.blocked = true; showError(error.message); status('Catalog or server state unavailable. All review and order actions are blocked.'); }
   finally { state.busy = false; updateControls(); }
 }
 $('conditions-form').addEventListener('submit', event => {
@@ -300,5 +348,26 @@ $('confirm').addEventListener('click', () => {
   try { mutate('/api/confirm', confirmPayload(state.checkout, state.revision, $('confirm-snapshot').checked, state.acknowledgements), {action: 'confirm'}); }
   catch (error) { showError(error.message); }
 });
-$('reload').addEventListener('click', bootstrap);
+$('reload').addEventListener('click', () => {
+  pendingReturn = null;
+  returnError = null;
+  bootstrap();
+});
 bootstrap();
+
+// BFCache/history restoration never restores final capture intent or replays a return.
+for (const event of ['pagehide', 'popstate', 'pageshow']) {
+  globalThis.addEventListener?.(event, e => {
+    if (event === 'pageshow' && !e.persisted) return;
+    pendingReturn = null;
+    if ($('final-capture')) $('final-capture').checked = false;
+    if (event !== 'pagehide') {
+      if (globalThis.location?.pathname === '/payment-return') {
+        try { history.replaceState(null, '', '/payment-return'); }
+        catch { returnError = new Error('Could not clear the return address. All actions are blocked.'); state.blocked = true; }
+      }
+      bootstrap();
+    }
+    updateControls();
+  });
+}

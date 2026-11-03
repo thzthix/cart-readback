@@ -75,20 +75,22 @@ not a raw exception or a new dispatch right. No late result
 is reused or causes another dispatch. Local deadlines do not prove real TCP
 cancellation, bounded network allocation, OAuth/HTTP behavior or settlement.
 
-## Approval and return are not connected
+## Approval and return preparation remain offline
 
 `sandbox_approval_url` checks one exact HTTPS sandbox checkout URL whose sole
 `token` equals the returned provider order ID. Live hosts, host suffixes,
 userinfo, ports, fragments, escapes, duplicate parameters and multiple approval
-links fail closed. The helper only extracts; it never navigates and is not wired
-to the API or UI. Public `approval_url` remains null. No external browser visit
-or buyer approval has occurred.
+links are rejected. By default public `approval_url` remains null. An explicitly
+injected `buyer_return_origin` enables inert callback preparation and exposes the
+validated fabricated URL as nonnavigable text. The CLI never selects this adapter.
+No external browser visit or genuine buyer approval has occurred.
 
-No return/cancel URL is sent in this prerequisite. No return endpoint, SameSite
-change, CSRF relaxation or capture-on-return behavior is added. A future buyer
-flow must separately implement a safe landing and restore the owned session,
-then requery the same order. Browser query parameters and a return alone cannot
-authorize capture; explicit final intent and current consent remain required.
+The new [buyer-return contract](OFFLINE_BUYER_RETURN.md) preserves Strict cookies,
+exact CSRF/Origin checks and fresh final capture intent. The GET landing renders
+static UI without session creation or business mutation; only an explicit
+same-origin POST can consume a bound return state and requery the same order.
+This preparation does not establish provider acceptance of loopback URLs, return
+parameters, actual buyer behavior or a genuine end-to-end PayPal lifecycle.
 
 ## Primary references and unverified gates
 

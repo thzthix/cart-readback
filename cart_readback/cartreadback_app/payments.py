@@ -275,6 +275,19 @@ def verify_provider_order(
     required for this transition were actually returned. No live I/O is enabled.
     """
     fields = set(expected) | {"provider_order_id", "status", "captures"}
+    if (
+        expected.get("provider_mode") == "paypal-sandbox-offline"
+        and type(document) is dict
+        and "approval_url" in document
+    ):
+        fields.add("approval_url")
+        if document["approval_url"] != (
+            "https://www.sandbox.paypal.com/checkoutnow?token="
+            + str(provider_id)
+        ):
+            raise AppError(
+                "ORDER_MISMATCH", "Invalid approval destination.", 409
+            )
     # PayPal may omit payments before capture. Do not manufacture a returned
     # empty capture list merely to match the fixture's complete representation.
     if (

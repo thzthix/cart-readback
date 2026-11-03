@@ -106,7 +106,15 @@ def main() -> None:
         + json.dumps(ratios),
         flush=True,
     )
-    run(["node", "--test", str(UI / "core.test.mjs"), str(UI / "app.test.mjs")])
+    run(
+        [
+            "node",
+            "--test",
+            str(UI / "core.test.mjs"),
+            str(UI / "app.test.mjs"),
+            str(UI / "return.test.mjs"),
+        ]
+    )
     sys.path.insert(0, str(ROOT))
     local_server = import_module("cartreadback_app.http").LocalServer
     service = import_module("cartreadback_app.service").Service
