@@ -14,6 +14,12 @@ if (globalThis.location?.pathname === '/payment-return') {
   try { history.replaceState(null, '', '/payment-return'); }
   catch { pendingReturn = null; returnError = new Error('Could not clear the return address. All actions are blocked.'); }
 }
+// Fragment navigation stays in this document. Rebuilding it would discard local
+// review controls and detach the source mark that the evidence link focused.
+const documentRoute = () => globalThis.location
+  ? `${location.pathname}${location.search}` : null;
+let currentDocumentRoute = documentRoute();
+
 function renderModes() {
   const injected = state.providers?.analysis.mode === 'injected-offline';
   const paypal = state.providers?.payment.mode === 'paypal-sandbox-offline';
@@ -359,6 +365,15 @@ bootstrap();
 for (const event of ['pagehide', 'popstate', 'pageshow']) {
   globalThis.addEventListener?.(event, e => {
     if (event === 'pageshow' && !e.persisted) return;
+    if (event === 'popstate' && currentDocumentRoute !== null
+        && documentRoute() === currentDocumentRoute) {
+      // Same-document fragment traversal is evidence reading, not a restored
+      // checkout. Keep acknowledgement/review state and the focused mark.
+      // Actual capture intent is still fresh-only even for fragment history.
+      if ($('final-capture')) $('final-capture').checked = false;
+      updateControls();
+      return;
+    }
     pendingReturn = null;
     if ($('final-capture')) $('final-capture').checked = false;
     if (event !== 'pagehide') {
@@ -366,6 +381,7 @@ for (const event of ['pagehide', 'popstate', 'pageshow']) {
         try { history.replaceState(null, '', '/payment-return'); }
         catch { returnError = new Error('Could not clear the return address. All actions are blocked.'); state.blocked = true; }
       }
+      currentDocumentRoute = documentRoute();
       bootstrap();
     }
     updateControls();
