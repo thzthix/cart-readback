@@ -2,9 +2,10 @@
 
 ## Active product and stage
 Read README.md, PROJECT_BRIEF.md and cart_readback/API_CONTRACT.md before work.
-This branch is documentation/API-contract scaffold only. The fixture server, UI
-and evaluation tools are pending issue-first imports into cart_readback/. Do not
-count tests from a separate local workspace as checks of the imported revision.
+This tree contains the fixture server, buyer UI and offline evaluation tools in
+cart_readback/. Genuine inference and PayPal remain UNCONNECTED. Follow the
+current README commands and report checks against the exact integrated revision;
+checks from earlier component trees do not certify a changed integrated tree.
 Historical experiments, research archives and browser/account state do not belong
 in this repository. Scope/branch/import rules are in CONTRIBUTING.md; role and
 review/fix handoffs are in docs/TEAM_ROLES.md.

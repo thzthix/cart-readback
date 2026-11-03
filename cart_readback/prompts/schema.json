@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cartreadback:proposal-schema:v1",
+  "title": "CartReadback proposed results, API v1 bare-array contract",
+  "type": "array",
+  "minItems": 1,
+  "maxItems": 2,
+  "items": {
+    "$ref": "#/$defs/result"
+  },
+  "$defs": {
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "start",
+        "end",
+        "quote"
+      ],
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[^\\u0000-\\u001f\\ud800-\\udfff]+$"
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15999
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16000
+        },
+        "quote": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\ud800-\\udfff]+$"
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "condition_id",
+        "status",
+        "explanation",
+        "evidence"
+      ],
+      "properties": {
+        "condition_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[^\\u0000-\\u001f\\ud800-\\udfff]+$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "match",
+            "conflict",
+            "unknown"
+          ]
+        },
+        "explanation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[^\\u0000-\\u001f\\ud800-\\udfff]+$"
+        },
+        "evidence": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/span"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "match",
+                  "conflict"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

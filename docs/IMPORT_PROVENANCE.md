@@ -1,5 +1,17 @@
 # Import provenance and current evidence
 
+## Current integrated scope
+
+This tree contains the scaffold (#1 / PR #2), fixture server (#3 / PR #4),
+buyer UI (#5 / PR #7) and offline evaluation tooling (#6 / PR #8). The sections
+below preserve each **original import-stage** scope, hashes and observations.
+Their earlier pending/unmerged/authorization wording is historical, superseded
+by this section and the integration note at the end. Do not treat original
+import hashes as current hashes for files explicitly adapted during integration.
+The owner subsequently authorized merging the current reviewed private PRs.
+No genuine AI, PayPal, rendered-browser or customer-value result is established.
+
+
 ## Scaffold import — issue #1
 - Repository: private `thzthix/cart-readback`.
 - Issue: https://github.com/thzthix/cart-readback/issues/1
@@ -238,3 +250,124 @@ Genuine inference and PayPal sandbox remain UNCONNECTED. Same-source buyer value
 production security, model semantics and real payment/recovery remain unverified.
 No merge, formal APPROVE, deployment, public release, license, account or spend
 authority follows from this fixture import.
+
+
+## Evaluation import — issue #6
+
+- Issue: https://github.com/thzthix/cart-readback/issues/6; branch
+  `test/6-evaluation-harness`, draft target `feat/3-fixture-server` (PR #4).
+- Exact server base: `d2781cf7f603d83b552c9cd84371544357589bdd`;
+  scaffold PR #2 remains an unmerged foundation. Main is unchanged.
+- Theo | AI evaluation engineering (`import_evaluation_harness`) imports Blair's
+  pre-existing synthetic scorer/corpus and existing prompt preparation. This is
+  issue-first import/change review, not retroactive review of their original work.
+- Exactly 21 evaluation/prompt/status paths plus branch-local root README and this
+  ledger. No server/API/UI implementation, `eval/runs`, old harness receipts,
+  research archives, credentials or model/payment API calls are included.
+- [Current status](../cart_readback/VALIDATION_STATUS.md) takes precedence over
+  preparation-era "not run" wording. A later app-external uncontrolled native-agent
+  pilot exposed this synthetic set; it is regression material, not fresh holdout.
+  No historical numeric leaderboard or causal prompt winner is republished.
+- Parallel UI work owns its own stage. Alex must deliberately integrate the short
+  shared README/ledger changes rather than overwrite a colleague's branch.
+
+### Explicit versioned tooling changes
+
+The initial Ruff format check failed on three original evaluator Python files.
+After separate-worker compatibility review, Ruff 0.14.3 formatted only
+`build_holdout.py`, `score.py` and `test_score.py`; that phase had source-identical
+ASTs and manifest 1.0.1. Original bytes and exact phase hashes remain in the local
+review archive, not the shipped runtime tree.
+
+The same separate worker then reproduced two distinct P2 defects. Scorer/wrapper
+explanation checks accepted empty/control/surrogate strings rejected by the app;
+the scorer and external wrapper now reject them, including trailing LF. A foreign
+JSON-escaped surrogate case ID crashed report printing; ASCII-safe JSON reporting
+now preserves the error and fixed denominator. Three new regression tests cover
+these fixes. No runtime/API or frozen prompt schema changed.
+
+Current manifest **1.0.2** binds the final tool/schema bytes, with a separate
+`validation_revision` identifying the behavior fixes and formatting-phase hash.
+Dataset remains `cartreadback-semantic-holdout-1.0.0`. Original corpus, labels,
+metric definitions and prompt/template/schema/plan bytes are unchanged; defective
+string eligibility is deliberately corrected, not claimed formatting-only.
+`tooling_revision` retains original tool hashes and original manifest SHA-256
+`aebd3463ffcc6a08eb4c7a71dfcdc8e451269c4b11992ae67873c7c5180e40a3`;
+`validation_revision` also retains the original external-wrapper schema hash.
+Other original manifest fields retain preparation-era meaning. The untouched
+original corpus/manifest validated before migration; current scorer checks bind
+this import. No hash check was bypassed and no new model run occurred.
+
+Prompt preflight changes only the counterexample attribution from "Human-authored"
+to "Author-constructed synthetic". `PREFLIGHT.json` was regenerated using existing
+dev-only jsonschema 4.26.0 against imported API/brief/backend hashes, followed by
+`SHA256SUMS`. The frozen scorer README remains byte-identical, including references
+to historical harness receipts intentionally excluded from this repository.
+
+### Evaluation source/import hashes (SHA-256)
+
+Source paths are the same relative paths under the local product workspace.
+Hashes identify exact inputs/imported bytes, not semantic truth. The complete
+final tree manifest and exact commit are recorded in the draft PR; this ledger
+cannot contain its own final hash. `VALIDATION_STATUS.md` and this new ledger
+section are newly written import documentation; root README is adapted locally.
+
+| Repository path | Original source SHA-256 | Imported SHA-256 | Treatment |
+| --- | --- | --- | --- |
+| `cart_readback/eval/README.md` | `44467555d9882bf7194eceddd4ad87a7909a9a13d2b209ebe0bb78beb9782d22` | `44467555d9882bf7194eceddd4ad87a7909a9a13d2b209ebe0bb78beb9782d22` | unchanged pre-existing local artifact |
+| `cart_readback/eval/build_holdout.py` | `ef68f4d924ca6e19783aa17082fccf2f93c17f0518cd54a90d0c54ca4409b54e` | `7b36cd4380df3a50bc0456b637207fb7ad673db124aa432433f1a5eac0340cf8` | Ruff-only formatting; phase AST unchanged |
+| `cart_readback/eval/score.py` | `6da02ae69587aabae69262d39af77209aa15b6ce676e800ae24229a61776e714` | `014b7cdf8c31f32fda5aae53ec8c77b55d0bc380fffd79ab474326515ce50ae3` | format phase then separate reviewed validation/report fixes |
+| `cart_readback/eval/test_score.py` | `a1f7ed08ac7e5c6c04f6c6a1cffafbc6b741890e3992a6648b7a789ec1e560c7` | `f7fdcaef7d330ff6514ff1a89e80d1c36170aa14413f154e7058de37a88ce3e2` | format phase then separate reviewed validation/report fixes |
+| `cart_readback/eval/holdout-inputs.jsonl` | `5f4075c4789880d5822c976f3fb5ac4fdd5c0bfb51b65f7f51bf383095b2c52f` | `5f4075c4789880d5822c976f3fb5ac4fdd5c0bfb51b65f7f51bf383095b2c52f` | unchanged pre-existing local artifact |
+| `cart_readback/eval/holdout-gold.jsonl` | `b5b9b3f0306b457fa4ec7ef6a8213f0f57e371e6a791f69fae1297a3147c272c` | `b5b9b3f0306b457fa4ec7ef6a8213f0f57e371e6a791f69fae1297a3147c272c` | unchanged pre-existing local artifact |
+| `cart_readback/eval/manifest.json` | `aebd3463ffcc6a08eb4c7a71dfcdc8e451269c4b11992ae67873c7c5180e40a3` | `cfe11a32e16c949bed7c9c2ecd200421de847ae0d952b0dde07ef49304bb61c8` | explicit tooling manifest 1.0.2; corpus version unchanged |
+| `cart_readback/eval/predictions.schema.json` | `ada06b395a4e7304e2dad879404973372d78a6e56c763e0bf9e0cde344c44151` | `069d96646ffa37a99bcc36be768df03bce38bdb074990b473f8da2becf2c673d` | external-wrapper explanation policy fix |
+| `cart_readback/eval/provenance.example.json` | `8c5129009a903b56d85965238dfbed0f8ef16bd7804e021900542848ec54712c` | `8c5129009a903b56d85965238dfbed0f8ef16bd7804e021900542848ec54712c` | unchanged pre-existing local artifact |
+| `cart_readback/prompts/readback-system.txt` | `57a8d66fa78747b661af2d9720ef5ee1ca15f566e2db69200eee6dc808e78239` | `57a8d66fa78747b661af2d9720ef5ee1ca15f566e2db69200eee6dc808e78239` | unchanged pre-existing local artifact |
+| `cart_readback/prompts/readback-user-template.txt` | `1b5254db8297debc989a7b0c0f606a6eb64052710a8166e9bedbcfe88d8ddca9` | `1b5254db8297debc989a7b0c0f606a6eb64052710a8166e9bedbcfe88d8ddca9` | unchanged pre-existing local artifact |
+| `cart_readback/prompts/arm-A-system.txt` | `0f34a13efd73c0e762daa5038252f9a19d760a78ee51b63b3766d519de9e0fde` | `0f34a13efd73c0e762daa5038252f9a19d760a78ee51b63b3766d519de9e0fde` | unchanged pre-existing local artifact |
+| `cart_readback/prompts/arm-B-system.txt` | `57a8d66fa78747b661af2d9720ef5ee1ca15f566e2db69200eee6dc808e78239` | `57a8d66fa78747b661af2d9720ef5ee1ca15f566e2db69200eee6dc808e78239` | unchanged pre-existing local artifact |
+| `cart_readback/prompts/arm-C-system.txt` | `f5af0fb84218c837be868e88f564be904425a93fe40e4362c13994157de76409` | `f5af0fb84218c837be868e88f564be904425a93fe40e4362c13994157de76409` | unchanged pre-existing local artifact |
+| `cart_readback/prompts/template.json` | `224dfd9f0a6a5fbf5af983ec7e91f928e0418c6b705fcf9602cd19a172d9ea8e` | `224dfd9f0a6a5fbf5af983ec7e91f928e0418c6b705fcf9602cd19a172d9ea8e` | unchanged pre-existing local artifact |
+| `cart_readback/prompts/schema.json` | `7a49011e3042d3371bdea11aae201ff4a8d8a2fd5cda4fcd67b23bcf31c7fb57` | `7a49011e3042d3371bdea11aae201ff4a8d8a2fd5cda4fcd67b23bcf31c7fb57` | unchanged pre-existing local artifact |
+| `cart_readback/prompts/EVALUATION_PLAN.md` | `944e49a9d6428ac5df1b5b603f330fdc4370314b8e8fd1ce0ad26dc6e12f408a` | `944e49a9d6428ac5df1b5b603f330fdc4370314b8e8fd1ce0ad26dc6e12f408a` | unchanged pre-existing local artifact |
+| `cart_readback/prompts/verify_artifacts.py` | `e2134c787c9f277b994c1c39a068ae313f5c39984120e13f13a1bf61d5e82e84` | `05fc14cfdd2979f528296b0893381f59ee2cf16f4504a1f88cb408dec973a5bc` | counterexample attribution wording only |
+| `cart_readback/prompts/PREFLIGHT.json` | `941d122067d33d01f8517105c3a662c9b63ccde0f8a7e0c2ed1d9874b28b6b5a` | `dd72bfd822ed834c0a0277afcf421774cb927b36b7651e9ba615db00ad1bb1a0` | fresh imported-dependency receipt/checksums |
+| `cart_readback/prompts/SHA256SUMS` | `7a165a0fa1828d89d20fbf3b5ecc0db8c2fc0e5b14212519b68fc7429ffa4a77` | `7de33d079f8f626884a3d903f2d33b76b6c7aac95836b977c668496ec16468f8` | fresh imported-dependency receipt/checksums |
+
+Fresh owner checks and separate-worker final reruns are distinct. Current checks
+exercise offline tooling and the fixture backend only. Real inference/provider
+schema acceptance, fresh semantic quality, PayPal sandbox, rendered browser flows
+and customer value remain open; see current status and the actual draft PR.
+
+
+## Combined integration — issue #6 / PR #8
+
+Alex | AI integration PM (`integrate_reviewed_pull_requests`) reconciled the
+parallel UI/evaluation README and ledger without changing runtime, UI, scorer,
+corpus, gold, frozen prompt/template/schema/plan or API bytes. The complete UI1
+and evaluator correctness-fix sections above are retained. AGENTS, CONTRIBUTING,
+PROJECT_BRIEF and VALIDATION_STATUS active-stage text now describes the combined
+fixture tree rather than a pending scaffold. The brief change requires fresh
+prompt receipt/checksums, not a carried-forward claim.
+
+Foundation merges preserve original import ancestry: scaffold PR #2 merged at
+`0d56d7dd23e6ac6fe3525aca987e13b84dd90684`; server PR #4 at
+`c7d62b223da50ed4b90fb03c4f6c24eb73ad68e7`; UI PR #7 at
+`21cc1c8441bae57fe303ea0562da7ff75ef2f29a`. Each merge tree was verified equal
+to its separately reviewed component tree. PR #8 records the final integration
+head/tree/manifest, actual fresh checks, separate read-only integration review,
+and actual merge state. This file cannot truthfully certify its own final hash.
+No formal APPROVE, protected-branch bypass, force push, branch deletion,
+visibility/license change, deployment or genuine-service call is part of this
+integration. Browser rendering/focus/accessibility remains untested after the
+recorded refused HTTP route and denied file route; no workaround is claimed.
+
+### Integration-regenerated dependency artifacts
+
+The original evaluation-import receipt hashes in its table above are historical.
+Current receipt/checksum hashes below supersede those two imported outputs only;
+the prompt verifier code, all frozen prompt inputs and corpus/gold remain intact.
+- `PROJECT_BRIEF.md` current SHA-256: `01578fd0a150164e6606059465b9b4b7420c9286195c9fb84651cbbdd68fd1d8`.
+- `cart_readback/prompts/PREFLIGHT.json` current SHA-256: `a4a7f81dbaff6610ef8e3ecaf46aff2e20bcd9e234ae587417219a5bd8eeae1e`.
+- `cart_readback/prompts/SHA256SUMS` current SHA-256: `47558d787c69e7a858842eff81d3ce6d05908f4df30a9a2673f7b821832e6008`.

@@ -6,16 +6,17 @@ CartReadback compares a selected keyboard with up to two requirements the buyer
 already has: language layout and an included cable. It preserves what the source
 supports, conflicts with, or does not state.
 
-> **Local fixture server and buyer review UI. Evaluation tooling is not imported
-> on this branch. Genuine AI and PayPal sandbox are UNCONNECTED.**
+> **Local fixture server, buyer review UI and offline evaluation tooling.
+> Genuine AI and PayPal sandbox are UNCONNECTED.**
 
 Start with the [project brief](PROJECT_BRIEF.md), [API contract](cart_readback/API_CONTRACT.md),
 [architecture](cart_readback/ARCHITECTURE_ADR.md) or [contributing guide](CONTRIBUTING.md).
-The scaffold's stage-specific prose describes its earlier documentation-only
-revision; this README and the [import ledger](docs/IMPORT_PROVENANCE.md) record the
-current stacked UI import. Scaffold PR #2 and server PR #4 are still unmerged;
-this UI draft targets `feat/3-fixture-server` at
-`d2781cf7f603d83b552c9cd84371544357589bdd`, not main.
+This tree combines the separately reviewed scaffold, server, buyer UI and offline
+evaluation imports. The [import ledger](docs/IMPORT_PROVENANCE.md) preserves their
+original scope, hashes, real review findings and integration changes. Read the
+[current evaluation status](cart_readback/VALIDATION_STATUS.md) before frozen
+preparation-era artifacts. Exact-head checks and actual merge state are recorded
+in [evaluation/integration PR #8](https://github.com/thzthix/cart-readback/pull/8).
 
 ## Why this exists
 
@@ -127,35 +128,71 @@ and actual HTTP checks do not establish native browser/rendering/accessibility.
 No bundler, package manager, remote fonts, images or analytics is used.
 
 Record observed counts/exits against an exact revision rather than treating this
-command list or older local passes as evidence. This import's actual checks and
-separate-worker review are recorded in its draft PR.
+command list or older local passes as evidence. Actual checks and separate-worker
+review are recorded against exact revisions in the component PRs and final
+integration PR #8.
+
+## Offline evaluation checks
+
+The imported scorer never generates predictions or calls a model. The 24
+synthetic cases / 48 conditions were later exposed by an **app-external,
+uncontrolled native-agent pilot**; they are regression material, **not a fresh
+hidden holdout**. Their frozen preparation-time "not run" wording is historical.
+Read the [current status and limitations](cart_readback/VALIDATION_STATUS.md),
+[frozen scorer instructions](cart_readback/eval/README.md) and
+[prompt plan](cart_readback/prompts/EVALUATION_PLAN.md) together.
+
+Run from `cart_readback/`:
+
+```sh
+python eval/score.py validate
+python -m unittest discover -s eval -p 'test_score.py' -v
+python -m compileall -q eval prompts
+python prompts/verify_artifacts.py > prompts/PREFLIGHT.json.tmp && \
+  mv prompts/PREFLIGHT.json.tmp prompts/PREFLIGHT.json
+(cd prompts && sha256sum readback-system.txt readback-user-template.txt \
+  arm-A-system.txt arm-B-system.txt arm-C-system.txt template.json schema.json \
+  EVALUATION_PLAN.md verify_artifacts.py PREFLIGHT.json > SHA256SUMS)
+(cd prompts && sha256sum -c SHA256SUMS)
+```
+
+The scorer is dependency-free. Prompt preflight uses the already-available
+**development-only** `jsonschema` 4.26.0; it is not a runtime dependency. If absent,
+stop that check and review a pinned dev-only dependency before installing anything.
+Regeneration binds actual imported dependencies; it is not model evaluation.
+Exact quotes and canonical-span containment do not establish semantic entailment;
+the local root-array schema is not a tested provider wire request. Candidate B
+is prepared, not a performance winner. See integration PR #8 for exact-head
+results, the versioned tooling/manifest migration and reviewed string-policy/
+report corrections. Dataset, gold and frozen prompt bytes remain unchanged;
+this is not a new quality experiment.
 
 ## Evidence and remaining gates
 
-This is an **import of pre-existing local fixture work**. Its real issue-first
-GitHub pass covers import and subsequent review changes, not retroactive review
-of the original implementation. The ledger records source/import hashes, the server
-standalone-static-test correction and the UI design-context adaptations. Imported independent tests are pre-existing
-work; fresh separate-worker execution, not their presence, supplies current
-review evidence.
+This is an **import of pre-existing local fixture work**. The issue-first GitHub
+pass covers import and subsequent review changes, not retroactive review of the
+original implementation. The ledger retains original/imported hashes, the server
+standalone-static-test correction, UI response-body timeout fix/regression, and
+evaluator string-policy/report fixes. Imported independent tests are pre-existing
+work; fresh separately performed execution supplies current review evidence.
 
-Buyer UI is now imported under issue #5; evaluation/scorer tools remain pending
-a separate issue/branch/draft-PR import. Real-model application integration/fresh
-semantic evaluation, PayPal
-sandbox lifecycle/recovery, rendered wide/narrow/native-keyboard/interrupted
-browser flows and customer baseline/value checks remain unverified. A fresh CUA
-HTTP attempt for this stage returned `net::ERR_CONNECTION_REFUSED`; a prior
-`file://` attempt was explicitly denied and was not retried or bypassed. No
-rendered screenshot, native keyboard/focus, mobile or accessibility pass is claimed.
-An earlier
-app-external uncontrolled pilot exposed synthetic regression material; it is not
-a hidden holdout, prompt-performance winner or real application integration.
+All four component slices are present in this tree. Genuine model application
+integration/fresh semantic evaluation, PayPal sandbox lifecycle/recovery, rendered
+wide/narrow/native-keyboard/interrupted browser flows and customer baseline/value
+remain unverified. A CUA HTTP attempt returned `net::ERR_CONNECTION_REFUSED`;
+a prior `file://` attempt was explicitly denied and was not retried or bypassed.
+No rendered screenshot, native keyboard/focus, mobile or accessibility pass is
+claimed. Fake-DOM and actual HTTP tests do not replace those checks.
 
-The UI draft stacks on server PR #4, itself based on scaffold PR #2, not merged
-main. No independently
-merge-ready claim, formal APPROVE, merge/auto-merge, deployment, public visibility,
-license grant, cost, live payment or contest submission follows from these checks.
-This is **not a working AI + PayPal integration release**.
+An earlier app-external uncontrolled pilot exposed the synthetic evaluation set.
+It is regression material, not a hidden holdout, prompt-performance winner or
+real application integration. Structural/scorer success does not prove semantic
+truth or buyer benefit.
+
+The owner separately authorized merging these reviewed private project PRs.
+No formal APPROVE or independent-account approval is implied. Merge does not
+authorize auto-merge, public release, licensing, deployment, costs, real payments
+or contest submission. This is **not a working AI + PayPal integration release**.
 
 ## Contributing and AI assistance
 
