@@ -217,3 +217,90 @@ Public `order.buyer_return` exposes only availability, expiry, consumed/cancelle
 flags. Validated `order.approval_url`, when prepared, is nonnavigable offline text.
 The exact required PayPal return parameters, actual session/cookie behavior,
 provider approval/capture/recovery and native browser behavior remain unverified.
+
+## C12 — Host-installed context-capacity analysis bridge
+
+This is a distinct host-only strategy, not an activation API. C03 fields are
+unchanged. Reject provider/project/credential/approval/rate/ceiling/live flags in
+bodies or query strings. CLI/default service remains fixture-only. There is no
+supported secure installation resolver; no actual provider observation is
+established by the fabricated offline tests.
+
+The exact additional aggregate mode is `mixed`, only for context analysis plus
+fixture payments. Existing C11 fixture/offline descriptors remain unchanged.
+For `mixed`, `providers` is:
+
+```json
+{
+  "analysis": {
+    "mode": "genuine-context-capacity", "is_fixture": false,
+    "dispatch_available": true, "execution_kind": "fabricated-offline"
+  },
+  "payment": {"mode": "fixture", "is_fixture": true},
+  "network_enabled": false
+}
+```
+
+`execution_kind` is `unavailable`, `fabricated-offline`, or `provider-runtime`.
+It describes configured host execution, not an observed provider response.
+`dispatch_available` reports presently available host mechanics/installation and
+time window, not guaranteed admission, available budget, an attempted call or
+successful semantics. It is false for unavailable setup and may become false for
+an expired or changed configured host. `network_enabled` means selected real
+network dispatch capability: exactly `provider-runtime && dispatch_available`.
+Fabricated connections always report false, even after a successful fixture
+exchange. No default path selects provider-runtime or credentials.
+
+A context checkout additionally exposes this exact public `analysis` shape:
+
+```json
+{
+  "strategy": "context-capacity-v1", "dispatch_state": "attempted",
+  "accounting_state": "unknown", "usage_observed": true,
+  "evidence_kind": "fabricated-offline"
+}
+```
+
+- `dispatch_state`: `not-attempted` or `attempted`. Attempted means the durable
+  dispatch claim committed. It is conservative after a crash and does not prove
+  a socket opened or POST reached the provider.
+- `accounting_state`: `unobserved`, `known`, or `unknown`. UNKNOWN is retained,
+  including when matching late accounting is appended. It never refunds capacity,
+  reopens admission or attaches a result to a newer review.
+- `usage_observed`: independently supported accounting was retained. It is not
+  semantic acceptance, an invoice, actual project pricing or a true model claim.
+- `evidence_kind`: `none` until usage is retained, then `fabricated-offline` or
+  `provider-observation` from the original operation's host execution boundary.
+  This field classifies retained accounting evidence, not every received byte.
+  Tests can produce only fabricated-offline, never a provider-observation claim.
+
+Known accounting requires attempted dispatch and retained usage. UNKNOWN may
+have usage or none; unobserved has none. Nonblocked context reviews require known
+accounting and retained usage, but that alone is not sufficient: semantic/schema/
+span validation and current owned compare-and-set must also succeed. Refusal,
+incomplete or malformed proposal may have known accounting and still no snapshot.
+Protocol faults retain UNKNOWN before independently supported usage is appended.
+
+Context `checkout.model` has exactly these public keys: `provider` (openai-responses),
+`model_version` (gpt-6-luna), `prompt_version` (cartreadback-prompt-v2-wire),
+`adapter_version` (genuine-context-responses-v1), `validator_version`
+(strict-spans-v1+ordered-results-v1), `is_fixture` (false), `execution_mode`
+(genuine-context-capacity), and original `execution_kind`. Public metadata excludes
+organization/project, credential/approval/billing-record references, internal
+ledger/runtime identities and raw provider request IDs. Top-level checkout fields
+are projected explicitly rather than copying private state wholesale.
+
+Current provider descriptors and historical checkout evidence can differ after
+host removal/reconfiguration. Preserve the original checkout's outcome, mark it
+stale where configuration changed, invalidate confirmation and preserve existing
+order recovery. A previous fixture review may likewise remain readable beneath
+current mixed configuration. No new nonfixture strategy or fresh owner may bypass unresolved history.
+An unresolved context-capacity review also blocks replacement by fixture analysis;
+previous fixture/offline-count compatibility behavior is otherwise unchanged.
+
+Buyer labels distinguish configuration, unavailability, a durable attempt and
+observed usage. Checkout remains simulated and PayPal unconnected. Do not display
+blanket “No money moves” for a provider-capable analysis path; inference may incur
+API charges after a separately approved external installation. No deployment,
+secure provisioning, real billing, model quality or native-browser evidence is
+asserted by this contract.

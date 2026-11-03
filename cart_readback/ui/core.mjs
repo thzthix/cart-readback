@@ -42,26 +42,105 @@ export function evidenceText(source, span) {
 const FIXTURE_PROVIDERS = Object.freeze({analysis: {mode: 'fixture', is_fixture: true},
   payment: {mode: 'fixture', is_fixture: true}, network_enabled: false});
 
+const CONTEXT_MODE = 'genuine-context-capacity';
+const EXECUTION_KINDS = ['unavailable', 'fabricated-offline', 'provider-runtime'];
+function exactKeys(value, keys) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+}
+
 export function validateProviders(providers = FIXTURE_PROVIDERS) {
-  if (!providers || providers.network_enabled !== false
-      || !['fixture', 'injected-offline'].includes(providers.analysis?.mode)
-      || !['fixture', 'paypal-sandbox-offline'].includes(providers.payment?.mode)
-      || providers.analysis.is_fixture !== (providers.analysis.mode === 'fixture')
-      || providers.payment.is_fixture !== (providers.payment.mode === 'fixture')) {
+  const analysis = providers?.analysis;
+  const payment = providers?.payment;
+  const context = analysis?.mode === CONTEXT_MODE;
+  if (!exactKeys(providers, ['analysis', 'payment', 'network_enabled'])
+      || !exactKeys(payment, ['mode', 'is_fixture'])
+      || !['fixture', 'paypal-sandbox-offline'].includes(payment.mode)
+      || payment.is_fixture !== (payment.mode === 'fixture')
+      || (context ? (!exactKeys(analysis, ['mode', 'is_fixture', 'dispatch_available', 'execution_kind'])
+        || analysis.is_fixture !== false || payment.mode !== 'fixture'
+        || typeof analysis.dispatch_available !== 'boolean'
+        || !EXECUTION_KINDS.includes(analysis.execution_kind)
+        || (analysis.execution_kind === 'unavailable' && analysis.dispatch_available)
+        || providers.network_enabled !== (analysis.execution_kind === 'provider-runtime' && analysis.dispatch_available))
+        : (!exactKeys(analysis, ['mode', 'is_fixture'])
+          || !['fixture', 'injected-offline'].includes(analysis.mode)
+          || analysis.is_fixture !== (analysis.mode === 'fixture')
+          || providers.network_enabled !== false))) {
     throw new Error('Unsupported provider or network mode. All actions are blocked.');
   }
   return providers;
 }
 
 export function validateEnvelope(data) {
-  if (data.api_version !== '1' || !['fixture', 'offline'].includes(data.mode)
-      || (data.mode === 'offline' && !data.providers)) {
+  if (data.api_version !== '1' || !['fixture', 'offline', 'mixed'].includes(data.mode)
+      || (data.mode !== 'fixture' && !data.providers)) {
     throw new Error('Unsupported server mode or API version. All actions are blocked.');
   }
   const providers = validateProviders(data.providers);
-  const fixture = providers.analysis.is_fixture && providers.payment.is_fixture;
-  if ((data.mode === 'fixture') !== fixture) throw new Error('Inconsistent provider mode.');
+  const expected = providers.analysis.mode === CONTEXT_MODE ? 'mixed'
+    : providers.analysis.is_fixture && providers.payment.is_fixture ? 'fixture' : 'offline';
+  if (data.mode !== expected) throw new Error('Inconsistent provider mode.');
   return providers;
+}
+
+function validateContextAnalysis(checkout) {
+  const analysis = checkout.analysis;
+  const model = checkout.model;
+  if (!exactKeys(analysis, ['strategy', 'dispatch_state', 'accounting_state', 'usage_observed', 'evidence_kind'])
+      || analysis.strategy !== 'context-capacity-v1'
+      || !['not-attempted', 'attempted'].includes(analysis.dispatch_state)
+      || !['unobserved', 'known', 'unknown'].includes(analysis.accounting_state)
+      || typeof analysis.usage_observed !== 'boolean'
+      || !['none', 'fabricated-offline', 'provider-observation'].includes(analysis.evidence_kind)
+      || !exactKeys(model, ['provider', 'model_version', 'prompt_version', 'adapter_version',
+        'validator_version', 'is_fixture', 'execution_mode', 'execution_kind'])
+      || model.provider !== 'openai-responses' || model.model_version !== 'gpt-6-luna'
+      || model.prompt_version !== 'cartreadback-prompt-v2-wire'
+      || model.adapter_version !== 'genuine-context-responses-v1'
+      || model.validator_version !== 'strict-spans-v1+ordered-results-v1'
+      || model.is_fixture !== false || model.execution_mode !== CONTEXT_MODE
+      || !EXECUTION_KINDS.includes(model.execution_kind)) {
+    throw new Error('Unsupported context analysis metadata. All actions are blocked.');
+  }
+  const attempted = analysis.dispatch_state === 'attempted';
+  const observedKind = model.execution_kind === 'fabricated-offline' ? 'fabricated-offline' : 'provider-observation';
+  if ((analysis.usage_observed && (!attempted || model.execution_kind === 'unavailable'
+        || analysis.evidence_kind !== observedKind))
+      || (!analysis.usage_observed && analysis.evidence_kind !== 'none')
+      || (analysis.accounting_state === 'known' && !analysis.usage_observed)
+      || (analysis.accounting_state === 'unobserved' && analysis.usage_observed)
+      || (model.execution_kind === 'unavailable' && attempted)
+      || (checkout.state !== 'ANALYSIS_BLOCKED' && (!attempted || analysis.accounting_state !== 'known'))
+      || (checkout.state === 'ANALYSIS_BLOCKED' && (checkout.snapshot_hash || checkout.confirmation_id || checkout.order))) {
+    throw new Error('Inconsistent context analysis outcome. All actions are blocked.');
+  }
+  return analysis;
+}
+
+/** A claim is not proof of a network send; accounting is not semantic truth. */
+export function contextAnalysisText(checkout) {
+  if (!checkout) return 'No owned analysis attempt is shown.';
+  const analysis = validateContextAnalysis(checkout);
+  const claim = analysis.dispatch_state === 'attempted'
+    ? 'Dispatch claim recorded; this does not prove a provider request was sent.'
+    : 'No dispatch claim recorded.';
+  const usage = !analysis.usage_observed ? 'No usage observation.'
+    : analysis.evidence_kind === 'fabricated-offline'
+      ? 'Fabricated offline usage recorded; not a provider observation.'
+      : 'Provider usage recorded; this is not an invoice or a correctness judgment.';
+  const accounting = {unobserved: 'Accounting is unobserved.', known: 'Accounting is known; this does not validate the suggestion.',
+    unknown: 'Accounting remains UNKNOWN; capacity stays held. Do not retry the analysis.'}[analysis.accounting_state];
+  return `${claim} ${usage} ${accounting}`;
+}
+
+/** Retain accounting only; an obsolete proposal/source/consent grants no action. */
+export function contextAnalysisHistory(checkout) {
+  if (!checkout || checkout.stale !== true || checkout.order) return null;
+  if (!checkout.analysis && checkout.model?.execution_mode !== CONTEXT_MODE) return null;
+  const analysis = validateContextAnalysis(checkout);
+  return {accounting_state: analysis.accounting_state, evidence_kind: analysis.evidence_kind,
+    text: contextAnalysisText(checkout)};
 }
 
 /** Return secrets live only in this page's memory, never history or storage. */
@@ -136,7 +215,20 @@ export function validateCheckout(checkout, catalog, providers) {
     throw new Error('The reviewed item total differs from the catalog. No order can be created.');
   }
   const modes = validateProviders(providers);
-  if (checkout.model?.is_fixture !== modes.analysis.is_fixture
+  const context = modes.analysis.mode === CONTEXT_MODE;
+  const historicalContext = checkout.stale === true && checkout.model?.execution_mode === CONTEXT_MODE
+    && modes.payment.mode === 'fixture';
+  const historicalLegacy = context && checkout.stale === true && !checkout.analysis
+    && checkout.model?.execution_mode !== CONTEXT_MODE && typeof checkout.model?.is_fixture === 'boolean';
+  if ((context && !historicalLegacy) || historicalContext) {
+    validateContextAnalysis(checkout);
+    if (checkout.stale !== true && checkout.model.execution_kind !== modes.analysis.execution_kind) {
+      throw new Error('The analysis configuration no longer matches this review.');
+    }
+  } else if (checkout.analysis || checkout.model?.execution_mode === CONTEXT_MODE) {
+    throw new Error('Context analysis requires its explicit server mode.');
+  }
+  if ((!historicalContext && !historicalLegacy && checkout.model?.is_fixture !== modes.analysis.is_fixture)
       || (checkout.order && checkout.order.provider_mode !== modes.payment.mode)) {
     throw new Error('An inconsistent adapter response was blocked.');
   }

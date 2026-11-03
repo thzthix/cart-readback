@@ -57,10 +57,21 @@ const product = {sku_id: 'KB-UK', name: 'Synthetic keyboard', price_minor: 7900,
   baseline: {layout: 'UK_QWERTY', included_cable: 'USB-C to USB-C'}};
 const catalog = [product, ...Array.from({length: 5}, (_, i) => ({...structuredClone(product), sku_id: `KB-${i}`}))];
 let revision = 0; let checkout = null; let failNext = false; const requests = [];
-const response = data => ({ok: true, json: async () => structuredClone({api_version: '1', mode: 'fixture', revision, ...data})});
+let envelopeMode = 'fixture'; let activeProviders; let releaseInitialBootstrap;
+const response = data => ({ok: true, json: async () => structuredClone({api_version: '1', mode: envelopeMode,
+  ...(activeProviders ? {providers: activeProviders} : {}), revision, ...data})});
+const contextProviders = (execution_kind = 'fabricated-offline', dispatch_available = true) => ({
+  analysis: {mode: 'genuine-context-capacity', is_fixture: false, execution_kind, dispatch_available},
+  payment: {mode: 'fixture', is_fixture: true}, network_enabled: execution_kind === 'provider-runtime' && dispatch_available});
+const contextModel = execution_kind => ({provider: 'openai-responses', model_version: 'gpt-6-luna',
+  prompt_version: 'cartreadback-prompt-v2-wire', adapter_version: 'genuine-context-responses-v1',
+  validator_version: 'strict-spans-v1+ordered-results-v1', is_fixture: false, execution_mode: 'genuine-context-capacity', execution_kind});
 globalThis.fetch = async (path, options = {}) => {
   if (failNext) { failNext = false; throw new TypeError('Synthetic transport interruption'); }
-  if (path === '/api/bootstrap') return response({csrf_token: 'synthetic-token', catalog, checkout});
+  if (path === '/api/bootstrap') {
+    if (!releaseInitialBootstrap) return new Promise(resolve => { releaseInitialBootstrap = () => resolve(response({csrf_token: 'synthetic-token', catalog, checkout})); });
+    return response({csrf_token: 'synthetic-token', catalog, checkout});
+  }
   const payload = JSON.parse(options.body); requests.push({path, payload, headers: options.headers});
   assert.equal(payload.expected_revision, revision);
   assert.equal(options.headers['X-CSRF-Token'], 'synthetic-token');
@@ -68,6 +79,11 @@ globalThis.fetch = async (path, options = {}) => {
     checkout = {review_id: `r${revision}`, state: 'REVIEW_REQUIRED', sku_id: payload.sku_id, snapshot_hash: 'b'.repeat(64),
       source, amount: {minor: 7900, currency: 'USD'}, model: {is_fixture: true}, confirmation_id: null, order: null,
       conditions: payload.conditions.map((condition, index) => ({condition_id: `c${index + 1}`, ...condition}))};
+    if (envelopeMode === 'mixed') {
+      checkout.model = contextModel(activeProviders.analysis.execution_kind);
+      checkout.analysis = {strategy: 'context-capacity-v1', dispatch_state: 'attempted', accounting_state: 'known', usage_observed: true,
+        evidence_kind: activeProviders.analysis.execution_kind === 'fabricated-offline' ? 'fabricated-offline' : 'provider-observation'};
+    }
     checkout.results = checkout.conditions.map(condition => ({condition_id: condition.condition_id, status: 'match', explanation: 'Explicit synthetic description.',
       evidence: [{source_id: source.source_id, start: 8, end: 17, quote: 'UK QWERTY'}]}));
   } else if (path === '/api/confirm') {
@@ -90,6 +106,18 @@ const change = (id, value, checked) => { const element = $(id); if (value !== un
 const orderButton = action => elements().find(element => element.dataset.orderAction === action);
 await import('./app.mjs');
 await flush();
+
+test('initial delayed bootstrap is configuration-unestablished, never fixture or no-charge evidence', async () => {
+  assert.match(html, /id="mode-label">Loading provider configuration/);
+  assert.match(html, /id="mode-notice">Configuration is not established/);
+  assert.match(html, /id="analysis-label"[^>]*>Analysis configuration is not established/);
+  assert.match($('mode-label').textContent, /unestablished/);
+  assert.match($('mode-notice').textContent, /actions are paused/);
+  assert.doesNotMatch($('analysis-label').textContent, /Scripted|no model call/);
+  assert.equal($('analyze').disabled, true);
+  releaseInitialBootstrap(); await flush();
+  assert.equal($('mode-label').textContent, 'Fixture mode · sample shop');
+});
 
 test('app fixture workflow, stale consent, final intent, recovery and uncertainty guards', async () => {
   assert.equal($('catalog-rows').children.length, 6);
@@ -218,4 +246,220 @@ test('partial HTTP response body retains deadline, pauses mutation and allows st
     for (const socket of sockets) socket.destroy();
     await new Promise(resolve => server.close(resolve));
   }
+});
+
+
+test('C12 unavailable analysis keeps baseline readable without sending an attempt', async () => {
+  envelopeMode = 'mixed'; activeProviders = contextProviders('unavailable', false); checkout = null;
+  $('reload').click(); await flush();
+  document.querySelectorAll('input[name="sku"]')[0].dispatch('change');
+  change('want-layout', undefined, true);
+  assert.equal($('catalog-source-text').textContent, source.text);
+  assert.equal($('analyze').disabled, true);
+  const before = requests.length;
+  $('conditions-form').dispatch('submit'); await flush();
+  assert.equal(requests.length, before, 'even a submitted disabled form sends no analysis');
+  assert.match($('analysis-label').textContent, /dispatch unavailable/);
+  assert.match($('mode-notice').textContent, /may incur API charges/);
+  assert.doesNotMatch($('mode-notice').textContent, /No money moves|connected checkout/);
+});
+test('C12 fabricated analysis labels usage honestly through explicit simulated checkout', async () => {
+  activeProviders = contextProviders(); $('reload').click(); await flush();
+  const first = document.querySelectorAll('input[name="sku"]')[0]; first.checked = true; first.dispatch('change');
+  change('want-layout', undefined, true);
+  const before = requests.length;
+  $('conditions-form').dispatch('submit'); $('conditions-form').dispatch('submit'); await flush();
+  assert.equal(requests.length, before + 1, 'repeated analyze submits claim once');
+  assert.equal($('review-heading'), document.activeElement);
+  assert.match($('suggestion-label').textContent, /Fabricated offline usage recorded; not a provider observation/);
+  assert.match($('suggestion-label').textContent, /does not validate/);
+  assert.equal($('analysis-badge').textContent, 'Fabricated offline');
+  assert.match($('scope-label').textContent, /simulated checkout/);
+  assert.doesNotMatch($('scope-label').textContent, /offline only/);
+  change('confirm-snapshot', undefined, true); $('confirm').click(); await flush();
+  assert.match($('payment-label').textContent, /no checkout payment/);
+  assert.doesNotMatch($('payment-label').textContent, /No money moves/);
+  orderButton('create').click(); await flush();
+  orderButton('approve').click(); await flush();
+  orderButton('verify').click(); await flush();
+  assert.equal($('capture').disabled, true, 'known usage does not grant final payment intent');
+  change('final-capture', undefined, true); $('capture').click(); await flush();
+  assert.match($('order-help').textContent, /Analysis API charges are separate/);
+  assert.doesNotMatch($('order-help').textContent, /no money moved/);
+});
+test('C12 historical context order stays readable under a current fixture configuration', async () => {
+  checkout.stale = true; checkout.confirmation_id = null; checkout.state = 'PAYMENT_UNKNOWN';
+  envelopeMode = 'fixture'; activeProviders = undefined;
+  $('reload').click(); await flush();
+  assert.equal($('error-summary').hidden, true);
+  assert.match($('mode-label').textContent, /Previous context review/);
+  assert.match($('analysis-label').textContent, /Scripted fixture analysis is configured now/);
+  assert.match($('suggestion-label').textContent, /Fabricated offline usage/);
+  assert.equal($('analyze').disabled, true);
+  assert.ok(orderButton('reconcile'));
+  assert.equal(orderButton('capture'), undefined);
+  assert.equal(orderButton('create'), undefined);
+});
+test('C12 UNKNOWN usage survives reload and selection change without retry or confirmation', async () => {
+  envelopeMode = 'mixed'; activeProviders = contextProviders();
+  checkout = {...checkout, stale: false, state: 'ANALYSIS_BLOCKED', snapshot_hash: null, confirmation_id: null, order: null, results: [],
+    analysis: {...checkout.analysis, accounting_state: 'unknown'}};
+  $('reload').click(); await flush();
+  assert.equal($('snapshot').hidden, true);
+  assert.match($('suggestion-label').textContent, /Fabricated offline usage/);
+  assert.match($('analysis-label').textContent, /UNKNOWN accounting/);
+  assert.equal($('analyze').disabled, true);
+  const before = requests.length;
+  change('want-cable', undefined, true);
+  assert.equal($('analyze').disabled, true);
+  assert.match($('status').textContent, /remains held by UNKNOWN/);
+  $('conditions-form').dispatch('submit'); await flush();
+  assert.equal(requests.length, before);
+  $('reload').click(); await flush();
+  assert.match($('suggestion-label').textContent, /UNKNOWN; capacity stays held/);
+});
+test('C12 configured provider capability does not claim a call, observation or connected payment', async () => {
+  checkout = null; activeProviders = contextProviders('provider-runtime');
+  $('reload').click(); await flush();
+  assert.match($('analysis-label').textContent, /Availability does not prove a call/);
+  assert.match($('suggestion-label').textContent, /No owned analysis attempt/);
+  assert.equal($('analysis-badge').textContent, 'No usage observed');
+  assert.match($('mode-notice').textContent, /may incur API charges/);
+  assert.match($('payment-label').textContent, /PayPal is unconnected/);
+  assert.equal($('review-section').hidden, true);
+});
+test('C12 stale async analysis response cannot restore invalidated review consent', async () => {
+  activeProviders = contextProviders(); $('reload').click(); await flush();
+  const radio = document.querySelectorAll('input[name="sku"]')[0]; radio.checked = true; radio.dispatch('change');
+  change('want-layout', undefined, true);
+  const original = globalThis.fetch; let finish;
+  globalThis.fetch = async (...args) => { await new Promise(resolve => { finish = resolve; }); return original(...args); };
+  try {
+    $('conditions-form').dispatch('submit');
+    change('want-cable', undefined, true); // A newer client selection wins, even during interruption.
+    finish(); await flush();
+    assert.equal($('review-section').hidden, true);
+    assert.equal($('confirm-snapshot').checked, false);
+    assert.equal($('confirm').disabled, true);
+    assert.match($('status').textContent, /Selection changed during the request/);
+  } finally { globalThis.fetch = original; }
+});
+test('C12 unsupported envelope and server-private error text fail closed without exposing identifiers', async () => {
+  checkout = null; activeProviders = contextProviders(); $('reload').click(); await flush();
+  document.querySelectorAll('input[name="sku"]')[0].dispatch('change'); change('want-layout', undefined, true);
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => ({ok: false, status: 503, json: async () => ({api_version: '1', mode: 'mixed', providers: activeProviders,
+    revision, error: {code: 'PRIVATE-request-id', message: 'private-project/private-approval/private-credential'}})});
+  try {
+    $('conditions-form').dispatch('submit'); await flush();
+    assert.equal($('analyze').disabled, true);
+    assert.match($('error-message').textContent, /request was refused/);
+    assert.doesNotMatch($('error-message').textContent, /private-|PRIVATE/);
+  } finally { globalThis.fetch = original; }
+  activeProviders = {...contextProviders(), network_enabled: true};
+  $('reload').click(); await flush();
+  assert.equal($('analyze').disabled, true);
+  assert.match($('error-message').textContent, /Unsupported provider or network mode/);
+  assert.match($('mode-label').textContent, /unestablished/);
+  assert.match($('mode-notice').textContent, /actions are paused/);
+  assert.doesNotMatch($('analysis-label').textContent, /available\./);
+});
+
+test('C12 legacy order is a previous fixture review, not a new context observation', async () => {
+  activeProviders = contextProviders();
+  checkout = {review_id: 'legacy-review', state: 'PAYMENT_UNKNOWN', sku_id: 'KB-UK', snapshot_hash: 'b'.repeat(64),
+    source, amount: {minor: 7900, currency: 'USD'}, model: {is_fixture: true}, confirmation_id: null, stale: true,
+    order: {order_id: 'legacy-order', provider_order_id: 'FIXTURE-OLD', provider_mode: 'fixture'},
+    conditions: [{condition_id: 'c1', kind: 'layout', value: 'UK_QWERTY'}],
+    results: [{condition_id: 'c1', status: 'match', explanation: 'Previous fixture.',
+      evidence: [{source_id: source.source_id, start: 8, end: 17, quote: 'UK QWERTY'}]}]};
+  $('reload').click(); await flush();
+  assert.equal($('error-summary').hidden, true);
+  assert.match($('suggestion-label').textContent, /Previous scripted fixture suggestions/);
+  assert.equal($('analysis-badge').textContent, 'Previous offline review');
+  assert.equal($('confirm').hidden, true);
+  assert.equal(orderButton('create'), undefined);
+  assert.equal(orderButton('capture'), undefined);
+  assert.ok(orderButton('reconcile'));
+});
+
+test('C12 UNKNOWN history keeps analysis held after returning to default fixture', async () => {
+  envelopeMode = 'fixture'; activeProviders = undefined;
+  checkout = {...checkout, state: 'ANALYSIS_BLOCKED', snapshot_hash: null, order: null, results: [],
+    model: contextModel('fabricated-offline'),
+    analysis: {strategy: 'context-capacity-v1', dispatch_state: 'attempted', accounting_state: 'unknown',
+      usage_observed: true, evidence_kind: 'fabricated-offline'}};
+  $('reload').click(); await flush();
+  change('want-layout', undefined, true);
+  assert.equal($('analyze').disabled, true);
+  const before = requests.length;
+  $('conditions-form').dispatch('submit'); await flush();
+  assert.equal(requests.length, before);
+});
+
+
+test('C12 unobserved pending accounting cannot be retried after reload', async () => {
+  envelopeMode = 'mixed'; activeProviders = contextProviders();
+  checkout = {...checkout, stale: false, analysis: {...checkout.analysis,
+    accounting_state: 'unobserved', usage_observed: false, evidence_kind: 'none'}};
+  $('reload').click(); await flush();
+  assert.equal($('analyze').disabled, true);
+  assert.match($('analysis-label').textContent, /unobserved/);
+  assert.doesNotMatch($('analysis-label').textContent, /UNKNOWN/);
+  const before = requests.length;
+  change('want-cable', undefined, true); $('conditions-form').dispatch('submit'); await flush();
+  assert.equal(requests.length, before);
+  assert.match($('status').textContent, /remains unobserved/);
+});
+
+
+test('C12 stale no-order context accounting remains visible without reviving obsolete consent', async () => {
+  for (const [kind, evidence] of [['provider-runtime', 'provider-observation'], ['fabricated-offline', 'fabricated-offline']]) {
+    envelopeMode = 'fixture'; activeProviders = undefined;
+    checkout = {review_id: 'old-context', state: 'ANALYSIS_BLOCKED', sku_id: 'KB-UK',
+      snapshot_hash: null, confirmation_id: null, order: null, results: [], stale: true,
+      source: {...source, text: 'Obsolete source is not restored'}, amount: {minor: 7900, currency: 'USD'},
+      conditions: [{condition_id: 'c1', kind: 'layout', value: 'UK_QWERTY'}], model: contextModel(kind),
+      analysis: {strategy: 'context-capacity-v1', dispatch_state: 'attempted', accounting_state: 'unknown',
+        usage_observed: true, evidence_kind: evidence}};
+    $('reload').click(); await flush();
+    assert.equal($('error-summary').hidden, true);
+    assert.match($('mode-label').textContent, /Previous context review/);
+    assert.match($('analysis-label').textContent, /Scripted fixture analysis is configured now/);
+    assert.equal($('analysis-history').hidden, false);
+    assert.match($('analysis-history').textContent, /UNKNOWN; capacity stays held/);
+    assert.match($('analysis-history').textContent, kind === 'provider-runtime' ? /Provider usage recorded/ : /Fabricated offline usage/);
+    assert.doesNotMatch($('mode-notice').textContent, /No real AI inference|No money moves/);
+    assert.equal($('review-section').hidden, true);
+    assert.equal($('order-section').hidden, true);
+    assert.equal($('confirm-snapshot').checked, false);
+    assert.equal($('confirm').disabled, true);
+    assert.equal($('analyze').disabled, true);
+    const before = requests.length;
+    change('want-cable', undefined, true); $('conditions-form').dispatch('submit'); await flush();
+    assert.equal(requests.length, before);
+    assert.equal($('analysis-history').hidden, false, 'selection does not erase retained accounting');
+  }
+});
+
+test('C12 late response keeps UNKNOWN accounting even after a newer selection', async () => {
+  envelopeMode = 'mixed'; activeProviders = contextProviders(); checkout = null;
+  $('reload').click(); await flush();
+  document.querySelectorAll('input[name="sku"]')[0].dispatch('change'); change('want-layout', undefined, true);
+  const original = globalThis.fetch; let finish;
+  globalThis.fetch = async (...args) => {
+    await new Promise(resolve => { finish = resolve; });
+    await original(...args);
+    checkout = {...checkout, state: 'ANALYSIS_BLOCKED', snapshot_hash: null, results: [],
+      analysis: {...checkout.analysis, accounting_state: 'unknown'}};
+    return response({checkout});
+  };
+  try {
+    $('conditions-form').dispatch('submit'); change('want-cable', undefined, true); finish(); await flush();
+    assert.equal($('review-section').hidden, true);
+    assert.equal($('analysis-history').hidden, false);
+    assert.match($('analysis-history').textContent, /UNKNOWN/);
+    assert.equal($('analyze').disabled, true);
+    assert.equal($('confirm-snapshot').checked, false);
+  } finally { globalThis.fetch = original; }
 });

@@ -2,7 +2,7 @@
 
 This host-only primitive does not authorize genuine dispatch. Reference prices
 are not adopted project prices. The caller owns the SQLite transaction and lock;
-no existing service, synthetic identity or UNKNOWN history is changed here.
+the context service bridge composes it without rewriting prior UNKNOWN history.
 """
 
 import hashlib
@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from cartreadback_app.inference_config import MODEL, load_bundle
 from cartreadback_app.provider_json import strict_provider_json
+from cartreadback_app.responses_http import valid_request_id
 from cartreadback_app.validation import (
     AppError,
     canonical,
@@ -459,6 +460,37 @@ def parse_accounting(envelope: bytes, policy: ContextCapacityPolicy) -> str:
     )
 
 
+def initialize_context_capacity(connection: sqlite3.Connection) -> None:
+    """Initialize schema without requiring any current installation or approval."""
+    if not connection.in_transaction:
+        raise _error()
+    for statement in _SCHEMA.split(";"):
+        if statement.strip():
+            connection.execute(statement)
+
+
+def context_ledger_from_document(connection, document: str):
+    """Restore the original immutable ledger for recovery and late accounting."""
+    try:
+        raw = json.loads(document)
+        stored = raw["policy"]
+        policy = ContextCapacityPolicy(
+            stored["valid_from"],
+            stored["expires_at"],
+            stored["reference_profile"],
+            stored["evidence_revision"],
+        )
+        authorization = HostCapacityAuthorization(**raw["host_authorization"])
+        ledger = TransactionContextCapacityLedger(
+            connection, policy, authorization
+        )
+        if ledger.identity != document:
+            raise _error()
+        return ledger
+    except (ValueError, TypeError, KeyError) as error:
+        raise _error() from error
+
+
 def recover_context_capacity(connection: sqlite3.Connection) -> None:
     """Fence pending work UNKNOWN in the exclusive owner's startup transaction.
 
@@ -476,7 +508,7 @@ def recover_context_capacity(connection: sqlite3.Connection) -> None:
 class TransactionContextCapacityLedger:
     """Short caller-owned transactions for atomic analysis/capacity integration.
 
-    No service selects this primitive. Callers must serialize current host state
+    Default service selection remains off. Callers serialize current host state
     with reserve/claim/observe, keep the same database and immutable identity,
     own startup recovery and commit before any outside work. No network callback
     is accepted. Returned claims confer only local accounting identity.
@@ -507,9 +539,7 @@ class TransactionContextCapacityLedger:
                 "host_authorization": asdict(authorization),
             }
         )
-        for statement in _SCHEMA.split(";"):
-            if statement.strip():
-                connection.execute(statement)
+        initialize_context_capacity(connection)
         row = connection.execute(
             "SELECT document FROM context_capacity_identity WHERE singleton = 1"
         ).fetchone()
@@ -520,6 +550,11 @@ class TransactionContextCapacityLedger:
             )
         elif row[0] != self._identity:
             raise _error()
+
+    @property
+    def identity(self) -> str:
+        """Return the private immutable record for original-policy observation."""
+        return self._identity
 
     def _transaction(self) -> sqlite3.Connection:
         connection = self._connection
@@ -692,8 +727,7 @@ class TransactionContextCapacityLedger:
             request_sha256 != claim.reservation.request_sha256
             or runtime_sha256 != self._authorization.runtime_sha256
             or type(current_fence) is not ContextFence
-            or type(request_id) is not str
-            or not re.fullmatch(r"req_[A-Za-z0-9_-]{1,96}", request_id)
+            or not valid_request_id(request_id)
             or row[3]
         ):
             raise _error()

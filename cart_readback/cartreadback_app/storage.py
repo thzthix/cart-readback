@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS analysis_operations (
     status TEXT NOT NULL, dispatch_token TEXT NOT NULL DEFAULT '',
     reserved_at TEXT NOT NULL, dispatched_at TEXT NOT NULL DEFAULT '',
     observed_at TEXT NOT NULL DEFAULT '', observation TEXT NOT NULL DEFAULT '',
-    error_code TEXT NOT NULL DEFAULT ''
+    error_code TEXT NOT NULL DEFAULT '',
+    strategy TEXT NOT NULL DEFAULT ''
 );
 CREATE UNIQUE INDEX IF NOT EXISTS single_accounted_analysis
 ON analysis_operations(is_fixture)
@@ -105,6 +106,16 @@ class Store:
                     connection.execute(
                         f"ALTER TABLE operations ADD COLUMN {name} {definition}"
                     )
+            analysis_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(analysis_operations)"
+                )
+            }
+            if "strategy" not in analysis_columns:
+                connection.execute(
+                    "ALTER TABLE analysis_operations ADD COLUMN strategy TEXT NOT NULL DEFAULT ''"
+                )
             connection.execute("BEGIN IMMEDIATE")
             if not connection.execute(
                 "SELECT 1 FROM catalog LIMIT 1"

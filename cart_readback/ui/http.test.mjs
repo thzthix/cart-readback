@@ -34,7 +34,7 @@ async function confirm(client, acknowledged = new Set()) {
 }
 
 test('HTTP serves the actual UI with correct MIME and same-origin protections', {skip: !origin}, async () => {
-  for (const [path, mime, text] of [['/', 'text/html', 'Fixture mode'], ['/app.mjs', 'text/javascript', "from './core.mjs'"],
+  for (const [path, mime, text] of [['/', 'text/html', 'Loading provider configuration'], ['/app.mjs', 'text/javascript', "from './core.mjs'"],
     ['/core.mjs', 'text/javascript', 'FEATURE_FLAGS'], ['/styles.css', 'text/css', '@media(max-width:480px)']]) {
     const response = await fetch(`${origin}${path}`); assert.equal(response.status, 200);
     assert.ok(response.headers.get('content-type').startsWith(mime));

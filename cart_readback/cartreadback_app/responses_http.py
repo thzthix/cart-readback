@@ -1,8 +1,8 @@
 """Fixed-origin HTTPS mechanics for explicitly injected offline connections.
 
-No network factory, credential loader or runtime enable is shipped. Both injected
-callbacks are trusted Python code, not an isolation boundary. This prerequisite
-does not implement or authorize a token/USD budget or genuine provider use.
+No network factory, credential loader or runtime enable is selected by default.
+The concrete stdlib constructor stays unselected. Injected callbacks and installed
+host contexts are trusted Python, not an isolation boundary or billing authority.
 """
 
 import http.client
@@ -25,6 +25,16 @@ _CHUNK = 8_192
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 _TOKEN = re.compile(r"[A-Za-z0-9._~+/-]+=*")
 _REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{1,256}")
+
+
+def valid_request_id(value: object) -> bool:
+    """Accept bounded opaque header IDs, without assuming a provider prefix.
+
+    OpenAI documents x-request-id as an opaque debugging identifier, not a req_
+    grammar. This local supported subset is shared by transport and accounting;
+    future unsupported formats fail closed. It is not proof of provider origin.
+    """
+    return type(value) is str and _REQUEST_ID.fullmatch(value) is not None
 
 
 def _failure(timeout: bool = False) -> AppError:
@@ -243,7 +253,7 @@ def _response_headers(
         if expected > _MAX_RESPONSE:
             raise _failure()
     request_id = relevant.get("x-request-id", "")
-    if _REQUEST_ID.fullmatch(request_id) is None:
+    if not valid_request_id(request_id):
         raise _failure()
     return request_id, expected
 
@@ -281,6 +291,19 @@ class InjectedHTTPSTransport:
     def metadata(self) -> dict:
         """Expose only nonsecret routing facts, never callbacks or credentials."""
         return self._config.metadata
+
+    def _borrow_credentials(self, deadline):
+        deadline.remaining()
+        return self._credentials()
+
+    def _scope_headers(self):
+        return {}
+
+    def _before_io(self, deadline):
+        deadline.remaining()
+
+    def _before_post(self, deadline):
+        deadline.remaining()
 
     def send(
         self, endpoint: str, body: bytes, *, deadline: Deadline
@@ -331,6 +354,7 @@ class InjectedHTTPSTransport:
         def socket_timeout() -> None:
             if closed or established_socket is None:
                 raise _failure()
+            self._before_io(deadline)
             # getresponse() may clear connection.sock for Connection: close.
             # HTTPResponse's file object retains the established descriptor.
             established_socket.settimeout(deadline.read_timeout())
@@ -355,10 +379,11 @@ class InjectedHTTPSTransport:
             connection.auto_open = 0
             if self._config.route == "pythonanywhere":
                 connection.set_tunnel(_HOST, 443, headers={})
+            self._before_io(deadline)
             connection.connect()
             established_socket = connection.sock
             socket_timeout()
-            token = self._credentials()
+            token = self._borrow_credentials(deadline)
             if (
                 type(token) is not str
                 or not 1 <= len(token) <= 4096
@@ -366,6 +391,7 @@ class InjectedHTTPSTransport:
             ):
                 raise _failure()
             headers = {
+                **self._scope_headers(),
                 "Host": _HOST,
                 "Authorization": "Bearer " + token,
                 "Content-Type": "application/json",
@@ -376,6 +402,7 @@ class InjectedHTTPSTransport:
             }
             try:
                 socket_timeout()
+                self._before_post(deadline)
                 connection.request(
                     "POST",
                     _PATH,
@@ -467,3 +494,71 @@ class InjectedHTTPSTransport:
                 or isinstance(error, AppError)
                 and error.code == "MODEL_TIMEOUT"
             ) from None
+
+
+class ScopedHTTPSTransport(InjectedHTTPSTransport):
+    """Host-bound transport, distinct from the unscoped offline callback seam.
+
+    A trusted provisioner supplies the complete installed context and opaque
+    handle. No resolver, credential source or network factory is selected here.
+    """
+
+    def __init__(self, connection_factory, installed, clock, claim_expires_at):
+        """Retain the host context without constructing connections or secrets."""
+        from cartreadback_app.context_runtime import InstalledProviderContext
+
+        if (
+            type(installed) is not InstalledProviderContext
+            or type(claim_expires_at) is not int
+            or claim_expires_at <= 0
+        ):
+            raise _failure()
+        self._installed = installed
+        self._clock = clock
+        self._claim_expires_at = claim_expires_at
+        super().__init__(connection_factory, self._denied, installed.route)
+
+    @staticmethod
+    def _denied():
+        raise _failure()
+
+    def _validate_window(self):
+        now = self._clock()
+        self._installed.validate(now)
+        if now >= self._claim_expires_at:
+            raise _failure(timeout=True)
+
+    def _borrow_credentials(self, deadline):
+        self._validate_window()
+        deadline.remaining()
+        return self._installed.credential_handle.borrow(
+            expected_binding=self._installed.binding, deadline=deadline
+        )
+
+    def _scope_headers(self):
+        self._validate_window()
+        binding = self._installed.binding
+        return {
+            "OpenAI-Organization": binding.organization,
+            "OpenAI-Project": binding.project,
+        }
+
+    def _before_io(self, deadline):
+        self._validate_window()
+        deadline.remaining()
+
+    def _before_post(self, deadline):
+        self._validate_window()
+        deadline.remaining()
+
+    def send(self, endpoint, body, *, deadline):
+        """Check approval and claim wall expiry before all sensitive transitions."""
+        self._validate_window()
+        return super().send(endpoint, body, deadline=deadline)
+
+
+def unselected_stdlib_connection(host, port, *, timeout, context):
+    """Construct stdlib HTTPS mechanics; never selected by default or tests."""
+    return http.client.HTTPSConnection(
+        host, port, timeout=timeout, context=context
+    )

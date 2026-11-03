@@ -184,3 +184,122 @@ test('return matching blocks stale/foreign/expired/consumed and never supplies c
       buyer_return: {...returnOrder.order.buyer_return, ...patch}}}, 4, offline));
   }
 });
+
+
+import {contextAnalysisText, contextAnalysisHistory} from './core.mjs';
+const contextProviders = (execution_kind = 'fabricated-offline', dispatch_available = true) => ({
+  analysis: {mode: 'genuine-context-capacity', is_fixture: false, execution_kind, dispatch_available},
+  payment: {mode: 'fixture', is_fixture: true}, network_enabled: execution_kind === 'provider-runtime' && dispatch_available});
+const contextModel = (execution_kind = 'fabricated-offline') => ({provider: 'openai-responses', model_version: 'gpt-6-luna',
+  prompt_version: 'cartreadback-prompt-v2-wire', adapter_version: 'genuine-context-responses-v1',
+  validator_version: 'strict-spans-v1+ordered-results-v1', is_fixture: false, execution_mode: 'genuine-context-capacity', execution_kind});
+const contextCheckout = () => ({...clone(checkout), model: contextModel(), analysis: {strategy: 'context-capacity-v1',
+  dispatch_state: 'attempted', accounting_state: 'known', usage_observed: true, evidence_kind: 'fabricated-offline'}});
+
+test('C12 configured execution and dispatch capability are distinct from evidence', () => {
+  for (const kind of ['unavailable', 'fabricated-offline', 'provider-runtime']) {
+    for (const available of [false, true]) {
+      const providers = contextProviders(kind, available);
+      if (kind === 'unavailable' && available) assert.throws(() => validateProviders(providers));
+      else assert.equal(validateEnvelope({api_version: '1', mode: 'mixed', providers}), providers);
+    }
+  }
+  assert.equal(contextAnalysisText(null), 'No owned analysis attempt is shown.');
+  assert.throws(() => validateEnvelope({api_version: '1', mode: 'mixed'}));
+});
+test('C12 unsupported composition, mode, flags and extra authority fields fail closed', () => {
+  const valid = contextProviders();
+  for (const bad of [
+    {...valid, payment: offline.payment}, {...valid, network_enabled: true}, {...valid, network_enabled: 0},
+    {...valid, approval: 'private'}, {...valid, analysis: {...valid.analysis, is_fixture: true}},
+    ...['true', 1, null, undefined].map(dispatch_available => ({...valid, analysis: {...valid.analysis, dispatch_available}})),
+    ...['provider-observation', 'provider', 'live', '', null].map(execution_kind => ({...valid, analysis: {...valid.analysis, execution_kind}})),
+    {...valid, analysis: {...valid.analysis, evidence_kind: 'provider-observation'}},
+    {...valid, analysis: {...valid.analysis, connected: true}},
+  ]) assert.throws(() => validateProviders(bad));
+  for (const mode of ['fixture', 'offline', 'live']) assert.throws(() => validateEnvelope({api_version: '1', mode, providers: valid}));
+  for (const mode of ['mixed', 'offline']) assert.throws(() => validateEnvelope({api_version: '1', mode,
+    providers: {analysis: {mode: 'fixture', is_fixture: true}, payment: valid.payment, network_enabled: false}}));
+});
+test('C12 known fabricated usage remains visibly fabricated, never semantic verification', () => {
+  const review = contextCheckout();
+  assert.equal(validateCheckout(review, catalog, contextProviders()), review);
+  assert.match(contextAnalysisText(review), /Fabricated offline usage recorded; not a provider observation/);
+  assert.match(contextAnalysisText(review), /does not validate the suggestion/);
+  assert.match(contextAnalysisText(review), /does not prove a provider request was sent/);
+});
+test('C12 unknown retains late usage without a snapshot or accepted result', () => {
+  const blocked = {...contextCheckout(), state: 'ANALYSIS_BLOCKED', snapshot_hash: null, results: []};
+  blocked.analysis.accounting_state = 'unknown';
+  assert.equal(validateCheckout(blocked, catalog, contextProviders()), blocked);
+  assert.match(contextAnalysisText(blocked), /UNKNOWN; capacity stays held/);
+  assert.throws(() => confirmPayload(blocked, 1, true, new Set()));
+  const noUsage = clone(blocked); noUsage.analysis.usage_observed = false; noUsage.analysis.evidence_kind = 'none';
+  assert.equal(validateCheckout(noUsage, catalog, contextProviders()), noUsage);
+  assert.match(contextAnalysisText(noUsage), /No usage observation/);
+  const semanticFailure = clone(blocked); semanticFailure.analysis.accounting_state = 'known';
+  assert.equal(validateCheckout(semanticFailure, catalog, contextProviders()), semanticFailure);
+  assert.throws(() => confirmPayload(semanticFailure, 1, true, new Set()));
+});
+test('C12 contradictory accounting, attempt and observation values are rejected', () => {
+  for (const patch of [{dispatch_state: 'not-attempted'}, {dispatch_state: 'sent'}, {usage_observed: 1},
+    {usage_observed: false}, {evidence_kind: 'none'}, {evidence_kind: 'provider-observation'},
+    {accounting_state: 'unobserved'}, {accounting_state: 'unknown'}, {accounting_state: 'paid'},
+    {request_id: 'private-request-id'}, {strategy: 'offline-count-v1'}]) {
+    const invalid = contextCheckout(); Object.assign(invalid.analysis, patch);
+    assert.throws(() => validateCheckout(invalid, catalog, contextProviders()));
+  }
+  const invalid = contextCheckout(); invalid.state = 'ANALYSIS_BLOCKED';
+  assert.throws(() => validateCheckout(invalid, catalog, contextProviders()));
+});
+test('C12 allowlist rejects private model fields and contradictory identities', () => {
+  for (const patch of [{project: 'private-project'}, {approval: 'private-approval'}, {credential_handle: 'private-handle'},
+    {request_id: 'raw-id'}, {runtime_sha256: 'a'.repeat(64)}, {evidence_kind: 'provider-observation'},
+    {provider: 'fixture'}, {model_version: 'other'}, {prompt_version: 'other'}, {execution_kind: 'provider-runtime'}]) {
+    const invalid = contextCheckout(); Object.assign(invalid.model, patch);
+    assert.throws(() => validateCheckout(invalid, catalog, contextProviders()));
+  }
+});
+test('C12 historical context evidence remains readable under unavailable or fixture configuration', () => {
+  const historical = {...contextCheckout(), stale: true, confirmation_id: null,
+    order: {order_id: 'old-context-order', provider_mode: 'fixture'}};
+  for (const providers of [contextProviders('unavailable', false), contextProviders('provider-runtime', false),
+    {analysis: {mode: 'fixture', is_fixture: true}, payment: {mode: 'fixture', is_fixture: true}, network_enabled: false}]) {
+    assert.equal(validateCheckout(historical, catalog, providers), historical);
+    assert.match(contextAnalysisText(historical), /Fabricated offline usage/);
+    assert.throws(() => confirmPayload(historical, 1, true, new Set(['c2'])));
+  }
+  assert.throws(() => validateCheckout(historical, catalog, offline));
+  assert.throws(() => validateCheckout(contextCheckout(), catalog, contextProviders('unavailable', false)));
+});
+test('C12 unattempted unavailable and provider observation are separate valid states', () => {
+  const unavailable = {...contextCheckout(), state: 'ANALYSIS_BLOCKED', snapshot_hash: null, results: [], model: contextModel('unavailable'),
+    analysis: {strategy: 'context-capacity-v1', dispatch_state: 'not-attempted', accounting_state: 'unobserved', usage_observed: false, evidence_kind: 'none'}};
+  assert.equal(validateCheckout(unavailable, catalog, contextProviders('unavailable', false)), unavailable);
+  const provider = contextCheckout(); provider.model = contextModel('provider-runtime'); provider.analysis.evidence_kind = 'provider-observation';
+  assert.equal(validateCheckout(provider, catalog, contextProviders('provider-runtime')), provider);
+  assert.match(contextAnalysisText(provider), /not an invoice or a correctness judgment/);
+});
+
+test('C12 current context configuration preserves only explicitly stale legacy reviews', () => {
+  for (const is_fixture of [true, false]) {
+    const historical = {...clone(checkout), stale: true, model: {is_fixture}, confirmation_id: null,
+      order: {order_id: 'legacy-order', provider_mode: 'fixture'}};
+    assert.equal(validateCheckout(historical, catalog, contextProviders()), historical);
+    assert.throws(() => confirmPayload(historical, 1, true, new Set(['c2'])));
+    assert.throws(() => validateCheckout({...historical, stale: false}, catalog, contextProviders()));
+  }
+});
+
+
+test('C12 stale no-order history projects accounting without stale source or consent', () => {
+  const historical = {...contextCheckout(), stale: true, source: {...source, text: 'obsolete'}, confirmation_id: 'old-consent'};
+  const history = contextAnalysisHistory(historical);
+  assert.deepEqual(Object.keys(history).sort(), ['accounting_state', 'evidence_kind', 'text']);
+  assert.match(history.text, /Fabricated offline usage/);
+  assert.doesNotMatch(JSON.stringify(history), /old-consent|obsolete/);
+  assert.equal(contextAnalysisHistory({...historical, stale: false}), null);
+  assert.equal(contextAnalysisHistory({...historical, order: {order_id: 'existing'}}), null);
+  assert.throws(() => contextAnalysisHistory({...historical, analysis: {...historical.analysis, private_request_id: 'private'}}));
+  assert.throws(() => contextAnalysisHistory({...historical, model: {is_fixture: true}}));
+});

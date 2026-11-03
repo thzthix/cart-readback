@@ -1,9 +1,9 @@
 import {conditionLabel, confirmPayload, displayValue, formatMoney, isOrderLocked, mergedEvidenceRanges,
-  operationKey, OUTCOMES, validateBootstrap, validateCheckout, validateEnvelope, parseBuyerReturn, buyerReturnPayload} from './core.mjs';
+  operationKey, OUTCOMES, contextAnalysisText, contextAnalysisHistory, validateBootstrap, validateCheckout, validateEnvelope, parseBuyerReturn, buyerReturnPayload} from './core.mjs';
 
 const $ = id => document.getElementById(id);
 const state = {catalog: [], revision: 0, csrf: '', checkout: null, selected: '', busy: false,
-  providers: undefined, blocked: false, uncertain: false, epoch: 0, acknowledgements: new Set()};
+  providers: undefined, analysisHold: null, analysisHistory: null, blocked: false, uncertain: false, epoch: 0, acknowledgements: new Set()};
 
 // Strip callback material synchronously before the first fetch. Never persist it.
 let pendingReturn = null;
@@ -20,9 +20,60 @@ const documentRoute = () => globalThis.location
   ? `${location.pathname}${location.search}` : null;
 let currentDocumentRoute = documentRoute();
 
+function analysisHoldText() {
+  return state.analysisHold === 'unknown'
+    ? 'Analysis held by UNKNOWN accounting. Reload current state; do not retry.'
+    : 'Analysis accounting is unobserved. Work may still be pending; reload current state, do not retry.';
+}
+function renderUnestablishedModes() {
+  $('analysis-history').hidden = true;
+  $('mode-label').textContent = 'Provider configuration unestablished';
+  $('mode-notice').textContent = 'Current configuration has not been established. Review and checkout actions are paused.';
+  $('scope-label').textContent = 'Six synthetic SKUs · one item · configuration unestablished';
+  $('analysis-label').textContent = 'Analysis availability is not established. Reload current server state.';
+  $('suggestion-label').textContent = 'Any previously shown review has not been revalidated. No new analysis or confirmation is enabled.';
+  $('analysis-badge').textContent = 'Not revalidated';
+  $('review-badge').textContent = 'Previous review';
+  $('confirm').textContent = 'Confirm this reviewed snapshot';
+  $('payment-label').textContent = 'Current checkout configuration has not been established. Order actions are paused.';
+}
+function showingContext() {
+  return state.providers?.analysis.mode === 'genuine-context-capacity'
+    || state.checkout?.model?.execution_mode === 'genuine-context-capacity' || Boolean(state.analysisHistory);
+}
 function renderModes() {
-  const injected = state.providers?.analysis.mode === 'injected-offline';
+  $('analysis-history').hidden = !state.analysisHistory;
+  $('analysis-history').textContent = state.analysisHistory
+    ? `Previous context analysis, read-only. ${state.analysisHistory.text} The previous proposal and consent are not restored.` : '';
+  const analysis = state.providers?.analysis;
+  const configuredContext = analysis?.mode === 'genuine-context-capacity';
+  if (showingContext()) {
+    const fabricated = analysis.execution_kind === 'fabricated-offline';
+    const availability = analysis.dispatch_available ? (fabricated ? 'fabricated offline dispatch available' : 'real-network dispatch configured') : 'dispatch unavailable';
+    $('mode-label').textContent = configuredContext ? 'Context analysis · simulated checkout' : 'Previous context review · simulated checkout';
+    $('mode-notice').textContent = !configuredContext ? 'Previous context analysis is retained. Checkout remains simulated; analysis charges are separate.' : fabricated
+      ? 'Fabricated offline dispatch is configured. This configuration is not a provider observation. PayPal is unconnected.'
+      : 'Real-network analysis may incur API charges when available. PayPal is not connected.';
+    $('scope-label').textContent = 'Six synthetic SKUs · one item · simulated checkout';
+    const configurationText = configuredContext
+      ? `Context-capacity analysis · ${availability}. Availability does not prove a call or guarantee admission.`
+      : `${analysis.mode === 'fixture' ? 'Scripted fixture' : 'Injected-offline'} analysis is configured now. This previous context review is retained, not renewed.`;
+    $('analysis-label').textContent = `${configurationText}${state.analysisHold ? ` ${analysisHoldText()}` : ''}`;
+    const legacyReview = state.checkout && state.checkout.model.execution_mode !== 'genuine-context-capacity';
+    $('suggestion-label').textContent = legacyReview
+      ? `Previous ${state.checkout.model.is_fixture ? 'scripted fixture' : 'injected-offline'} suggestions are retained, not context-provider observations. Matching quotes do not prove semantic correctness.`
+      : `${state.analysisHistory?.text || contextAnalysisText(state.checkout)} Matching quotes and usage do not prove semantic correctness.`;
+    const evidence = state.checkout?.analysis?.evidence_kind || state.analysisHistory?.evidence_kind;
+    $('analysis-badge').textContent = legacyReview ? 'Previous offline review' : evidence === 'fabricated-offline' ? 'Fabricated offline' : evidence === 'provider-observation' ? 'Usage observed · not correctness' : 'No usage observed';
+    $('review-badge').textContent = legacyReview ? 'Previous offline review' : evidence === 'fabricated-offline' ? 'Fabricated review' : 'Context analysis review';
+    $('confirm').textContent = 'Confirm this reviewed snapshot';
+    $('payment-label').textContent = 'Simulated checkout only. PayPal is unconnected; no checkout payment. Analysis API charges are separate.';
+    return;
+  }
+  const injected = analysis?.mode === 'injected-offline';
   const paypal = state.providers?.payment.mode === 'paypal-sandbox-offline';
+  $('mode-notice').textContent = 'No real AI inference, PayPal connection, or payment.';
+  $('scope-label').textContent = 'Six SKUs · one item · offline only';
   $('mode-label').textContent = injected || paypal ? 'Offline mode · sample shop' : 'Fixture mode · sample shop';
   $('analysis-label').textContent = injected ? 'Injected-offline analysis · no genuine inference established' : 'Scripted fixture analysis · no model call';
   $('suggestion-label').textContent = injected ? 'Injected-offline suggestions. Matching quotes do not prove semantic correctness.' : 'Scripted fixture suggestions. A matching quote is not a guarantee about the product.';
@@ -55,13 +106,17 @@ function conditionInputs() {
 function summaryRow(list, label, value, mono = false) {
   const row = node('div'); row.append(node('dt', label), node('dd', value, mono ? 'mono' : undefined)); list.append(row);
 }
+function analysisUnavailable() {
+  return Boolean(state.analysisHold) || (state.providers?.analysis.mode === 'genuine-context-capacity'
+    && !state.providers.analysis.dispatch_available);
+}
 function updateControls() {
   const locked = state.busy || state.blocked || state.uncertain || isOrderLocked(state.checkout);
   document.querySelectorAll('input[name="sku"]').forEach(input => { input.disabled = locked; });
   $('want-layout').disabled = locked; $('want-cable').disabled = locked;
   $('layout').disabled = locked || !$('want-layout').checked;
   $('cable').disabled = locked || !$('want-cable').checked;
-  $('analyze').disabled = locked || !state.selected || conditionInputs().length === 0;
+  $('analyze').disabled = locked || analysisUnavailable() || !state.selected || conditionInputs().length === 0;
   const reviewing = state.checkout?.state === 'REVIEW_REQUIRED' && !locked;
   $('confirm-snapshot').disabled = !reviewing;
   document.querySelectorAll('[data-ack]').forEach(input => { input.disabled = !reviewing; });
@@ -79,12 +134,16 @@ function updateControls() {
 }
 function invalidate() {
   if (isOrderLocked(state.checkout)) return;
+  const history = contextAnalysisHistory(state.checkout ? {...state.checkout, stale: true} : null);
+  if (history) state.analysisHistory = history;
   state.epoch += 1; state.checkout = null; state.acknowledgements.clear();
   $('confirm-snapshot').checked = false;
   $('review-section').hidden = true; $('order-section').hidden = true;
-  clearError(); status('Selection changed. Read it back again; previous confirmation no longer applies.');
+  clearError(); status(state.analysisHold
+    ? `Selection changed. ${state.analysisHold === 'unknown' ? 'Analysis remains held by UNKNOWN accounting' : 'Analysis accounting remains unobserved'}; reload current server state. No new attempt was sent.`
+    : 'Selection changed. Read it back again; previous confirmation no longer applies.');
   document.querySelectorAll('#catalog-rows tr').forEach(row => row.classList.toggle('selected', row.dataset.sku === state.selected));
-  renderSelectedSource(); updateControls();
+  renderSelectedSource(); renderModes(); updateControls();
 }
 function renderSelectedSource() {
   const product = state.catalog.find(item => item.sku_id === state.selected);
@@ -161,6 +220,7 @@ function renderResults(checkout) {
 }
 function renderReview() {
   const checkout = state.checkout;
+  renderModes();
   $('review-section').hidden = !checkout;
   if (!checkout) { $('order-section').hidden = true; return; }
   const historicalOrder = checkout.stale === true && Boolean(checkout.order);
@@ -176,7 +236,9 @@ function renderReview() {
   summaryRow(details, 'Description version', `${checkout.source.source_id} / ${checkout.source.revision}`);
   summaryRow(details, 'Review fingerprint', checkout.snapshot_hash || 'No confirmable review', true);
   $('review-blocked').hidden = checkout.state !== 'ANALYSIS_BLOCKED';
-  $('review-blocked').textContent = 'Analysis blocked. No valid readback is available. Change your selection or reload; confirmation and order creation are unavailable.';
+  $('review-blocked').textContent = state.providers?.analysis.mode === 'genuine-context-capacity'
+    ? 'Analysis blocked. No valid readback is available; confirmation and order creation are unavailable. Reload current state. UNKNOWN accounting does not authorize another attempt.'
+    : 'Analysis blocked. No valid readback is available. Change your selection or reload; confirmation and order creation are unavailable.';
   $('snapshot').hidden = checkout.state === 'ANALYSIS_BLOCKED';
   const reviewing = checkout.state === 'REVIEW_REQUIRED' && !historicalOrder;
   $('acknowledgements').hidden = !reviewing;
@@ -224,7 +286,9 @@ function renderOrder() {
   };
   const [title, help] = states[checkout.state] || ['Order is held', 'This state is not supported by this UI. No new action is enabled.'];
   $('order-state').textContent = paypal ? title.replaceAll('Fixture', 'Offline').replaceAll('fixture', 'offline') : title;
-  $('order-help').textContent = paypal ? 'Fabricated PayPal wire only. No external approval window will open. Check this same stored order; browser return data does not prove approval. Capture requires a fresh final decision.' : help;
+  const paymentHelp = showingContext() && checkout.state === 'COMPLETED'
+    ? 'The fixture checkout reached its completed state. No PayPal API was called or checkout payment made. Analysis API charges are separate.' : help;
+  $('order-help').textContent = paypal ? 'Fabricated PayPal wire only. No external approval window will open. Check this same stored order; browser return data does not prove approval. Capture requires a fresh final decision.' : paymentHelp;
   if (pendingReturn) {
     try {
       buyerReturnPayload(pendingReturn, checkout, state.revision, state.providers);
@@ -285,16 +349,21 @@ async function fixtureFetch(path, options = {}) {
 async function readResponse(response) {
   let data;
   try { data = await response.json(); } catch { throw new Error('The server returned an unreadable response. Reload current state before trying anything else.'); }
-  if (Number.isSafeInteger(data.revision)) state.revision = data.revision;
-  if (!response.ok && !(response.status === 422 && data.checkout?.state === 'ANALYSIS_BLOCKED')) throw new Error(`${data.error?.code || 'REQUEST_FAILED'}: ${data.error?.message || 'The server refused the request.'}`);
   validateEnvelope(data);
+  if (Number.isSafeInteger(data.revision)) state.revision = data.revision;
+  if (!response.ok && !(response.status === 422 && data.checkout?.state === 'ANALYSIS_BLOCKED')) {
+    if (data.providers?.analysis.mode === 'genuine-context-capacity') {
+      throw new Error('The context analysis or simulated checkout request was refused. Reload current server state.');
+    }
+    throw new Error(`${data.error?.code || 'REQUEST_FAILED'}: ${data.error?.message || 'The server refused the request.'}`);
+  }
   return data;
 }
 async function mutate(path, payload, options = {}) {
-  if (state.busy || state.blocked || state.uncertain) return;
+  if (state.busy || state.blocked || state.uncertain || (options.action === 'analyze' && analysisUnavailable())) return;
   if (state.checkout?.stale === true && state.checkout.order && options.action !== 'reconcile') return;
   const epoch = state.epoch; state.busy = true; clearError(); updateControls();
-  status('Working on the local offline server…');
+  status(state.providers?.analysis.mode === 'genuine-context-capacity' ? 'Waiting for the local server’s analysis or simulated checkout result…' : 'Working on the local offline server…');
   try {
     const headers = {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf};
     if (options.idempotent) {
@@ -303,10 +372,22 @@ async function mutate(path, payload, options = {}) {
     const data = await fixtureFetch(path, {method: 'POST', credentials: 'same-origin', headers, body: JSON.stringify(payload)});
     const providers = validateEnvelope(data);
     const checkout = validateCheckout(data.checkout, state.catalog, providers);
-    if (epoch !== state.epoch) { status('Selection changed during the request. Read the new selection back again.'); return; }
-    state.providers = providers; renderModes();
+    if (epoch !== state.epoch) {
+      const history = contextAnalysisHistory({...checkout, stale: true});
+      if (history) {
+        state.providers = providers; state.analysisHistory = history;
+        state.analysisHold = history.accounting_state !== 'known' ? history.accounting_state : null;
+        renderModes();
+      }
+      status(state.analysisHold ? analysisHoldText() : 'Selection changed during the request. Read the new selection back again.');
+      return;
+    }
+    state.providers = providers; state.analysisHistory = null;
+    state.analysisHold = checkout?.analysis && checkout.analysis.accounting_state !== 'known' ? checkout.analysis.accounting_state : null;
     state.checkout = checkout; state.acknowledgements.clear(); $('confirm-snapshot').checked = false;
-    renderReview(); status(`Local server state: ${checkout.state}. No genuine inference or payment established.`);
+    renderReview(); status(state.providers.analysis.mode === 'genuine-context-capacity'
+      ? `Local server state: ${checkout.state}. Checkout payment remains simulated.`
+      : `Local server state: ${checkout.state}. No genuine inference or payment established.`);
     if (options.action === 'analyze') $('review-heading').focus();
   } catch (error) {
     // Any uncertain mutation response freezes further mutations until a bootstrap read.
@@ -317,14 +398,16 @@ async function mutate(path, payload, options = {}) {
 }
 async function bootstrap() {
   if (state.busy) return;
-  state.busy = true; state.blocked = true; clearError(); updateControls();
+  state.busy = true; state.blocked = true; clearError(); renderUnestablishedModes(); updateControls();
   status('Loading current local state…');
   try {
     const data = validateBootstrap(await fixtureFetch('/api/bootstrap', {credentials: 'same-origin', cache: 'no-store'}));
-    state.providers = validateEnvelope(data); renderModes();
+    state.providers = validateEnvelope(data);
     state.catalog = data.catalog; state.csrf = data.csrf_token;
     const previous = data.checkout;
+    state.analysisHold = previous?.analysis && previous.analysis.accounting_state !== 'known' ? previous.analysis.accounting_state : null;
     const stalePreorder = previous?.stale === true && !isOrderLocked(previous);
+    state.analysisHistory = stalePreorder ? contextAnalysisHistory(previous) : null;
     state.checkout = stalePreorder ? null : validateCheckout(previous, state.catalog, state.providers);
     state.selected = state.catalog.some(product => product.sku_id === previous?.sku_id) ? previous.sku_id : '';
     state.epoch += 1; state.acknowledgements.clear(); state.uncertain = false; state.blocked = false;
@@ -337,8 +420,8 @@ async function bootstrap() {
     if (pendingReturn) buyerReturnPayload(pendingReturn, state.checkout, state.revision, state.providers);
     if (returnError) throw returnError;
     renderCatalog(); renderSelectedSource(); renderReview();
-    status(stalePreorder ? 'The product description or price changed. Previous confirmation was cleared. Read this selection back again.'
-      : state.checkout ? `Current local state restored: ${state.checkout.state}. No real payment.` : 'Sample catalog ready. Choose one SKU and at least one condition.');
+    status(state.analysisHold ? analysisHoldText() : stalePreorder ? 'The product description or price changed. Previous confirmation was cleared. Read this selection back again.'
+      : state.checkout ? `Current local state restored: ${state.checkout.state}. No checkout payment.` : 'Sample catalog ready. Choose one SKU and at least one condition.');
   } catch (error) { pendingReturn = null; state.blocked = true; showError(error.message); status('Catalog or server state unavailable. All review and order actions are blocked.'); }
   finally { state.busy = false; updateControls(); }
 }
