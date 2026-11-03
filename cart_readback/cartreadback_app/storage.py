@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import BinaryIO, Iterator
 
 from cartreadback_app.catalog import fixtures, validate_product
+from cartreadback_app.inference_budget import BUDGET_SCHEMA
 from cartreadback_app.validation import AppError, canonical, text_hash
 
 SCHEMA = """
@@ -73,7 +74,7 @@ class Store:
         self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
-            connection.executescript(SCHEMA)
+            connection.executescript(SCHEMA + BUDGET_SCHEMA)
             columns = {
                 row[1]
                 for row in connection.execute("PRAGMA table_info(operations)")

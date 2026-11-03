@@ -103,11 +103,15 @@ fixture-only; PayPal and real inference are disabled.
 Analysis now reserves, claims and attaches observations in separate short SQLite
 transactions; injected adapter work holds no application DB lock. A durable
 owner/input/config/generation fence prevents stale results from replacing a newer
-review. Nonfixture injected tests have a database-wide attempt limit and persistent
-unknown-usage stop policy. Pending/failed analysis has no confirmable snapshot.
-See [analysis dispatch and limits](docs/ANALYSIS_DISPATCH.md). This is offline
-infrastructure, not an enabled model service, input-token/USD budget or evidence
-of genuine AI. The default server/CLI still use only the synthetic fixture.
+review. Nonfixture service analysis is default-denied unless an explicit offline
+budget policy and local fabricated count seam are injected. Budget reservation,
+single claim, settlement and UNKNOWN recovery now share the analysis SQLite
+transaction. Capacity is conservatively retained across failure/restart; this is
+not real counting, verified pricing or permission for paid inference. Pending or
+failed analysis has no confirmable snapshot. See
+[analysis dispatch](docs/ANALYSIS_DISPATCH.md) and the
+[atomic offline budget gate](docs/ATOMIC_ANALYSIS_BUDGET.md).
+The default server/CLI still use only the synthetic fixture.
 
 ## Offline PayPal wire preparation
 

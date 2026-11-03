@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Protocol
 
 from cartreadback_app.inference import validate_proposal
+from cartreadback_app.inference_budget import request_hash
 from cartreadback_app.inference_config import (
     ENDPOINT,
     InferenceConfig,
@@ -117,6 +118,7 @@ class InferenceObservation:
     input_tokens: int
     output_tokens: int
     total_tokens: int
+    request_sha256: str
     service_tier_requested: str
     service_tier_returned: str
 
@@ -311,7 +313,11 @@ class OfflineResponsesAdapter:
         return self.observe(source, conditions).results
 
     def observe(
-        self, source: dict, conditions: list[dict]
+        self,
+        source: dict,
+        conditions: list[dict],
+        *,
+        expected_request_sha256: str | None = None,
     ) -> InferenceObservation:
         """Record identity/usage and bound the complete exchange, without retry."""
         if not self._flight.acquire(blocking=False):
@@ -326,6 +332,11 @@ class OfflineResponsesAdapter:
             )
             inputs = _validated_input(source, conditions)
             request = self.build_request(inputs["source"], inputs["conditions"])
+            if (
+                expected_request_sha256 is not None
+                and request_hash(request) != expected_request_sha256
+            ):
+                raise _error("MODEL_BUDGET_EXCEEDED")
             deadline.remaining()
             completed = queue.Queue(maxsize=1)
 
@@ -370,13 +381,19 @@ class OfflineResponsesAdapter:
         if type(response) is not WireResponse:
             raise _error("MODEL_UNAVAILABLE")
         try:
-            return self._read_response(response, inputs, deadline)
+            return self._read_response(
+                response, inputs, deadline, request_hash(request)
+            )
         finally:
             if response.close is not None:
                 response.close()
 
     def _read_response(
-        self, response: WireResponse, inputs: dict, deadline: Deadline
+        self,
+        response: WireResponse,
+        inputs: dict,
+        deadline: Deadline,
+        request_sha256: str,
     ) -> InferenceObservation:
         deadline.remaining()
         if type(response.status_code) is not int:
@@ -438,6 +455,7 @@ class OfflineResponsesAdapter:
             response_id,
             response.request_id,
             *usage,
+            request_sha256,
             self._config.service_tier,
             envelope["service_tier"],
         )

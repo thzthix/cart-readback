@@ -13,8 +13,9 @@ from copy import deepcopy
 from pathlib import Path
 from unittest import mock
 
-from cartreadback_app.analysis import AnalysisPolicy
+from cartreadback_app.analysis import AnalysisPolicy, OfflineAnalysisBudget
 from cartreadback_app.inference import FixtureInferenceAdapter
+from cartreadback_app.inference_budget import OfflineInputCount, request_hash
 from cartreadback_app.inference_config import InferenceConfig
 from cartreadback_app.responses_adapter import (
     OfflineResponsesAdapter,
@@ -24,7 +25,31 @@ from cartreadback_app.service import Service
 from cartreadback_app.storage import Store
 from cartreadback_app.validation import AppError, canonical, text_hash
 from test_domain import Workflow
+from test_inference_budget import policy
 from test_responses_adapter import encode, envelope
+
+
+def budget_for(adapter, **changes):
+    settings = policy(
+        **{
+            "dispatch_config_sha256": adapter.metadata["config_sha256"],
+            "max_output_tokens": 2048,
+            "max_total_output_tokens": 16_384,
+            "max_total_input_tokens": 1600,
+            "max_calls": 8,
+            "max_micro_usd": 100_000,
+            **changes,
+        }
+    )
+    return OfflineAnalysisBudget(
+        settings,
+        lambda request: OfflineInputCount(
+            request_hash(request),
+            settings.model,
+            settings.counter_revision,
+            100,
+        ),
+    )
 
 
 class WaitingFixture(FixtureInferenceAdapter):
@@ -113,6 +138,7 @@ class AnalysisDispatchTests(unittest.TestCase):
         self.service.inference = OfflineResponsesAdapter(
             transport, InferenceConfig(overall_timeout_seconds=timeout)
         )
+        self.service.analysis_budget = budget_for(self.service.inference)
         self.service.analysis_policy = AnalysisPolicy(max_attempts=max_attempts)
         return transport
 
@@ -366,13 +392,13 @@ class AnalysisDispatchTests(unittest.TestCase):
                 marker = path.with_suffix(".attempts")
                 script = """
 import os, sys
-from cartreadback_app.inference import FixtureInferenceAdapter
+from cartreadback_app.responses_adapter import OfflineResponsesAdapter
 from cartreadback_app.service import Service
 from cartreadback_app.storage import Store
 from test_domain import Workflow
-class Adapter(FixtureInferenceAdapter):
-    metadata = {**FixtureInferenceAdapter.metadata, "is_fixture": False}
-    def observe(self, source, conditions):
+from test_analysis_dispatch import budget_for
+class Transport:
+    def send(self, endpoint, body, *, deadline):
         with open(sys.argv[3], "a") as stream:
             stream.write("attempt\\n")
         raise RuntimeError("authored offline attempt")
@@ -380,7 +406,8 @@ class Crash(Service):
     def _checkpoint(self, name, operation_id):
         if name == sys.argv[2]:
             os._exit(73)
-service = Crash(Store(sys.argv[1]), Adapter())
+adapter = OfflineResponsesAdapter(Transport())
+service = Crash(Store(sys.argv[1]), adapter, analysis_budget=budget_for(adapter))
 Workflow(service).analyze()
 """
                 environment = {
@@ -418,6 +445,12 @@ Workflow(service).analyze()
                 )
                 self.assertIsNone(current["checkout"]["snapshot_hash"])
                 self.assertEqual("UNKNOWN", self.operations()[0]["status"])
+                with self.store.connect() as connection:
+                    budget = connection.execute(
+                        "SELECT * FROM budget_operations"
+                    ).fetchone()
+                self.assertEqual("UNKNOWN", budget["status"])
+                self.assertGreater(budget["reserved_micro_usd"], 0)
                 self.assertEqual(
                     1
                     if checkpoint == "analysis_before_observation_commit"
@@ -459,6 +492,7 @@ Workflow(service).analyze()
             ("config_sha256", "forged"),
             ("source_revision", True),
             ("total_tokens", 0),
+            ("request_sha256", "0" * 64),
             ("service_tier_requested", "auto"),
             ("service_tier_returned", "priority"),
             ("request_id", ""),
@@ -471,9 +505,9 @@ Workflow(service).analyze()
                 self.use_responses()
                 original = self.service.inference.observe
 
-                def altered(source, conditions):
+                def altered(source, conditions, **kwargs):
                     return dataclasses.replace(
-                        original(source, conditions), **{field: value}
+                        original(source, conditions, **kwargs), **{field: value}
                     )
 
                 with mock.patch.object(
@@ -500,9 +534,10 @@ Workflow(service).analyze()
                 self.use_responses()
                 original = self.service.inference.observe
 
-                def invalid(source, conditions):
+                def invalid(source, conditions, **kwargs):
                     return dataclasses.replace(
-                        original(source, conditions), proposal_json=payload
+                        original(source, conditions, **kwargs),
+                        proposal_json=payload,
                     )
 
                 with mock.patch.object(

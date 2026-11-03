@@ -1,5 +1,10 @@
 # Offline analysis lifecycle — issue #15
 
+Current follow-up: [issue #27 atomic offline budget gate](ATOMIC_ANALYSIS_BUDGET.md)
+adds explicit default-denied nonfixture admission and shared-transaction synthetic
+token/cost reservations. The attempt-only limitations below describe the original
+#15 slice; it remains true that no actual counting/pricing or paid use is enabled.
+
 Base: `d54f6353fcde39278894b053b58d15eb3d366f28`. This change joins the existing
 offline-injected Responses boundary to the service lifecycle for local testing.
 The server and CLI still select only the synthetic fixture. No network transport,

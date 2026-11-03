@@ -9,11 +9,22 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
-from cartreadback_app.analysis import AnalysisPolicy, checked_observation
+from cartreadback_app.analysis import (
+    AnalysisPolicy,
+    OfflineAnalysisBudget,
+    checked_observation,
+)
 from cartreadback_app.inference import (
     FixtureInferenceAdapter,
     InferenceAdapter,
     validate_proposal,
+)
+from cartreadback_app.inference_budget import (
+    BudgetClaim,
+    TransactionBudgetLedger,
+    policy_from_identity,
+    recover_budget,
+    request_hash,
 )
 from cartreadback_app.payments import (
     FixturePaymentAdapter,
@@ -22,6 +33,7 @@ from cartreadback_app.payments import (
     ProviderAmbiguity,
     verify_provider_order,
 )
+from cartreadback_app.responses_adapter import OfflineResponsesAdapter
 from cartreadback_app.storage import Store, csrf_for, event, product_for
 from cartreadback_app.validation import (
     AppError,
@@ -49,6 +61,7 @@ class Service:
         payments: PaymentAdapter | None = None,
         clock=None,
         analysis_policy: AnalysisPolicy | None = None,
+        analysis_budget: OfflineAnalysisBudget | None = None,
     ):
         """Inject offline adapters; HTTP setup never loads credentials."""
         self.store = store
@@ -57,6 +70,7 @@ class Service:
         self._active = 0
         self._closed = False
         self.analysis_policy = analysis_policy or AnalysisPolicy()
+        self.analysis_budget = analysis_budget
         self.inference = inference or FixtureInferenceAdapter()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         try:
@@ -157,11 +171,9 @@ class Service:
         return session
 
     def _fresh(self, connection: sqlite3.Connection, checkout: dict) -> bool:
-        return (
-            checkout["catalog_hash"]
-            == digest(product_for(connection, checkout["sku_id"]))
-            and checkout["model"] == self.inference.metadata
-        )
+        return checkout["catalog_hash"] == digest(
+            product_for(connection, checkout["sku_id"])
+        ) and checkout["model"] == self._analysis_metadata(self.inference)
 
     def _public_checkout(
         self, connection: sqlite3.Connection, checkout: dict | None
@@ -190,7 +202,9 @@ class Service:
         this build are explicitly injected offline test seams, not genuine calls.
         Unknown adapters remain unsupported and are blocked by the buyer UI.
         """
-        analysis_fixture = self.inference.metadata.get("is_fixture") is True
+        analysis_fixture = (
+            self._analysis_metadata(self.inference).get("is_fixture") is True
+        )
         payment_mode = self.payments.mode
         return {
             "analysis": {
@@ -452,6 +466,7 @@ class Service:
         return result
 
     def _recover_analysis(self, connection):
+        recover_budget(connection)
         rows = connection.execute(
             "SELECT * FROM analysis_operations "
             "WHERE status IN ('RESERVED', 'DISPATCHED')"
@@ -482,6 +497,48 @@ class Service:
                 checkout["snapshot_hash"] or "BLOCKED",
                 canonical(checkout),
             ),
+        )
+
+    def _analysis_metadata(self, adapter):
+        model = json.loads(canonical(adapter.metadata))
+        model["is_fixture"] = (
+            isinstance(adapter, FixtureInferenceAdapter)
+            and model.get("is_fixture") is True
+        )
+        if not model["is_fixture"]:
+            budget = self.analysis_budget
+            model["budget_policy_sha256"] = (
+                digest(json.loads(budget.policy.identity))
+                if type(budget) is OfflineAnalysisBudget
+                else None
+            )
+        return model
+
+    def _configured_budget(self, connection, adapter, model):
+        budget = self.analysis_budget
+        if (
+            type(budget) is not OfflineAnalysisBudget
+            or type(adapter) is not OfflineResponsesAdapter
+            or budget.policy.dispatch_config_sha256
+            != model.get("config_sha256")
+            or budget.policy.model != model.get("model_version")
+            or budget.policy.service_tier != model.get("service_tier")
+            or budget.policy.max_output_tokens != model.get("max_output_tokens")
+            or model.get("execution_mode") != "offline-injected-only"
+            or connection.execute(
+                "SELECT 1 FROM analysis_operations a LEFT JOIN budget_operations b "
+                "ON a.operation_id = b.operation_id WHERE a.is_fixture = 0 "
+                "AND b.operation_id IS NULL LIMIT 1"
+            ).fetchone()
+        ):
+            raise AppError(
+                "MODEL_BUDGET_EXCEEDED", "Offline budget unavailable.", 503
+            )
+        return TransactionBudgetLedger(connection, budget.policy)
+
+    def _reserved_budget(self, connection, inputs):
+        return TransactionBudgetLedger(
+            connection, policy_from_identity(inputs["budget_policy_document"])
         )
 
     def _analysis_admission(self, connection):
@@ -520,11 +577,31 @@ class Service:
             {"condition_id": f"c{index + 1}", **choice}
             for index, choice in enumerate(choices)
         ]
-        model = json.loads(canonical(adapter.metadata))
+        model = self._analysis_metadata(adapter)
         fixture = model.get("is_fixture") is True
         if not fixture:
             self._analysis_admission(connection)
         operation_id = str(uuid4())
+        budget_fields = {}
+        if not fixture:
+            budget = self.analysis_budget
+            ledger = self._configured_budget(connection, adapter, model)
+            request = adapter.build_request(product["source"], choices)
+            try:
+                count = budget.count(request)
+            except Exception:
+                raise AppError(
+                    "MODEL_BUDGET_EXCEEDED", "Offline count unavailable.", 503
+                ) from None
+            if self.analysis_budget is not budget:
+                raise AppError(
+                    "MODEL_BUDGET_EXCEEDED", "Offline budget changed.", 503
+                )
+            operation_id = ledger.reserve(request, count)
+            budget_fields = {
+                "budget_policy_document": budget.policy.identity,
+                "budget_request_sha256": request_hash(request),
+            }
         checkout = {
             "review_id": str(uuid4()),
             "state": "ANALYSIS_BLOCKED",
@@ -545,7 +622,12 @@ class Service:
             "consent": None,
         }
         document = canonical(
-            {"catalog": product, "conditions": choices, "model": model}
+            {
+                "catalog": product,
+                "conditions": choices,
+                "model": model,
+                **budget_fields,
+            }
         )
         connection.execute(
             "INSERT INTO analysis_operations(operation_id, sid, review_id, "
@@ -605,7 +687,7 @@ class Service:
             and digest(product_for(connection, checkout["sku_id"]))
             == checkout["catalog_hash"]
             and self.inference is adapter
-            and adapter.metadata == inputs["model"]
+            and self._analysis_metadata(adapter) == inputs["model"]
             and not connection.execute(
                 "SELECT 1 FROM orders WHERE sid = ?", (session["sid"],)
             ).fetchone()
@@ -633,7 +715,27 @@ class Service:
                     "",
                 )
                 return
+            inputs = json.loads(reservation["input_document"])
             token = str(uuid4())
+            if not reservation["is_fixture"]:
+                ledger = self._configured_budget(
+                    connection, adapter, inputs["model"]
+                )
+                request = adapter.build_request(
+                    inputs["catalog"]["source"], inputs["conditions"]
+                )
+                if request_hash(request) != inputs["budget_request_sha256"]:
+                    self._finish_analysis(
+                        connection,
+                        reservation,
+                        adapter,
+                        "MODEL_BUDGET_EXCEEDED",
+                        None,
+                        "",
+                        "",
+                    )
+                    return
+                token = ledger.claim(operation_id, request).claim_token
             connection.execute(
                 "UPDATE analysis_operations SET status = 'DISPATCHED', "
                 "dispatch_token = ?, dispatched_at = ? WHERE operation_id = ?",
@@ -655,7 +757,9 @@ class Service:
                 )
             else:
                 observed = adapter.observe(
-                    argument["source"], argument["conditions"]
+                    argument["source"],
+                    argument["conditions"],
+                    expected_request_sha256=inputs["budget_request_sha256"],
                 )
                 observation = checked_observation(observed, inputs)
                 try:
@@ -734,6 +838,40 @@ class Service:
         fresh = self._analysis_fresh(
             connection, operation, reservation, adapter
         )
+        if not reservation["is_fixture"]:
+            inputs = json.loads(reservation["input_document"])
+            ledger = self._reserved_budget(connection, inputs)
+            if not token:
+                ledger.abandon_reservation(
+                    operation_id, inputs["budget_request_sha256"]
+                )
+            else:
+                claim = BudgetClaim(
+                    operation_id,
+                    inputs["budget_request_sha256"],
+                    inputs["model"]["budget_policy_sha256"],
+                    token,
+                )
+                if observation:
+                    usage = json.loads(observation)
+                    try:
+                        ledger.settle(
+                            claim,
+                            model=usage["model_returned"],
+                            service_tier=usage["service_tier_returned"],
+                            input_tokens=usage["input_tokens"],
+                            output_tokens=usage["output_tokens"],
+                            total_tokens=usage["total_tokens"],
+                        )
+                    except AppError:
+                        # Keep the shared UNKNOWN update in this transaction.
+                        observation, error_code, results = (
+                            "",
+                            "MODEL_BUDGET_EXCEEDED",
+                            None,
+                        )
+                else:
+                    ledger.mark_unknown(claim)
         status = "SUCCEEDED" if not error_code else "BLOCKED"
         if not reservation["is_fixture"] and token and not observation:
             status = "UNKNOWN"

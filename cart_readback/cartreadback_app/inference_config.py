@@ -11,7 +11,7 @@ from cartreadback_app.validation import AppError, digest
 
 ENDPOINT = "https://api.openai.com/v1/responses"
 MODEL = "gpt-6-luna"
-ADAPTER_VERSION = "responses-offline-wire-v2-tier"
+ADAPTER_VERSION = "responses-offline-wire-v3-budget-fence"
 MANIFEST_SHA256 = (
     "5960e0e6e078e4defc5b00ad7afb73bc6dcd0a202811b6b11e9fa8e09ad4832b"
 )
