@@ -127,6 +127,16 @@ fixture-only; genuine sandbox and payments are
 still UNCONNECTED. Missing returned facts remain unknown, never request-backed
 verification. This prerequisite does not establish PayPal acceptance or approval.
 
+## HTTPS/OAuth groundwork, still disabled
+
+An isolated [sandbox HTTPS/OAuth core](docs/PAYPAL_HTTPS_GROUNDWORK.md) now has
+fake-connection tests for fixed-host verified TLS settings, bounded OAuth/Orders
+exchanges, strict no-proxy/no-retry behavior and sanitized uncertainty. No factory
+or credential source is selected by default, and the network-marked core cannot
+be injected directly under an offline provider label. No genuine provider call
+has run. The direct-only policy does not support PythonAnywhere free outbound
+proxy routing; it is not a deployment or sandbox-acceptance result.
+
 ## Checks
 
 Run backend checks from `cart_readback/`, with no UI/eval directory required:

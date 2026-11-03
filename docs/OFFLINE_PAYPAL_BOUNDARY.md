@@ -33,10 +33,12 @@ HATEOAS API links are never followed. This is a mapping choice for this narrow
 product, not full PayPal schema support or tested provider acceptance.
 
 Adapter settings are frozen. The version fence includes merchant, timeout,
-fixed endpoint and parser bounds. The only shipped transport implementations are
-in-memory test doubles. Injected Python code is trusted test code, not a sandbox
-or a mechanism that prevents an arbitrary injected implementation from doing I/O.
-Adding a network transport would be a separately reviewed, unauthorized stage.
+fixed endpoint and parser bounds. Runtime defaults still use in-memory test
+doubles. The later isolated HTTPS/OAuth groundwork described below has no default
+credential source/factory and is rejected directly under this offline label.
+Injected Python code is trusted test code, not a sandbox or a mechanism that
+prevents an arbitrary injected implementation from doing I/O. Genuine network
+activation remains a separately authorized and reviewed stage.
 
 ## Returned facts and uncertainty
 
@@ -117,3 +119,12 @@ host/token restrictions, one-attempt failures/timeouts, durable create/capture
 identity, SQLite transaction isolation, unknown ID retention, pending capture and
 same-order GET recovery. The complete final-candidate check receipt is recorded
 separately; earlier component checks do not certify a changed integrated tree.
+
+## Later transport groundwork
+
+Issue #30 adds an isolated [HTTPS/OAuth core](PAYPAL_HTTPS_GROUNDWORK.md) tested
+only with fake connections and synthetic in-memory credential values. It has no
+default credential source/factory or runtime selection and is rejected directly
+by this offline adapter's network-capability guard. Genuine capability, secure
+credential authorization, live network limits and sandbox acceptance remain
+separate gates; this mapper's offline label is unchanged.
