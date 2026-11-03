@@ -210,27 +210,37 @@ def policy_from_identity(document: str) -> OfflineBudgetPolicy:
         raise _error() from error
 
 
+def validate_input_count(
+    request: bytes, count: OfflineInputCount, policy: OfflineBudgetPolicy
+) -> int:
+    """Validate exact trusted count binding; return conservative synthetic cost."""
+    if type(policy) is not OfflineBudgetPolicy:
+        raise _error()
+    sha = request_hash(request)
+    payload = strict_provider_json(request, max_bytes=65_536, max_depth=32)
+    if (
+        type(count) is not OfflineInputCount
+        or count.request_sha256 != sha
+        or count.model != policy.model
+        or count.counter_revision != policy.counter_revision
+        or not _number(count.input_tokens, policy.max_input_tokens)
+        or payload.get("model") != policy.model
+        or payload.get("service_tier") != policy.service_tier
+        or type(payload.get("max_output_tokens")) is not int
+        or payload["max_output_tokens"] != policy.max_output_tokens
+    ):
+        raise _error()
+    return policy.cost(count.input_tokens, policy.max_output_tokens)
+
+
 class _BudgetOperations:
     """Share operations across standalone and owner-managed transactions."""
 
     def reserve(self, request: bytes, count: OfflineInputCount) -> str:
         """Commit worst-case capacity for exactly one explicitly counted payload."""
         sha = request_hash(request)
-        payload = strict_provider_json(request, max_bytes=65_536, max_depth=32)
         policy = self._policy
-        if (
-            type(count) is not OfflineInputCount
-            or count.request_sha256 != sha
-            or count.model != policy.model
-            or count.counter_revision != policy.counter_revision
-            or not _number(count.input_tokens, policy.max_input_tokens)
-            or payload.get("model") != policy.model
-            or payload.get("service_tier") != policy.service_tier
-            or type(payload.get("max_output_tokens")) is not int
-            or payload["max_output_tokens"] != policy.max_output_tokens
-        ):
-            raise _error()
-        cost = policy.cost(count.input_tokens, policy.max_output_tokens)
+        cost = validate_input_count(request, count, policy)
         with self._transaction() as connection:
             rows = connection.execute(
                 "SELECT * FROM budget_operations"

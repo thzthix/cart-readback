@@ -6,6 +6,7 @@ import secrets
 import sqlite3
 import threading
 from contextlib import contextmanager
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -13,6 +14,10 @@ from cartreadback_app.analysis import (
     AnalysisPolicy,
     OfflineAnalysisBudget,
     checked_observation,
+)
+from cartreadback_app.count_preflight import (
+    PREFLIGHT_VERSION,
+    run_offline_count,
 )
 from cartreadback_app.inference import (
     FixtureInferenceAdapter,
@@ -25,6 +30,7 @@ from cartreadback_app.inference_budget import (
     policy_from_identity,
     recover_budget,
     request_hash,
+    validate_input_count,
 )
 from cartreadback_app.payments import (
     FixturePaymentAdapter,
@@ -369,6 +375,8 @@ class Service:
                 raise AppError(
                     "INVALID_INPUT", "Idempotency-Key must be a UUID."
                 ) from error
+        if action == "analyze":
+            return self._analyze(sid, json.loads(canonical(body)))
         with self.store.transaction() as connection:
             session = self._session(connection, sid)
             # Even a stale retry cannot bind its key to different content.
@@ -403,12 +411,7 @@ class Service:
                 )
             if operation:
                 return self._envelope(connection, session)
-            if action == "analyze":
-                adapter = self.inference
-                reservation = self._reserve_analysis(
-                    connection, session, body, adapter
-                )
-            elif action == "confirm":
+            if action == "confirm":
                 self._confirm(connection, session, body)
             elif action == "orders":
                 adapter = self.payments
@@ -432,12 +435,7 @@ class Service:
                 )
             if action == "confirm":
                 return self._result(connection, session)
-        if action == "analyze":
-            self._checkpoint(
-                "analysis_after_reservation_commit", reservation["operation_id"]
-            )
-            self._dispatch_analysis(reservation, adapter)
-        elif action == "orders":
+        if action == "orders":
             self._checkpoint(
                 "after_reservation_commit", reservation["operation_id"]
             )
@@ -466,6 +464,16 @@ class Service:
         return result
 
     def _recover_analysis(self, connection):
+        preflights = connection.execute(
+            "SELECT * FROM analysis_preflights WHERE status IN ('PREPARED', 'COUNTING')"
+        ).fetchall()
+        for plan in preflights:
+            connection.execute(
+                "UPDATE analysis_preflights SET status = 'UNKNOWN', "
+                "error_code = 'MODEL_OUTCOME_UNKNOWN' WHERE preflight_id = ?",
+                (plan["preflight_id"],),
+            )
+            self._block_count_intent(connection, plan, "MODEL_OUTCOME_UNKNOWN")
         recover_budget(connection)
         rows = connection.execute(
             "SELECT * FROM analysis_operations "
@@ -507,6 +515,12 @@ class Service:
         )
         if not model["is_fixture"]:
             budget = self.analysis_budget
+            model["count_preflight_version"] = PREFLIGHT_VERSION
+            model["count_timeout_seconds"] = (
+                budget.count_timeout_seconds
+                if type(budget) is OfflineAnalysisBudget
+                else None
+            )
             model["budget_policy_sha256"] = (
                 digest(json.loads(budget.policy.identity))
                 if type(budget) is OfflineAnalysisBudget
@@ -559,7 +573,306 @@ class Service:
                 "MODEL_UNAVAILABLE", "Analysis already in flight.", 503
             )
 
-    def _reserve_analysis(self, connection, session, body, adapter):
+    def _new_analysis_checkout(self, product, choices, model):
+        return {
+            "review_id": str(uuid4()),
+            "state": "ANALYSIS_BLOCKED",
+            "analysis_error": "MODEL_PENDING",
+            "sku_id": product["sku_id"],
+            "conditions": choices,
+            "results": [],
+            "snapshot_hash": None,
+            "confirmation_id": None,
+            "order": None,
+            "amount": {
+                "minor": product["price_minor"],
+                "currency": product["currency"],
+            },
+            "source": product["source"],
+            "model": model,
+            "catalog_hash": digest(product),
+            "consent": None,
+        }
+
+    def _preflight_document(self, connection, session, body, adapter, budget):
+        product, choices, model = self._analysis_inputs(
+            connection, session, body, adapter
+        )
+        if (
+            model["is_fixture"]
+            or self.inference is not adapter
+            or self.analysis_budget is not budget
+        ):
+            raise AppError(
+                "STALE_SNAPSHOT", "Analysis configuration changed.", 409
+            )
+        request = adapter.build_request(product["source"], choices)
+        return canonical(
+            {
+                "sid": session["sid"],
+                "revision": session["revision"],
+                "review_id": session["checkout"]["review_id"],
+                "checkout_sha256": digest(session["checkout"]),
+                "body_sha256": digest(body),
+                "catalog": product,
+                "conditions": choices,
+                "model": model,
+                "budget_policy_document": budget.policy.identity,
+                "request_sha256": request_hash(request),
+            }
+        ), request
+
+    def _preflight_admission(self, connection, budget):
+        rows = connection.execute(
+            "SELECT status FROM analysis_preflights"
+        ).fetchall()
+        if len(rows) >= min(
+            self.analysis_policy.max_attempts, budget.policy.max_calls
+        ) or any(row["status"] == "UNKNOWN" for row in rows):
+            raise AppError(
+                "MODEL_BUDGET_EXCEEDED",
+                "Count preflight limit or unknown outcome.",
+                503,
+            )
+        reserved = connection.execute(
+            "SELECT * FROM budget_operations"
+        ).fetchall()
+        policy = budget.policy
+        if (
+            len(reserved) >= policy.max_calls
+            or any(row["status"] != "KNOWN" for row in reserved)
+            or sum(row["input_tokens"] for row in reserved) + 1
+            > policy.max_total_input_tokens
+            or sum(row["output_tokens"] for row in reserved)
+            + policy.max_output_tokens
+            > policy.max_total_output_tokens
+            or sum(row["reserved_micro_usd"] for row in reserved)
+            + policy.cost(1, policy.max_output_tokens)
+            > policy.max_micro_usd
+        ):
+            raise AppError(
+                "MODEL_BUDGET_EXCEEDED",
+                "No capacity for another analysis.",
+                503,
+            )
+        if any(row["status"] in {"PREPARED", "COUNTING"} for row in rows):
+            raise AppError(
+                "MODEL_UNAVAILABLE", "Count preflight already active.", 503
+            )
+
+    def _preflight_fresh(self, connection, plan, body, adapter, budget):
+        try:
+            session = self._session(connection, plan["sid"])
+            document, _ = self._preflight_document(
+                connection, session, body, adapter, budget
+            )
+            return (
+                document == plan["input_document"]
+                and text_hash(document) == plan["input_hash"]
+            )
+        except (AppError, ValueError, TypeError, KeyError):
+            return False
+
+    def _block_count_intent(self, connection, plan, error_code):
+        inputs = json.loads(plan["input_document"])
+        session = self._session(connection, plan["sid"])
+        checkout = session["checkout"]
+        if (
+            checkout is None
+            or session["revision"] != inputs["revision"]
+            or checkout["review_id"] != inputs["review_id"]
+        ):
+            return
+        checkout.update(
+            state="ANALYSIS_BLOCKED",
+            analysis_error=error_code,
+            results=[],
+            snapshot_hash=None,
+            confirmation_id=None,
+            consent=None,
+        )
+        self._write_review(connection, session)
+        self._save(connection, session, "count_preflight_blocked")
+
+    def _claim_count(self, plan, body, adapter, budget):
+        with self.store.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM analysis_preflights WHERE preflight_id = ?",
+                (plan["preflight_id"],),
+            ).fetchone()
+            if (
+                row is None
+                or row["status"] != "PREPARED"
+                or row["sid"] != plan["sid"]
+                or row["input_document"] != plan["input_document"]
+                or row["input_hash"] != plan["input_hash"]
+            ):
+                return None
+            if not self._preflight_fresh(
+                connection, plan, body, adapter, budget
+            ):
+                connection.execute(
+                    "UPDATE analysis_preflights SET status = 'STALE', "
+                    "error_code = 'STALE_SNAPSHOT', observed_at = ? WHERE preflight_id = ?",
+                    (self.clock().isoformat(), plan["preflight_id"]),
+                )
+                self._block_count_intent(connection, plan, "STALE_SNAPSHOT")
+                return None
+            token = str(uuid4())
+            connection.execute(
+                "UPDATE analysis_preflights SET status = 'COUNTING', claim_token = ? "
+                "WHERE preflight_id = ?",
+                (token, plan["preflight_id"]),
+            )
+            return {**plan, "claim_token": token}
+
+    def _finish_count(self, plan, body, adapter, budget, count, error_code):
+        reservation = None
+        with self.store.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM analysis_preflights WHERE preflight_id = ?",
+                (plan["preflight_id"],),
+            ).fetchone()
+            if (
+                row is None
+                or row["status"] != "COUNTING"
+                or row["claim_token"] != plan["claim_token"]
+                or row["sid"] != plan["sid"]
+                or row["input_document"] != plan["input_document"]
+                or row["input_hash"] != plan["input_hash"]
+            ):
+                return None, "MODEL_BUDGET_EXCEEDED"
+            status, count_document = "UNKNOWN", ""
+            if not error_code:
+                count_document = canonical(asdict(count))
+                if not self._preflight_fresh(
+                    connection, plan, body, adapter, budget
+                ):
+                    status, error_code = "STALE", "STALE_SNAPSHOT"
+                else:
+                    session = self._session(connection, plan["sid"])
+                    connection.execute("SAVEPOINT counted_reservation")
+                    try:
+                        reservation = self._reserve_analysis(
+                            connection, session, body, adapter, plan, count
+                        )
+                    except AppError:
+                        connection.execute("ROLLBACK TO counted_reservation")
+                        connection.execute("RELEASE counted_reservation")
+                        status, error_code = "BLOCKED", "MODEL_BUDGET_EXCEEDED"
+                    else:
+                        connection.execute("RELEASE counted_reservation")
+                        status = "USED"
+            if status != "USED":
+                self._block_count_intent(connection, plan, error_code)
+            connection.execute(
+                "UPDATE analysis_preflights SET status = ?, count_document = ?, "
+                "analysis_operation_id = ?, error_code = ?, observed_at = ? WHERE preflight_id = ?",
+                (
+                    status,
+                    count_document,
+                    reservation["operation_id"] if reservation else "",
+                    error_code,
+                    self.clock().isoformat(),
+                    plan["preflight_id"],
+                ),
+            )
+        return reservation, error_code
+
+    def _analyze(self, sid, body):
+        with self.store.transaction() as connection:
+            session = self._session(connection, sid)
+            if body["expected_revision"] != session["revision"]:
+                raise AppError(
+                    "STALE_REVISION", "Reload the current review.", 409
+                )
+            adapter = self.inference
+            product, choices, model = self._analysis_inputs(
+                connection, session, body, adapter
+            )
+            fixture = model["is_fixture"]
+            if fixture:
+                reservation = self._reserve_analysis(
+                    connection, session, body, adapter
+                )
+            else:
+                self._analysis_admission(connection)
+                self._configured_budget(connection, adapter, model)
+                budget = self.analysis_budget
+                self._preflight_admission(connection, budget)
+                session["checkout"] = self._new_analysis_checkout(
+                    product, choices, model
+                )
+                self._write_review(connection, session)
+                self._save(connection, session, "count_preflight_intent")
+                document, request = self._preflight_document(
+                    connection, session, body, adapter, budget
+                )
+                preflight_id = str(uuid4())
+                connection.execute(
+                    "INSERT INTO analysis_preflights(preflight_id, sid, input_document, "
+                    "input_hash, status, created_at) VALUES (?, ?, ?, ?, 'PREPARED', ?)",
+                    (
+                        preflight_id,
+                        sid,
+                        document,
+                        text_hash(document),
+                        self.clock().isoformat(),
+                    ),
+                )
+                plan = dict(
+                    connection.execute(
+                        "SELECT * FROM analysis_preflights WHERE preflight_id = ?",
+                        (preflight_id,),
+                    ).fetchone()
+                )
+        if not fixture:
+            self._checkpoint(
+                "analysis_after_count_reservation_commit", plan["preflight_id"]
+            )
+            plan = self._claim_count(plan, body, adapter, budget)
+            if plan is None:
+                raise AppError(
+                    "STALE_SNAPSHOT",
+                    "Count preflight is no longer current.",
+                    409,
+                )
+            self._checkpoint(
+                "analysis_after_count_claim_commit", plan["preflight_id"]
+            )
+            count, error_code = None, ""
+            try:
+                timeout = json.loads(plan["input_document"])["model"][
+                    "count_timeout_seconds"
+                ]
+                count = run_offline_count(budget.count, request, timeout)
+                validate_input_count(request, count, budget.policy)
+            except AppError as error:
+                error_code = (
+                    "MODEL_TIMEOUT"
+                    if error.code == "MODEL_TIMEOUT"
+                    else "MODEL_BUDGET_EXCEEDED"
+                )
+            self._checkpoint(
+                "analysis_before_count_observation_commit", plan["preflight_id"]
+            )
+            reservation, error_code = self._finish_count(
+                plan, body, adapter, budget, count, error_code
+            )
+            if error_code:
+                raise AppError(
+                    error_code,
+                    "Count preflight failed or changed; no generation.",
+                    409 if error_code == "STALE_SNAPSHOT" else 503,
+                )
+        self._checkpoint(
+            "analysis_after_reservation_commit", reservation["operation_id"]
+        )
+        self._dispatch_analysis(reservation, adapter)
+        with self.store.transaction() as connection:
+            return self._result(connection, self._session(connection, sid))
+
+    def _analysis_inputs(self, connection, session, body, adapter):
         if connection.execute(
             "SELECT 1 FROM orders WHERE sid = ?", (session["sid"],)
         ).fetchone():
@@ -578,6 +891,14 @@ class Service:
             for index, choice in enumerate(choices)
         ]
         model = self._analysis_metadata(adapter)
+        return product, choices, model
+
+    def _reserve_analysis(
+        self, connection, session, body, adapter, preflight=None, count=None
+    ):
+        product, choices, model = self._analysis_inputs(
+            connection, session, body, adapter
+        )
         fixture = model.get("is_fixture") is True
         if not fixture:
             self._analysis_admission(connection)
@@ -587,40 +908,32 @@ class Service:
             budget = self.analysis_budget
             ledger = self._configured_budget(connection, adapter, model)
             request = adapter.build_request(product["source"], choices)
-            try:
-                count = budget.count(request)
-            except Exception:
+            if preflight is None:
                 raise AppError(
-                    "MODEL_BUDGET_EXCEEDED", "Offline count unavailable.", 503
-                ) from None
-            if self.analysis_budget is not budget:
+                    "MODEL_BUDGET_EXCEEDED", "Count preflight required.", 503
+                )
+            row = connection.execute(
+                "SELECT * FROM analysis_preflights WHERE preflight_id = ?",
+                (preflight["preflight_id"],),
+            ).fetchone()
+            if (
+                row is None
+                or row["status"] != "COUNTING"
+                or row["claim_token"] != preflight["claim_token"]
+                or row["input_document"] != preflight["input_document"]
+                or row["input_hash"] != preflight["input_hash"]
+            ):
                 raise AppError(
-                    "MODEL_BUDGET_EXCEEDED", "Offline budget changed.", 503
+                    "MODEL_BUDGET_EXCEEDED", "Count preflight unavailable.", 503
                 )
             operation_id = ledger.reserve(request, count)
             budget_fields = {
                 "budget_policy_document": budget.policy.identity,
                 "budget_request_sha256": request_hash(request),
+                "count_preflight_id": preflight["preflight_id"],
+                "count_preflight_sha256": preflight["input_hash"],
             }
-        checkout = {
-            "review_id": str(uuid4()),
-            "state": "ANALYSIS_BLOCKED",
-            "analysis_error": "MODEL_PENDING",
-            "sku_id": sku,
-            "conditions": choices,
-            "results": [],
-            "snapshot_hash": None,
-            "confirmation_id": None,
-            "order": None,
-            "amount": {
-                "minor": product["price_minor"],
-                "currency": product["currency"],
-            },
-            "source": product["source"],
-            "model": model,
-            "catalog_hash": digest(product),
-            "consent": None,
-        }
+        checkout = self._new_analysis_checkout(product, choices, model)
         document = canonical(
             {
                 "catalog": product,

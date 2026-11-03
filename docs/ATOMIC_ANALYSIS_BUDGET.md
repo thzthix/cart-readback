@@ -1,5 +1,11 @@
 # Atomic offline analysis budget gate, issue #27
 
+Current follow-up: [issue #29 count preflight](OFFLINE_COUNT_PREFLIGHT.md) moves
+injected count work outside SQLite under a bounded durable claim and exact CAS
+into the atomic reservation. The original pure-local/in-transaction counter
+restriction below describes #27 and is superseded by that offline lifecycle.
+No real count client, credentials, prices, spending or live mode is enabled.
+
 Base: `742d5718df6632313f4499ead381e3ab2a2d4850`. This connects the reviewed
 budget operations to the existing analysis lifecycle **only through explicit
 trusted offline injection**. The default server and CLI remain synthetic

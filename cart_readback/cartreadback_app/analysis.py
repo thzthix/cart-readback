@@ -4,6 +4,7 @@ Attempt limits are not dollar authorization or real input-token accounting. No
 network transport, credentials or live-enable switch is provided by this module.
 """
 
+import math
 from dataclasses import dataclass
 from typing import Callable
 
@@ -34,17 +35,23 @@ class AnalysisPolicy:
 class OfflineAnalysisBudget:
     """Explicit fabricated local count/rate seam; no live authorization.
 
-    The counter must be pure, bounded local test code. It runs in the reservation
-    transaction and must not perform I/O, access secrets or call provider APIs.
+    The counter runs outside application transactions under a durable preflight
+    claim and watchdog. It is still injected offline test code, never a real API
+    or credential loader; timeout does not prove cancellation.
     """
 
     policy: OfflineBudgetPolicy
     count: Callable[[bytes], OfflineInputCount]
+    count_timeout_seconds: float = 5.0
 
     def __post_init__(self) -> None:
         """Reject missing policy or counter rather than guessing an allowance."""
-        if type(self.policy) is not OfflineBudgetPolicy or not callable(
-            self.count
+        if (
+            type(self.policy) is not OfflineBudgetPolicy
+            or not callable(self.count)
+            or type(self.count_timeout_seconds) not in (int, float)
+            or not math.isfinite(self.count_timeout_seconds)
+            or not 0 < self.count_timeout_seconds <= 20
         ):
             raise AppError(
                 "MODEL_BUDGET_EXCEEDED", "Offline budget unavailable.", 503
