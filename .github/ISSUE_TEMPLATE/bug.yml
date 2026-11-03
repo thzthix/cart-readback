@@ -1,0 +1,62 @@
+name: Reproducible bug
+description: Report observed incorrect behavior with safe reproduction evidence.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report observations, not assumed causes. Redact all evidence before posting.
+        Do not post secrets, unredacted personal/payment data, or private payloads.
+        For a suspected security/privacy issue, do not publish exploitable details;
+        ask the repository owner for an approved private reporting route first.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Revision and environment
+      description: Give the commit/artifact revision, component, runtime/browser, and fixture or sandbox mode. Mark unknowns; omit credentials and identifiers.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: List exact safe steps or an offline test command with synthetic input. State whether repeated attempts reproduce the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Link the applicable acceptance condition or contract if available.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Observed behavior and impact
+      description: State what happened, frequency, user impact, and any recovery/workaround. Distinguish observed facts from suspected causes.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted evidence
+      description: Include actual test output or sanitized screenshots when useful. State unavailable or not run rather than fabricating evidence.
+    validations:
+      required: false
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Fix acceptance and regression case
+      description: Describe an observable condition that would prove the defect fixed without breaking the relevant normal flow.
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and separated observed behavior from assumptions.
+          required: true
+        - label: I removed secrets, unredacted personal/payment data, and exploitable security details.
+          required: true

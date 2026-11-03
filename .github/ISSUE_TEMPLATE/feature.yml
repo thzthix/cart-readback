@@ -1,0 +1,66 @@
+name: Feature or scoped change
+description: Define one feature, documentation, test, or maintenance change.
+title: "[Work] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Define one reviewable outcome before branching. Check existing issues first.
+        Do not attach secrets, unredacted personal/payment data, or private payloads.
+        An issue is not authorization for accounts, costs, live actions, or publication.
+  - type: dropdown
+    id: change-kind
+    attributes:
+      label: Change kind
+      options:
+        - Feature
+        - Documentation
+        - Tests only
+        - Refactor
+        - Maintenance or tooling
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem and current baseline
+      description: Who needs what outcome? Describe the existing workaround and evidence; distinguish assumptions from observations.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Proposed scope and non-goals
+      description: Describe the smallest coherent change, excluded work, dependencies, and relevant contracts.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Observable acceptance conditions
+      description: List pass/fail conditions, including a relevant failure or regression case. Do not use an agent rating as proof.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification plan and evidence limits
+      description: Name intended checks and distinguish offline fixtures, real integration, and checks requiring access. Planning a check is not running it.
+    validations:
+      required: true
+  - type: textarea
+    id: handoff
+    attributes:
+      label: Ownership and dependencies
+      description: If assigned, name the accountable GitHub account and implementation/review roles. Otherwise state unassigned. Note conflicting files and the integration order; do not invent teammates.
+    validations:
+      required: false
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and kept this to one reviewable outcome.
+          required: true
+        - label: I removed secrets and unredacted personal/payment data.
+          required: true
