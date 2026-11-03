@@ -117,6 +117,8 @@ class InferenceObservation:
     input_tokens: int
     output_tokens: int
     total_tokens: int
+    service_tier_requested: str
+    service_tier_returned: str
 
     @property
     def results(self) -> list[dict]:
@@ -273,6 +275,7 @@ class OfflineResponsesAdapter:
         )
         payload = {
             "model": self._config.model,
+            "service_tier": self._config.service_tier,
             "instructions": self._bundle.system,
             "input": [
                 {
@@ -407,6 +410,8 @@ class OfflineResponsesAdapter:
             max_bytes=self._metadata["max_envelope_bytes"],
             max_depth=self._metadata["max_envelope_depth"],
         )
+        if envelope.get("service_tier") != self._config.service_tier:
+            raise _error("MODEL_BUDGET_EXCEEDED")
         text = _provider_text(envelope, self._config.expected_model_ids)
         wire = strict_provider_json(
             text.encode("utf-8", errors="strict"),
@@ -433,4 +438,6 @@ class OfflineResponsesAdapter:
             response_id,
             response.request_id,
             *usage,
+            self._config.service_tier,
+            envelope["service_tier"],
         )
