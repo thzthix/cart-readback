@@ -446,6 +446,109 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual("SUCCEEDED", self.operation("orders")["status"])
         self.assertEqual(1, self.count("fixture_dispatches"))
 
+    def test_no_id_reconcile_plan_cannot_overwrite_later_create_progress(self):
+        class PausedService(Service):
+            def __init__(self, *args, **kwargs):
+                self.reconcile_planned = threading.Event()
+                self.reconcile_release = threading.Event()
+                super().__init__(*args, **kwargs)
+
+            def _perform_order_action(
+                self,
+                sid,
+                action,
+                body,
+                order_id,
+                key,
+                request_hash,
+                adapter,
+                plan,
+            ):
+                if action == "reconcile" and plan["provider_id"] is None:
+                    self.reconcile_planned.set()
+                    if not self.reconcile_release.wait(10):
+                        raise AssertionError(
+                            "No-ID reconcile barrier did not release"
+                        )
+                return super()._perform_order_action(
+                    sid,
+                    action,
+                    body,
+                    order_id,
+                    key,
+                    request_hash,
+                    adapter,
+                    plan,
+                )
+
+        class PartialProvider(BarrierProvider):
+            incomplete = False
+
+            def create(self, request_id, expected):
+                document = super().create(request_id, expected)
+                if self.incomplete:
+                    document.pop("items")
+                return document
+
+        for progress in (
+            "created",
+            "verified",
+            "known-incomplete",
+            "verification-failed",
+        ):
+            with self.subTest(progress=progress):
+                self.service.close()
+                self.setUp()
+                self.service.close()
+                self.provider = PartialProvider(self.path)
+                self.provider.incomplete = progress == "known-incomplete"
+                self.service = PausedService(self.store, payments=self.provider)
+                self.flow = Workflow(self.service)
+                self.flow.analyze()
+                self.flow.confirm()
+                self.provider.block = "create"
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    creator = executor.submit(self.flow.create)
+                    try:
+                        self.assertTrue(self.provider.entered.wait(5))
+                        other = Workflow(self.service, self.flow.sid)
+                        reconcile = executor.submit(other.action, "reconcile")
+                        self.assertTrue(self.service.reconcile_planned.wait(5))
+                        self.provider.release.set()
+                        creator.result(5)
+                        if progress in {"verified", "verification-failed"}:
+                            self.flow.action("fixture-approve")
+                            if progress == "verification-failed":
+                                document = self.provider.get(
+                                    self.flow.checkout["order"][
+                                        "provider_order_id"
+                                    ]
+                                )
+                                document["amount_minor"] += 1
+                                with self.provider.connect() as connection:
+                                    self.provider._save(connection, document)
+                            self.flow.action("verify")
+                        before = self.service.bootstrap(self.flow.sid)
+                        self.assertTrue(
+                            before["checkout"]["order"]["provider_order_id"]
+                        )
+                        self.service.reconcile_release.set()
+                        reconcile.result(5)
+                        after = self.service.bootstrap(self.flow.sid)
+                        self.assertEqual(before["checkout"], after["checkout"])
+                        self.assertEqual(before["revision"], after["revision"])
+                        self.assertEqual(
+                            "UNKNOWN"
+                            if progress == "known-incomplete"
+                            else "SUCCEEDED",
+                            self.operation("orders")["status"],
+                        )
+                        self.assertEqual(1, self.count("operations"))
+                        self.assertEqual(1, self.count("fixture_dispatches"))
+                    finally:
+                        self.provider.release.set()
+                        self.service.reconcile_release.set()
+
     def test_reconcile_while_dispatch_waits_then_matching_completion_is_monotonic(
         self,
     ):

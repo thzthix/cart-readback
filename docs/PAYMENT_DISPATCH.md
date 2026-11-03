@@ -53,6 +53,8 @@ and can be checked again. Create response loss before the ID is persisted stays
 `CREATE_OUTCOME_UNKNOWN`; no request-ID search or invented provider ID is used.
 Delayed old CREATE reconciliation cannot overwrite a newer CAPTURE operation
 or regress a successful create/approval/verification with an older lookup.
+A no-ID reconcile plan rechecks current success and provider-ID presence before
+recording unknown, so stale absence cannot overwrite a newly known order.
 
 ## Process and database lifecycle
 

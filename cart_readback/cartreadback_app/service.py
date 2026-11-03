@@ -1010,7 +1010,14 @@ class Service:
                 operation, session, _ = self._fenced(
                     connection, plan["operation"]
                 )
-                if session["checkout"]["state"] == "COMPLETED":
+                if self._ignore_stale_reconcile(connection, operation, session):
+                    return
+                if (
+                    session["checkout"]["order"]["provider_order_id"]
+                    is not None
+                ):
+                    # Absence belongs to the old plan, not this owned state.
+                    # A fresh user reconcile can GET the now-known order.
                     return
                 session["checkout"]["state"] = "PAYMENT_UNKNOWN"
                 session["checkout"]["order"]["status"] = "UNKNOWN"
@@ -1135,13 +1142,13 @@ class Service:
             return False
         return True
 
-    def _reconcile_observation(self, connection, fence, document):
-        operation, session, expected = self._fenced(connection, fence)
-        checkout, order = session["checkout"], session["checkout"]["order"]
-        if checkout["state"] == "COMPLETED" or (
+    def _ignore_stale_reconcile(self, connection, operation, session):
+        checkout = session["checkout"]
+        terminal = checkout["state"] == "COMPLETED" or (
             operation["status"] == "SUCCEEDED"
             and checkout["state"] != "PAYMENT_UNKNOWN"
-        ):
+        )
+        if terminal:
             event(
                 connection,
                 session["sid"],
@@ -1151,6 +1158,12 @@ class Service:
                     "reason": "TERMINAL_SUCCESS",
                 },
             )
+        return terminal
+
+    def _reconcile_observation(self, connection, fence, document):
+        operation, session, expected = self._fenced(connection, fence)
+        checkout, order = session["checkout"], session["checkout"]["order"]
+        if self._ignore_stale_reconcile(connection, operation, session):
             return
         try:
             capture = operation["kind"] == "capture"
