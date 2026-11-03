@@ -1,0 +1,53 @@
+{
+  "dataset_version": "cartreadback-semantic-holdout-1.0.0",
+  "manifest_version": "1.0.2",
+  "status": "synthetic_predeclared_holdout_frozen_before_external_predictions",
+  "frozen_at_utc": "2026-11-02T21:57:47+00:00",
+  "author": "Blair independent AI evaluation worker; not a human interview or inference experiment",
+  "case_count": 24,
+  "condition_count": 48,
+  "label_counts": {
+    "match": 16,
+    "conflict": 16,
+    "unknown": 16
+  },
+  "source_provenance": "All catalog text is synthetic and explicitly labeled in every source.",
+  "leakage_note": "Shared filesystem; process separation only, not hidden or immutable. No app fixtures or prompt candidates read by author. Gold and builder withheld from prompt workers and input-only runners.",
+  "predeclared_metrics": [
+    "critical_false_match",
+    "label_accuracy",
+    "grounded_proxy_accuracy",
+    "correct_decisive",
+    "excess_abstain",
+    "all_unknown_degenerate"
+  ],
+  "quality_results": "NOT RUN; only offline harness self-tests with fabricated outputs are authorized here.",
+  "sha256": {
+    "holdout-inputs.jsonl": "5f4075c4789880d5822c976f3fb5ac4fdd5c0bfb51b65f7f51bf383095b2c52f",
+    "holdout-gold.jsonl": "b5b9b3f0306b457fa4ec7ef6a8213f0f57e371e6a791f69fae1297a3147c272c",
+    "build_holdout.py": "7b36cd4380df3a50bc0456b637207fb7ad673db124aa432433f1a5eac0340cf8",
+    "score.py": "014b7cdf8c31f32fda5aae53ec8c77b55d0bc380fffd79ab474326515ce50ae3",
+    "test_score.py": "f7fdcaef7d330ff6514ff1a89e80d1c36170aa14413f154e7058de37a88ce3e2",
+    "predictions.schema.json": "069d96646ffa37a99bcc36be768df03bce38bdb074990b473f8da2becf2c673d",
+    "provenance.example.json": "8c5129009a903b56d85965238dfbed0f8ef16bd7804e021900542848ec54712c",
+    "README.md": "44467555d9882bf7194eceddd4ad87a7909a9a13d2b209ebe0bb78beb9782d22"
+  },
+  "tooling_revision": {
+    "version": "cartreadback-eval-tooling-1.0.1",
+    "change": "Ruff 0.14.3 formatting only; Python AST unchanged; no corpus, label, prompt or metric changes.",
+    "source_manifest_version": "1.0.0",
+    "source_manifest_sha256": "aebd3463ffcc6a08eb4c7a71dfcdc8e451269c4b11992ae67873c7c5180e40a3",
+    "source_tool_sha256": {
+      "build_holdout.py": "ef68f4d924ca6e19783aa17082fccf2f93c17f0518cd54a90d0c54ca4409b54e",
+      "score.py": "6da02ae69587aabae69262d39af77209aa15b6ce676e800ae24229a61776e714",
+      "test_score.py": "a1f7ed08ac7e5c6c04f6c6a1cffafbc6b741890e3992a6648b7a789ec1e560c7"
+    }
+  },
+  "validation_revision": {
+    "version": "cartreadback-eval-tooling-1.0.2",
+    "change": "Fix separately reviewed scorer/API explanation mismatch: reject empty strings, U+0000-U+001F controls and U+D800-U+DFFF surrogates; align external wrapper schema; add two regression tests. Safely ASCII-escape report JSON so escaped-surrogate foreign IDs remain reported instead of crashing; add a subprocess regression.",
+    "format_phase_manifest_sha256": "94a1b0e606cdd434d5103f41e010b4c1c4a75e320f12891c95dba4d86af77e1f",
+    "source_predictions_schema_sha256": "ada06b395a4e7304e2dad879404973372d78a6e56c763e0bf9e0cde344c44151",
+    "corpus_labels_prompt_and_metric_definitions_unchanged": true
+  }
+}

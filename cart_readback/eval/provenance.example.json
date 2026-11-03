@@ -1,0 +1,20 @@
+{
+  "run_id": "replace-with-unique-run-id",
+  "candidate_id": "A",
+  "prediction_kind": "unspecified_external",
+  "model": "unknown",
+  "model_version": "unknown",
+  "prompt_sha256": "unknown",
+  "settings": {
+    "temperature": "unknown",
+    "seed": "unknown",
+    "reasoning_effort": "unknown"
+  },
+  "budget": {
+    "max_input_tokens": "unknown",
+    "max_output_tokens": "unknown",
+    "max_calls_per_case": "unknown"
+  },
+  "comparison_control": "uncontrolled_pilot",
+  "trial_id": "replace-with-preregistered-trial-id"
+}

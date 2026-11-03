@@ -1,0 +1,103 @@
+{
+  "status": "offline-artifact-preflight-passed-not-model-evaluation",
+  "prompt_version": "cartreadback-prompt-v1",
+  "command": "PYTHONDONTWRITEBYTECODE=1 python prompts/verify_artifacts.py",
+  "network_calls": 0,
+  "real_model_calls": 0,
+  "payment_calls": 0,
+  "evaluator_corpus_read": false,
+  "jsonschema_version": "4.26.0",
+  "schemas_valid": [
+    "schema.json",
+    "template.json#/input_schema"
+  ],
+  "public_dev_examples_passed": [
+    "public-dev-1",
+    "public-dev-2"
+  ],
+  "malformed_output_cases_rejected": {
+    "missing_match_evidence": {
+      "local_schema_rejected": true,
+      "existing_validator_rejected": true
+    },
+    "uppercase_status": {
+      "local_schema_rejected": true,
+      "existing_validator_rejected": true
+    },
+    "extra_payment_field": {
+      "local_schema_rejected": true,
+      "existing_validator_rejected": true
+    },
+    "wrong_source_id": {
+      "local_schema_rejected": false,
+      "existing_validator_rejected": true
+    },
+    "boolean_offset": {
+      "local_schema_rejected": true,
+      "existing_validator_rejected": true
+    },
+    "reversed_span": {
+      "local_schema_rejected": false,
+      "existing_validator_rejected": true
+    },
+    "wrong_exact_quote": {
+      "local_schema_rejected": false,
+      "existing_validator_rejected": true
+    },
+    "duplicate_condition_id": {
+      "local_schema_rejected": false,
+      "existing_validator_rejected": true
+    },
+    "foreign_condition_id": {
+      "local_schema_rejected": false,
+      "existing_validator_rejected": true
+    },
+    "control_in_explanation": {
+      "local_schema_rejected": true,
+      "existing_validator_rejected": true
+    },
+    "missing_condition": {
+      "local_schema_rejected": false,
+      "existing_validator_rejected": true
+    },
+    "utf16_instead_of_codepoint_after_astral_emoji": {
+      "local_schema_rejected": false,
+      "existing_validator_rejected": true
+    }
+  },
+  "known_semantic_gap": {
+    "observed": "Author-constructed synthetic false cable match with exact no-cable quote passes schema and existing span validator.",
+    "expected_limit_observed": true,
+    "meaning": "Structural checks do not establish entailment. No model produced this output."
+  },
+  "artifact_sha256": {
+    "readback-system.txt": "57a8d66fa78747b661af2d9720ef5ee1ca15f566e2db69200eee6dc808e78239",
+    "readback-user-template.txt": "1b5254db8297debc989a7b0c0f606a6eb64052710a8166e9bedbcfe88d8ddca9",
+    "arm-A-system.txt": "0f34a13efd73c0e762daa5038252f9a19d760a78ee51b63b3766d519de9e0fde",
+    "arm-B-system.txt": "57a8d66fa78747b661af2d9720ef5ee1ca15f566e2db69200eee6dc808e78239",
+    "arm-C-system.txt": "f5af0fb84218c837be868e88f564be904425a93fe40e4362c13994157de76409",
+    "template.json": "224dfd9f0a6a5fbf5af983ec7e91f928e0418c6b705fcf9602cd19a172d9ea8e",
+    "schema.json": "7a49011e3042d3371bdea11aae201ff4a8d8a2fd5cda4fcd67b23bcf31c7fb57",
+    "EVALUATION_PLAN.md": "944e49a9d6428ac5df1b5b603f330fdc4370314b8e8fd1ce0ad26dc6e12f408a",
+    "verify_artifacts.py": "05fc14cfdd2979f528296b0893381f59ee2cf16f4504a1f88cb408dec973a5bc"
+  },
+  "contract_dependency_sha256": {
+    "cart_readback/API_CONTRACT.md": "3a171526f8948dac01133975131748562469f3715870a71dac933195459325b2",
+    "PROJECT_BRIEF.md": "1340f07f2140ad3389c6198ab40bb874d9da6f15d716791f82d7692eb28e53e6",
+    "cart_readback/cartreadback_app/inference.py": "145c4655be4fe54c21a6800048ffd61f27447ec523b46d9b1f59bd4b008d654f",
+    "cart_readback/cartreadback_app/validation.py": "e343efd1b6806336f0588398fe9ee8ca5a0ea436303810ee05ba0480660bf6f2"
+  },
+  "arm_system_sha256": {
+    "A": "0f34a13efd73c0e762daa5038252f9a19d760a78ee51b63b3766d519de9e0fde",
+    "B": "57a8d66fa78747b661af2d9720ef5ee1ca15f566e2db69200eee6dc808e78239",
+    "C": "f5af0fb84218c837be868e88f564be904425a93fe40e4362c13994157de76409"
+  },
+  "not_run": [
+    "real inference",
+    "provider schema acceptance",
+    "A/B/C comparison",
+    "holdout scoring",
+    "PayPal sandbox",
+    "browser/customer study"
+  ]
+}
