@@ -1,0 +1,83 @@
+name: Offline application checks
+
+# Manual only until the owner verifies included private Actions capacity.
+# Adding push/pull_request triggers or dispatching a run needs that cost gate.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixture-checks:
+    name: Python 3.11 / Node 22 fixture checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+        working-directory: cart_readback
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      # Keep machine-readable zero-skip guards independent of Node defaults.
+      NODE_OPTIONS: '--test-reporter=tap'
+    steps:
+      - name: Check out the selected revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up the minimum supported Python line
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Set up the minimum supported Node line
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Record revision and install pinned development tools
+        run: |
+          git rev-parse HEAD
+          python --version
+          node --version
+          python -m pip install --no-cache-dir --only-binary=:all: -r scripts/requirements-dev.txt
+          python -m pip check
+      - name: Compile and check Python style
+        run: |
+          python -m compileall -q cartreadback_app tests scripts review ui/check.py eval prompts
+          ruff check cartreadback_app tests scripts review ui/check.py eval prompts
+          ruff format --check cartreadback_app tests scripts review ui/check.py eval prompts
+      - name: Run backend and independent regression suites
+        run: |
+          python -m unittest discover -s tests -v
+          python -m unittest discover -s review -p 'test_independent_*.py' -v
+      - name: Check fixture HTTP success and uncertainty recovery
+        run: |
+          python scripts/smoke_http.py
+          python scripts/smoke_http.py --fault capture_timeout_after_success
+          python scripts/smoke_http.py --fault capture_timeout_before_success
+          python scripts/smoke_http.py --fault create_timeout_after_success
+      - name: Run UI checks with real loopback HTTP and no skips
+        run: |
+          python ui/check.py | tee "$RUNNER_TEMP/ui-check.log"
+          node --test review/test_independent_ui.mjs | tee "$RUNNER_TEMP/independent-ui.log"
+          # check.py owns two Node groups: core/DOM and real HTTP/client.
+          test "$(grep -c '^# skipped 0$' "$RUNNER_TEMP/ui-check.log")" -eq 2
+          test "$(grep -c '^# skipped 0$' "$RUNNER_TEMP/independent-ui.log")" -eq 1
+          ! grep -Eq '^# (skipped|todo) [1-9][0-9]*$' "$RUNNER_TEMP/ui-check.log" "$RUNNER_TEMP/independent-ui.log"
+      - name: Validate corpus and scorer regressions
+        run: |
+          python eval/score.py validate
+          python -m unittest discover -s eval -p 'test_score.py' -v
+      - name: Check prompt preflight without rewriting frozen artifacts
+        run: |
+          python prompts/verify_artifacts.py > "$RUNNER_TEMP/prompt-preflight.json"
+          cmp prompts/PREFLIGHT.json "$RUNNER_TEMP/prompt-preflight.json"
+          (cd prompts && sha256sum -c SHA256SUMS)
+      - name: Ensure checks left tracked source unchanged
+        run: git diff --exit-code
