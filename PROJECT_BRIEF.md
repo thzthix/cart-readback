@@ -40,11 +40,11 @@ is a small Python/SQLite modular monolith with a same-origin vanilla UI, not a
 runtime debate team. Amount/quantity/currency/owner checks remain outside a model.
 
 ## Current stage and evidence
-This branch is documentation/API-contract scaffold only. Pre-existing local
-fixture code, UI and evaluation artifacts will be imported through separate real
-issues and draft PRs. They use synthetic catalog data, a deterministic proposal
-test double and fake payment provider, not genuine AI inference or PayPal calls.
-Prior local checks do not certify a future imported commit.
+This tree combines the issue-first imports of pre-existing local fixture server,
+buyer UI and offline evaluation artifacts. It uses synthetic catalog data, a
+deterministic proposal test double and fake payment provider, not genuine AI
+inference or PayPal calls. Component reviews do not certify later changes; run
+fresh exact-revision integration checks and preserve original provenance.
 
 An app-external uncontrolled native-agent pilot later used a synthetic evaluation
 set. The exposed set is regression material, not fresh hidden holdout. No prompt
@@ -61,8 +61,9 @@ import provenance and disclose material AI assistance in PR descriptions without
 AI-authorship or coauthor commit trailers. AI names label responsibilities, not
 separate humans/accounts.
 
-The user authorized private repository code/issue/branch/draft-PR work. Formal
-approval, merging, auto-merge, public visibility, open-source licensing, account or
-credential access, costs, legal acceptance, live payments, deployment and contest
-submission retain their separate gates. Never use fixture success as evidence of
+The user authorized private repository code/issue/branch/PR work and separately
+authorized merging the current reviewed project PRs. Formal approval, auto-merge,
+public visibility, open-source licensing, account or credential access, costs,
+legal acceptance, live payments, deployment and contest submission retain their
+separate gates. Never use fixture success as evidence of
 real integration or publish a working-integration claim from simulated footage.

@@ -1,9 +1,11 @@
 # Evaluation status at this import
 
-**Offline tooling, not a validated AI + PayPal application.** This issue #6 import
-stacks on fixture-server PR #4 at `d2781cf7f603d83b552c9cd84371544357589bdd`.
-Exact imported head, fresh separate-worker review and checks belong in the draft
-PR; this file cannot contain its own final commit hash.
+**Offline tooling, not a validated AI + PayPal application.** The issue #6 import
+originally stacked on server PR #4 at `d2781cf7f603d83b552c9cd84371544357589bdd`.
+This integrated tree also includes the buyer UI. Original component reviews and
+fresh exact-head integration review/checks are recorded in PR #8; this file
+cannot contain its own final commit hash. Historical tables below describe the
+original evaluation import, not automatic certification of later integration.
 
 ## Read the historical artifacts correctly
 
@@ -96,10 +98,12 @@ checksums were regenerated, not reused as current evidence.
 
 ## Open gates
 
-Separate-worker review/reruns of the final exact head remain a draft-PR gate.
+Fresh separate-worker review/reruns are required after integration changes; see
+PR #8 for the actual fixed revision and disposition.
 Real application inference, provider API/schema acceptance, fresh semantic-quality
 validation, actual PayPal sandbox lifecycle/recovery, rendered browser/accessibility
 flows and customer benefit versus the good same-source non-AI table are **not run**.
-These checks incur no inference charges or payment calls. The draft stack is not
-merged main and conveys no formal APPROVE, merge/deployment/public-release/license
-or contest-submission authority.
+These checks incur no inference charges or payment calls. The owner separately
+authorized current project PR merges. No formal APPROVE, independent-account
+approval, deployment/public-release/license or contest-submission authority is
+implied by either the checks or a merge.
