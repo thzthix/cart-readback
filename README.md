@@ -279,6 +279,12 @@ why a concrete factory alone cannot enable genuine inference, the unresolved
 count-payload contract, and the required identity/accounting/authorization work.
 This is documentation only. No live factory, key, call or readiness pass is added.
 
+[Issue #35's separate immutable identity primitive](docs/GENUINE_RUNTIME_IDENTITY.md)
+now binds the planned provider/request/transport policy and explicitly absent
+evidence into one review fingerprint. Its capability result is always blocked;
+it adds no executable genuine factory, count projection or service/CLI selection.
+Account binding, count equivalence, pricing and authorization remain unresolved.
+
 ## Evidence and remaining gates
 
 This is an **import of pre-existing local fixture work**. The issue-first GitHub
