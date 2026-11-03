@@ -1,10 +1,12 @@
 """Deterministic review, consent, and one-order fixture workflow."""
 
 import json
+import math
 import re
 import secrets
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -15,9 +17,22 @@ from cartreadback_app.analysis import (
     OfflineAnalysisBudget,
     checked_observation,
 )
+from cartreadback_app.context_capacity import (
+    ContextFence,
+    ContextReservation,
+    TransactionContextCapacityLedger,
+    context_ledger_from_document,
+    initialize_context_capacity,
+    recover_context_capacity,
+)
+from cartreadback_app.context_runtime import ContextAnalysisRuntime, blocked
 from cartreadback_app.count_preflight import (
     PREFLIGHT_VERSION,
     run_offline_count,
+)
+from cartreadback_app.genuine_responses import (
+    GenuineExchange,
+    GenuineResponsesAdapter,
 )
 from cartreadback_app.inference import (
     FixtureInferenceAdapter,
@@ -68,6 +83,7 @@ class Service:
         clock=None,
         analysis_policy: AnalysisPolicy | None = None,
         analysis_budget: OfflineAnalysisBudget | None = None,
+        context_analysis: ContextAnalysisRuntime | None = None,
     ):
         """Inject offline adapters; HTTP setup never loads credentials."""
         self.store = store
@@ -77,8 +93,20 @@ class Service:
         self._closed = False
         self.analysis_policy = analysis_policy or AnalysisPolicy()
         self.analysis_budget = analysis_budget
-        self.inference = inference or FixtureInferenceAdapter()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.context_analysis = context_analysis
+        self.inference = inference or FixtureInferenceAdapter()
+        if context_analysis is not None:
+            if (
+                type(context_analysis) is not ContextAnalysisRuntime
+                or inference is not None
+                or analysis_budget is not None
+            ):
+                self.close()
+                raise blocked()
+            self.inference = GenuineResponsesAdapter(
+                context_analysis, self._context_wall_now
+            )
         try:
             self.payments = payments or FixturePaymentAdapter()
             self._recover_pending()
@@ -93,6 +121,11 @@ class Service:
 
     @payments.setter
     def payments(self, adapter: PaymentAdapter) -> None:
+        if (
+            self.context_analysis is not None
+            or type(self.inference) is GenuineResponsesAdapter
+        ) and type(adapter) is not FixturePaymentAdapter:
+            raise blocked()
         if isinstance(adapter, FixturePaymentAdapter):
             with self.store.transaction() as connection:
                 legacy = connection.execute(
@@ -177,6 +210,11 @@ class Service:
         return session
 
     def _fresh(self, connection: sqlite3.Connection, checkout: dict) -> bool:
+        if (
+            type(self.inference) is GenuineResponsesAdapter
+            and self.context_analysis is not self.inference.runtime
+        ):
+            return False
         return checkout["catalog_hash"] == digest(
             product_for(connection, checkout["sku_id"])
         ) and checkout["model"] == self._analysis_metadata(self.inference)
@@ -186,10 +224,52 @@ class Service:
     ) -> dict | None:
         if checkout is None:
             return None
-        public = json.loads(canonical(checkout))
-        public.pop("catalog_hash", None)
-        public.pop("consent", None)
-        public.pop("approval_return", None)
+        allowed = {
+            "review_id",
+            "state",
+            "analysis_error",
+            "sku_id",
+            "conditions",
+            "results",
+            "snapshot_hash",
+            "confirmation_id",
+            "order",
+            "amount",
+            "source",
+            "model",
+            "verification_error",
+        }
+        public = json.loads(
+            canonical(
+                {
+                    key: value
+                    for key, value in checkout.items()
+                    if key in allowed
+                }
+            )
+        )
+        if (
+            checkout["model"].get("execution_mode")
+            == "genuine-context-capacity"
+        ):
+            keys = {
+                "provider",
+                "model_version",
+                "prompt_version",
+                "adapter_version",
+                "validator_version",
+                "is_fixture",
+                "execution_mode",
+                "execution_kind",
+            }
+            public["model"] = {
+                key: value
+                for key, value in checkout["model"].items()
+                if key in keys
+            }
+            public["analysis"] = self._public_context_outcome(
+                connection, checkout["review_id"]
+            )
         if not self._fresh(connection, checkout):
             public["stale"] = True
             public["confirmation_id"] = None
@@ -208,6 +288,32 @@ class Service:
         this build are explicitly injected offline test seams, not genuine calls.
         Unknown adapters remain unsupported and are blocked by the buyer UI.
         """
+        if type(self.inference) is GenuineResponsesAdapter:
+            installed = self.inference.runtime.installed
+            kind = (
+                (
+                    "provider-runtime"
+                    if installed.evidence_kind == "provider"
+                    else "fabricated-offline"
+                )
+                if installed
+                else "unavailable"
+            )
+            available = (
+                self.inference.runtime.available(self._context_wall_now())
+                and self.context_analysis is self.inference.runtime
+                and type(self.payments) is FixturePaymentAdapter
+            )
+            return {
+                "analysis": {
+                    "mode": "genuine-context-capacity",
+                    "is_fixture": False,
+                    "dispatch_available": available,
+                    "execution_kind": kind,
+                },
+                "payment": {"mode": "fixture", "is_fixture": True},
+                "network_enabled": kind == "provider-runtime" and available,
+            }
         analysis_fixture = (
             self._analysis_metadata(self.inference).get("is_fixture") is True
         )
@@ -227,6 +333,8 @@ class Service:
     def runtime_mode(self) -> str:
         """Retain fixture for its exact default, otherwise identify offline mode."""
         providers = self.provider_contract()
+        if providers["analysis"]["mode"] == "genuine-context-capacity":
+            return "mixed"
         return (
             "fixture"
             if providers["analysis"]["is_fixture"]
@@ -258,6 +366,8 @@ class Service:
                 "notice": (
                     NOTICE
                     if self.runtime_mode() == "fixture"
+                    else "Context analysis is host-configured; availability and observations are reported separately. Checkout is simulated; PayPal is unconnected. API charges may apply to a separately provisioned provider runtime."
+                    if self.runtime_mode() == "mixed"
                     else "Synthetic catalog and injected offline adapters. "
                     "No genuine inference, PayPal connection or payment."
                 ),
@@ -464,6 +574,9 @@ class Service:
         return result
 
     def _recover_analysis(self, connection):
+        initialize_context_capacity(connection)
+        self._migrate_analysis_strategies(connection)
+        recover_context_capacity(connection)
         preflights = connection.execute(
             "SELECT * FROM analysis_preflights WHERE status IN ('PREPARED', 'COUNTING')"
         ).fetchall()
@@ -485,6 +598,10 @@ class Service:
                 "error_code = 'MODEL_OUTCOME_UNKNOWN' WHERE operation_id = ?",
                 (operation["operation_id"],),
             )
+            if not connection.execute(
+                "SELECT 1 FROM sessions WHERE sid = ?", (operation["sid"],)
+            ).fetchone():
+                continue
             session = self._session(connection, operation["sid"])
             checkout = session["checkout"]
             if checkout and checkout["review_id"] == operation["review_id"]:
@@ -508,6 +625,8 @@ class Service:
         )
 
     def _analysis_metadata(self, adapter):
+        if type(adapter) is GenuineResponsesAdapter:
+            return adapter.metadata
         model = json.loads(canonical(adapter.metadata))
         model["is_fixture"] = (
             isinstance(adapter, FixtureInferenceAdapter)
@@ -541,7 +660,7 @@ class Service:
             or model.get("execution_mode") != "offline-injected-only"
             or connection.execute(
                 "SELECT 1 FROM analysis_operations a LEFT JOIN budget_operations b "
-                "ON a.operation_id = b.operation_id WHERE a.is_fixture = 0 "
+                "ON a.operation_id = b.operation_id WHERE a.strategy = 'offline-count-v1' "
                 "AND b.operation_id IS NULL LIMIT 1"
             ).fetchone()
         ):
@@ -555,7 +674,7 @@ class Service:
             connection, policy_from_identity(inputs["budget_policy_document"])
         )
 
-    def _analysis_admission(self, connection):
+    def _analysis_admission(self, connection, current_preflight_id=None):
         rows = connection.execute(
             "SELECT status, observation FROM analysis_operations "
             "WHERE is_fixture = 0"
@@ -572,6 +691,14 @@ class Service:
             raise AppError(
                 "MODEL_UNAVAILABLE", "Analysis already in flight.", 503
             )
+        try:
+            self._analysis_history_guard(connection, current_preflight_id)
+        except AppError as error:
+            raise AppError(
+                "MODEL_BUDGET_EXCEEDED",
+                "Unresolved analysis history blocks dispatch.",
+                503,
+            ) from error
 
     def _new_analysis_checkout(self, product, choices, model):
         return {
@@ -674,7 +801,19 @@ class Service:
             return False
 
     def _block_count_intent(self, connection, plan, error_code):
-        inputs = json.loads(plan["input_document"])
+        try:
+            inputs = json.loads(plan["input_document"])
+            if (
+                type(inputs) is not dict
+                or not {"revision", "review_id"} <= inputs.keys()
+            ):
+                return
+        except (ValueError, TypeError):
+            return
+        if not connection.execute(
+            "SELECT 1 FROM sessions WHERE sid = ?", (plan["sid"],)
+        ).fetchone():
+            return
         session = self._session(connection, plan["sid"])
         checkout = session["checkout"]
         if (
@@ -780,6 +919,8 @@ class Service:
         return reservation, error_code
 
     def _analyze(self, sid, body):
+        if type(self.inference) is GenuineResponsesAdapter:
+            return self._analyze_context(sid, body)
         with self.store.transaction() as connection:
             session = self._session(connection, sid)
             if body["expected_revision"] != session["revision"]:
@@ -792,6 +933,15 @@ class Service:
             )
             fixture = model["is_fixture"]
             if fixture:
+                if (
+                    connection.execute(
+                        "SELECT 1 FROM analysis_operations WHERE strategy = 'context-capacity-v1' LIMIT 1"
+                    ).fetchone()
+                    or connection.execute(
+                        "SELECT 1 FROM context_capacity_operations LIMIT 1"
+                    ).fetchone()
+                ):
+                    self._analysis_history_guard(connection)
                 reservation = self._reserve_analysis(
                     connection, session, body, adapter
                 )
@@ -901,7 +1051,9 @@ class Service:
         )
         fixture = model.get("is_fixture") is True
         if not fixture:
-            self._analysis_admission(connection)
+            self._analysis_admission(
+                connection, preflight["preflight_id"] if preflight else None
+            )
         operation_id = str(uuid4())
         budget_fields = {}
         if not fixture:
@@ -945,7 +1097,7 @@ class Service:
         connection.execute(
             "INSERT INTO analysis_operations(operation_id, sid, review_id, "
             "input_document, input_hash, checkout_hash, reserved_revision, is_fixture, status, "
-            "reserved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?)",
+            "reserved_at, strategy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?)",
             (
                 operation_id,
                 session["sid"],
@@ -956,6 +1108,7 @@ class Service:
                 session["revision"] + 1,
                 int(fixture),
                 self.clock().isoformat(),
+                "fixture" if fixture else "offline-count-v1",
             ),
         )
         session["checkout"] = checkout
@@ -978,6 +1131,7 @@ class Service:
             "checkout_hash",
             "reserved_revision",
             "is_fixture",
+            "strategy",
         )
         if any(operation[key] != reservation[key] for key in immutable):
             return False
@@ -1237,6 +1391,597 @@ class Service:
             )
         self._write_review(connection, session)
         self._save(connection, session, "analysis_recorded")
+
+    def _context_wall_now(self):
+        now = self.clock().timestamp()
+        if type(now) not in (int, float) or not math.isfinite(now):
+            raise blocked()
+        return now
+
+    def _context_now(self):
+        # Integer storage timestamps never define the transport's precise budget.
+        return int(self._context_wall_now())
+
+    def _migrate_analysis_strategies(self, connection):
+        for row in connection.execute(
+            "SELECT * FROM analysis_operations WHERE strategy = ''"
+        ).fetchall():
+            budget = connection.execute(
+                "SELECT 1 FROM budget_operations WHERE operation_id = ?",
+                (row["operation_id"],),
+            ).fetchone()
+            context = connection.execute(
+                "SELECT 1 FROM context_capacity_operations WHERE operation_id = ?",
+                (row["operation_id"],),
+            ).fetchone()
+            strategy = "unsupported-legacy"
+            try:
+                inputs = json.loads(row["input_document"])
+                if (
+                    row["is_fixture"] == 1
+                    and not budget
+                    and not context
+                    and inputs["model"]["is_fixture"] is True
+                ):
+                    strategy = "fixture"
+                elif (
+                    row["is_fixture"] == 0
+                    and budget
+                    and not context
+                    and inputs.get("budget_request_sha256")
+                    and inputs.get("budget_policy_document")
+                ):
+                    strategy = "offline-count-v1"
+            except (ValueError, TypeError, KeyError):
+                pass
+            connection.execute(
+                "UPDATE analysis_operations SET strategy = ? WHERE operation_id = ?",
+                (strategy, row["operation_id"]),
+            )
+
+    def _analysis_history_guard(self, connection, current_preflight_id=None):
+        # Pair both directions. A new strategy or current installation cannot
+        # discard orphan/unknown history in any of the shared admission ledgers.
+        rows = connection.execute(
+            "SELECT a.*, b.operation_id AS budget_id, c.operation_id AS context_id FROM analysis_operations a LEFT JOIN budget_operations b ON b.operation_id = a.operation_id LEFT JOIN context_capacity_operations c ON c.operation_id = a.operation_id"
+        ).fetchall()
+        for row in rows:
+            strategy = row["strategy"]
+            if not connection.execute(
+                "SELECT 1 FROM sessions WHERE sid = ?", (row["sid"],)
+            ).fetchone():
+                raise blocked()
+            if strategy == "fixture":
+                valid = (
+                    row["is_fixture"] == 1
+                    and not row["budget_id"]
+                    and not row["context_id"]
+                )
+            elif strategy == "offline-count-v1":
+                valid = (
+                    row["is_fixture"] == 0
+                    and row["budget_id"]
+                    and not row["context_id"]
+                )
+            elif strategy == "context-capacity-v1":
+                valid = (
+                    row["is_fixture"] == 0
+                    and row["context_id"]
+                    and not row["budget_id"]
+                )
+            else:
+                valid = False
+            if (
+                not valid
+                or text_hash(row["input_document"]) != row["input_hash"]
+                or row["status"]
+                not in {
+                    "RESERVED",
+                    "DISPATCHED",
+                    "SUCCEEDED",
+                    "BLOCKED",
+                    "STALE",
+                    "UNKNOWN",
+                }
+            ):
+                raise blocked()
+            if not connection.execute(
+                "SELECT 1 FROM reviews WHERE review_id = ? AND sid = ?",
+                (row["review_id"], row["sid"]),
+            ).fetchone():
+                raise blocked()
+            if strategy != "fixture" and row["status"] in {
+                "UNKNOWN",
+                "RESERVED",
+                "DISPATCHED",
+            }:
+                raise blocked()
+        for table, strategy in (
+            ("budget_operations", "offline-count-v1"),
+            ("context_capacity_operations", "context-capacity-v1"),
+        ):
+            if connection.execute(
+                f"SELECT 1 FROM {table} b LEFT JOIN analysis_operations a ON a.operation_id = b.operation_id WHERE a.operation_id IS NULL OR a.strategy != ? OR b.status != 'KNOWN' OR a.status NOT IN ('SUCCEEDED','BLOCKED','STALE') OR a.observation = '' LIMIT 1",
+                (strategy,),
+            ).fetchone():
+                raise blocked()
+        if connection.execute(
+            "SELECT 1 FROM analysis_preflights p LEFT JOIN analysis_operations a ON a.operation_id = p.analysis_operation_id WHERE p.status NOT IN ('PREPARED','COUNTING','UNKNOWN','USED','BLOCKED','STALE') OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.sid = p.sid) OR p.status = 'UNKNOWN' OR (p.status IN ('PREPARED', 'COUNTING') AND p.preflight_id != ?) OR (p.status = 'USED' AND (a.operation_id IS NULL OR a.strategy != 'offline-count-v1')) LIMIT 1",
+            (current_preflight_id or "",),
+        ).fetchone():
+            raise blocked()
+
+    def _public_context_outcome(self, connection, review_id):
+        row = connection.execute(
+            "SELECT a.dispatch_token, a.input_document, c.status, c.observation FROM analysis_operations a LEFT JOIN context_capacity_operations c ON a.operation_id = c.operation_id WHERE a.review_id = ? AND a.strategy = 'context-capacity-v1'",
+            (review_id,),
+        ).fetchone()
+        usage = bool(row and row["observation"])
+        kind = "none"
+        if usage:
+            original = json.loads(row["input_document"])["model"][
+                "execution_kind"
+            ]
+            kind = (
+                "fabricated-offline"
+                if original == "fabricated-offline"
+                else "provider-observation"
+            )
+        return {
+            "strategy": "context-capacity-v1",
+            "dispatch_state": "attempted"
+            if row and row["dispatch_token"]
+            else "not-attempted",
+            "accounting_state": "known"
+            if row and row["status"] == "KNOWN"
+            else "unknown"
+            if row and row["status"] == "UNKNOWN"
+            else "unobserved",
+            "usage_observed": usage,
+            "evidence_kind": kind,
+        }
+
+    def _context_fence(self, sid, product, choices, generation, runtime_sha):
+        source = product["source"]
+        return ContextFence(
+            runtime_sha,
+            text_hash(sid),
+            source["sha256"],
+            digest(source),
+            source["revision"],
+            digest(choices),
+            generation,
+        )
+
+    def _require_context(self, adapter, sid, product, choices):
+        if (
+            type(adapter) is not GenuineResponsesAdapter
+            or self.inference is not adapter
+            or self.context_analysis is not adapter.runtime
+            or self.analysis_budget is not None
+            or type(self.payments) is not FixturePaymentAdapter
+        ):
+            raise blocked()
+        installed = adapter.runtime.require(self._context_wall_now())
+        if not installed.scope.allows(product, choices, sid):
+            raise blocked()
+        return installed
+
+    def _analyze_context(self, sid, body):
+        adapter = self.inference
+        with self.store.transaction() as connection:
+            session = self._session(connection, sid)
+            if body["expected_revision"] != session["revision"]:
+                raise AppError(
+                    "STALE_REVISION", "Reload the current review.", 409
+                )
+            product, choices, model = self._analysis_inputs(
+                connection, session, body, adapter
+            )
+            installed = self._require_context(adapter, sid, product, choices)
+            self._analysis_admission(connection)
+            prepared = adapter.prepare(product["source"], choices)
+            fence = self._context_fence(
+                sid,
+                product,
+                choices,
+                session["revision"] + 1,
+                installed.execution_sha256,
+            )
+            ledger = TransactionContextCapacityLedger(
+                connection, installed.policy, installed.authorization
+            )
+            capacity = ledger.reserve(
+                prepared.request, fence, now=self._context_now()
+            )
+            checkout = self._new_analysis_checkout(product, choices, model)
+            document = canonical(
+                {
+                    "catalog": product,
+                    "conditions": choices,
+                    "model": model,
+                    "context_ledger_document": ledger.identity,
+                    "context_reservation": asdict(capacity),
+                    "context_fence": asdict(fence),
+                    "context_request_sha256": prepared.request_sha256,
+                }
+            )
+            connection.execute(
+                "INSERT INTO analysis_operations(operation_id, sid, review_id, input_document, input_hash, checkout_hash, reserved_revision, is_fixture, status, reserved_at, strategy) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'RESERVED', ?, 'context-capacity-v1')",
+                (
+                    capacity.operation_id,
+                    sid,
+                    checkout["review_id"],
+                    document,
+                    text_hash(document),
+                    digest(checkout),
+                    session["revision"] + 1,
+                    self.clock().isoformat(),
+                ),
+            )
+            session["checkout"] = checkout
+            self._write_review(connection, session)
+            self._save(connection, session, "analysis_reserved")
+            reservation = dict(
+                connection.execute(
+                    "SELECT * FROM analysis_operations WHERE operation_id = ?",
+                    (capacity.operation_id,),
+                ).fetchone()
+            )
+        self._checkpoint(
+            "analysis_after_reservation_commit", capacity.operation_id
+        )
+        self._dispatch_context(reservation, adapter, prepared)
+        with self.store.transaction() as connection:
+            return self._result(connection, self._session(connection, sid))
+
+    def _context_binding(self, connection, reservation):
+        inputs = json.loads(reservation["input_document"])
+        ledger = context_ledger_from_document(
+            connection, inputs["context_ledger_document"]
+        )
+        return (
+            inputs,
+            ledger,
+            ContextReservation(**inputs["context_reservation"]),
+            ContextFence(**inputs["context_fence"]),
+        )
+
+    def _context_fresh(self, connection, row, reservation, adapter, prepared):
+        try:
+            if not self._analysis_fresh(connection, row, reservation, adapter):
+                return False
+            inputs = json.loads(reservation["input_document"])
+            installed = self._require_context(
+                adapter,
+                reservation["sid"],
+                inputs["catalog"],
+                inputs["conditions"],
+            )
+            return (
+                prepared.runtime_sha256 == installed.execution_sha256
+                and prepared.request_sha256 == inputs["context_request_sha256"]
+                and adapter.prepare(
+                    inputs["catalog"]["source"], inputs["conditions"]
+                )
+                == prepared
+            )
+        except (AppError, ValueError, TypeError, KeyError):
+            return False
+
+    def _block_context_checkout(self, connection, reservation, error_code):
+        row = connection.execute(
+            "SELECT 1 FROM sessions WHERE sid = ?", (reservation["sid"],)
+        ).fetchone()
+        if not row:
+            return
+        session = self._session(connection, reservation["sid"])
+        checkout = session["checkout"]
+        if (
+            not checkout
+            or checkout["review_id"] != reservation["review_id"]
+            or session["revision"] != reservation["reserved_revision"]
+        ):
+            return
+        checkout.update(
+            state="ANALYSIS_BLOCKED",
+            analysis_error=error_code,
+            results=[],
+            snapshot_hash=None,
+            confirmation_id=None,
+            consent=None,
+        )
+        self._write_review(connection, session)
+        self._save(connection, session, "context_analysis_blocked")
+
+    def _mark_context_unknown(self, connection, reservation, claim, error_code):
+        row = connection.execute(
+            "SELECT * FROM analysis_operations WHERE operation_id = ?",
+            (reservation["operation_id"],),
+        ).fetchone()
+        if (
+            not row
+            or row["status"] not in ("RESERVED", "DISPATCHED", "UNKNOWN")
+            or (
+                claim is not None and row["dispatch_token"] != claim.claim_token
+            )
+        ):
+            return
+        _, ledger, capacity, _ = self._context_binding(connection, reservation)
+        ledger.mark_unknown(capacity)
+        connection.execute(
+            "UPDATE analysis_operations SET status = 'UNKNOWN', error_code = ?, observed_at = ? WHERE operation_id = ?",
+            (error_code, self.clock().isoformat(), reservation["operation_id"]),
+        )
+        self._block_context_checkout(connection, reservation, error_code)
+
+    def _dispatch_context(self, reservation, adapter, prepared):
+        operation_id = reservation["operation_id"]
+        with self.store.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM analysis_operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if not row or row["status"] != "RESERVED":
+                return
+            inputs, ledger, capacity, fence = self._context_binding(
+                connection, reservation
+            )
+            if not self._context_fresh(
+                connection, row, reservation, adapter, prepared
+            ):
+                self._mark_context_unknown(
+                    connection, reservation, None, "STALE_SNAPSHOT"
+                )
+                return
+            claim = ledger.claim(
+                capacity, prepared.request, fence, now=self._context_now()
+            )
+            if claim is None:
+                self._mark_context_unknown(
+                    connection, reservation, None, "MODEL_OUTCOME_UNKNOWN"
+                )
+                return
+            connection.execute(
+                "UPDATE analysis_operations SET status = 'DISPATCHED', dispatch_token = ?, dispatched_at = ? WHERE operation_id = ?",
+                (claim.claim_token, self.clock().isoformat(), operation_id),
+            )
+        self._checkpoint("analysis_after_dispatch_commit", operation_id)
+        try:
+            deadline = adapter.deadline(claim)
+        except Exception:
+            with self.store.transaction() as connection:
+                self._mark_context_unknown(
+                    connection, reservation, claim, "MODEL_OUTCOME_UNKNOWN"
+                )
+            return
+        # Account for the worker before start, while mutate already owns activity.
+        # The watchdog returns, but cannot release this extra lease ownership.
+        done = threading.Event()
+        with self._activity_lock:
+            self._active += 1
+
+        def run():
+            try:
+                # Recheck any changes after committed claim before constructing
+                # a connection. The exchange itself holds no SQLite transaction.
+                with self.store.transaction() as connection:
+                    current = connection.execute(
+                        "SELECT * FROM analysis_operations WHERE operation_id = ?",
+                        (operation_id,),
+                    ).fetchone()
+                    if (
+                        not current
+                        or current["status"] != "DISPATCHED"
+                        or current["dispatch_token"] != claim.claim_token
+                    ):
+                        return
+                    if not self._context_fresh(
+                        connection, current, reservation, adapter, prepared
+                    ):
+                        self._mark_context_unknown(
+                            connection, reservation, claim, "STALE_SNAPSHOT"
+                        )
+                        return
+                try:
+                    exchange = adapter.exchange(prepared, claim, deadline)
+                except Exception:
+                    exchange = None
+                self._checkpoint(
+                    "analysis_before_observation_commit", operation_id
+                )
+                with self.store.transaction() as connection:
+                    self._finish_context(
+                        connection,
+                        reservation,
+                        adapter,
+                        prepared,
+                        claim,
+                        exchange,
+                        time.monotonic() >= deadline.expires_at,
+                        deadline.expires_at,
+                    )
+                    pending = connection.execute(
+                        "SELECT status FROM analysis_operations WHERE operation_id = ?",
+                        (operation_id,),
+                    ).fetchone()
+                    if pending and pending[0] == "DISPATCHED":
+                        self._mark_context_unknown(
+                            connection,
+                            reservation,
+                            claim,
+                            "MODEL_OUTCOME_UNKNOWN",
+                        )
+            except Exception:
+                # Preserve ambiguity if the observation transaction rolls back.
+                # Never print arbitrary exception text from trusted test seams.
+                try:
+                    with self.store.transaction() as connection:
+                        self._mark_context_unknown(
+                            connection,
+                            reservation,
+                            claim,
+                            "MODEL_OUTCOME_UNKNOWN",
+                        )
+                except Exception:
+                    pass  # Startup recovery owns a failed persistence boundary.
+            finally:
+                with self._activity_lock:
+                    self._active -= 1
+                done.set()
+
+        worker = threading.Thread(target=run, daemon=True)
+        try:
+            worker.start()
+        except BaseException:
+            with self._activity_lock:
+                self._active -= 1
+            with self.store.transaction() as connection:
+                self._mark_context_unknown(
+                    connection, reservation, claim, "MODEL_OUTCOME_UNKNOWN"
+                )
+            raise
+        if not done.wait(max(0, deadline.expires_at - time.monotonic())):
+            with self.store.transaction() as connection:
+                self._mark_context_unknown(
+                    connection, reservation, claim, "MODEL_TIMEOUT"
+                )
+
+    def _finish_context(
+        self,
+        connection,
+        reservation,
+        adapter,
+        prepared,
+        claim,
+        exchange,
+        late=False,
+        deadline_at=None,
+    ):
+        row = connection.execute(
+            "SELECT * FROM analysis_operations WHERE operation_id = ?",
+            (reservation["operation_id"],),
+        ).fetchone()
+        if (
+            not row
+            or row["status"] not in ("DISPATCHED", "UNKNOWN")
+            or row["dispatch_token"] != claim.claim_token
+        ):
+            return
+        # Never let a foreign claim/exchange fault mutate another operation.
+        if exchange is not None and (
+            type(exchange) is not GenuineExchange
+            or exchange.operation_id != reservation["operation_id"]
+            or exchange.claim_token != claim.claim_token
+            or exchange.request_sha256 != prepared.request_sha256
+            or exchange.runtime_sha256 != prepared.runtime_sha256
+        ):
+            return
+        inputs, ledger, capacity, fence = self._context_binding(
+            connection, reservation
+        )
+        fresh = self._context_fresh(
+            connection, row, reservation, adapter, prepared
+        )
+        prior_unknown = row["status"] == "UNKNOWN"
+        if exchange is None:
+            self._mark_context_unknown(
+                connection, reservation, claim, "MODEL_OUTCOME_UNKNOWN"
+            )
+            return
+        expected_kind = (
+            "provider"
+            if inputs["model"]["execution_kind"] == "provider-runtime"
+            else "fabricated-offline"
+        )
+        if exchange.evidence_kind != expected_kind:
+            return
+        # Always use original policy even when the current installation changed.
+        from cartreadback_app.context_capacity import ContextCapacityPolicy
+
+        raw_policy = json.loads(inputs["context_ledger_document"])["policy"]
+        policy = ContextCapacityPolicy(
+            raw_policy["valid_from"],
+            raw_policy["expires_at"],
+            raw_policy["reference_profile"],
+            raw_policy["evidence_revision"],
+        )
+        protocol_fault, error_code, results = adapter.classify(
+            exchange, policy, prepared
+        )
+        late = late or (
+            deadline_at is not None and time.monotonic() >= deadline_at
+        )
+        if protocol_fault or late or not fresh or prior_unknown:
+            ledger.mark_unknown(capacity)
+        try:
+            accounting_state = ledger.observe(
+                claim,
+                exchange.envelope,
+                request_sha256=exchange.request_sha256,
+                runtime_sha256=exchange.runtime_sha256,
+                request_id=exchange.request_id,
+                current_fence=fence,
+                now=self._context_now(),
+            )
+        except AppError:
+            # Invalid/duplicate identifiers cannot settle or overwrite accounting.
+            existing = connection.execute(
+                "SELECT observation FROM context_capacity_operations WHERE operation_id = ?",
+                (reservation["operation_id"],),
+            ).fetchone()
+            if existing and existing[0]:
+                return
+            ledger.mark_unknown(capacity)
+            accounting_state = "UNKNOWN"
+        accounting = connection.execute(
+            "SELECT observation FROM context_capacity_operations WHERE operation_id = ?",
+            (reservation["operation_id"],),
+        ).fetchone()[0]
+        if accounting_state != "KNOWN":
+            error_code, results = "MODEL_OUTCOME_UNKNOWN", None
+        status = (
+            "UNKNOWN"
+            if accounting_state == "UNKNOWN"
+            else "BLOCKED"
+            if error_code
+            else "SUCCEEDED"
+        )
+        connection.execute(
+            "UPDATE analysis_operations SET status = ?, observation = ?, error_code = ?, observed_at = ? WHERE operation_id = ? AND dispatch_token = ?",
+            (
+                status,
+                accounting,
+                error_code,
+                self.clock().isoformat(),
+                reservation["operation_id"],
+                claim.claim_token,
+            ),
+        )
+        if prior_unknown or late or not fresh:
+            self._block_context_checkout(
+                connection, reservation, error_code or "STALE_SNAPSHOT"
+            )
+            return
+        if error_code:
+            self._block_context_checkout(connection, reservation, error_code)
+            return
+        session = self._session(connection, reservation["sid"])
+        checkout = session["checkout"]
+        checkout.pop("analysis_error", None)
+        checkout.update(state="REVIEW_REQUIRED", results=results)
+        checkout["snapshot_hash"] = digest(
+            {
+                "owner": session["sid"],
+                "review_id": checkout["review_id"],
+                "catalog": inputs["catalog"],
+                "conditions": inputs["conditions"],
+                "proposal": results,
+                "model": inputs["model"],
+            }
+        )
+        self._write_review(connection, session)
+        self._save(connection, session, "context_analysis_recorded")
 
     def _confirm(
         self, connection: sqlite3.Connection, session: dict, body: dict

@@ -166,6 +166,7 @@ sessionStorage; storage failure blocks operation-key preparation. From
 
 ```sh
 python ui/check.py
+python ui/context_http_check.py
 node --test review/test_independent_ui.mjs
 python -m compileall -q cartreadback_app tests scripts review ui/check.py
 # With reviewed Ruff 0.14.3 available:
@@ -277,13 +278,30 @@ remain offline fixture evidence, not native browser, model or PayPal validation.
 [Issue #33 architecture and gates](docs/GENUINE_PROVIDER_RUNTIME.md) explains
 why a concrete factory alone cannot enable genuine inference, the unresolved
 count-payload contract, and the required identity/accounting/authorization work.
-This is documentation only. No live factory, key, call or readiness pass is added.
+That architecture stage was documentation only. No live key, call or readiness pass was established.
 
 [Issue #35's separate immutable identity primitive](docs/GENUINE_RUNTIME_IDENTITY.md)
 now binds the planned provider/request/transport policy and explicitly absent
 evidence into one review fingerprint. Its capability result is always blocked;
 it adds no executable genuine factory, count projection or service/CLI selection.
 Account binding, count equivalence, pricing and authorization remain unresolved.
+
+## Context-capacity analysis service bridge
+
+[Issue #39's host-only service bridge](docs/CONTEXT_ANALYSIS_BRIDGE.md) now joins
+analysis and context-capacity reservation, single claim, bounded exchange,
+independent accounting and proposal CAS. It uses a distinct adapter without an
+input-count preflight. The original counted-plan identity stays blocked.
+
+Default server/CLI and payments remain fixture-only. There is no supported live
+installation resolver or activation flag. Tests fabricate trusted host records,
+opaque handles and HTTPS exchanges; their public evidence is fabricated-offline,
+not provider success. A separately provisioned provider runtime could incur API
+charges, so C12 distinguishes current dispatch availability from historical
+attempt/accounting and retains uncertainty across strategy changes. Reference
+estimates remain unselected reference math, not actual billing. Secure key setup,
+external binding/approval, real network/provider behavior and buyer benefit are
+still unverified. No genuine inference or payment was performed by this change.
 
 ## Evidence and remaining gates
 

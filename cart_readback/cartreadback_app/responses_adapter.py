@@ -230,6 +230,52 @@ def _usage(envelope: dict, maximum_output: int) -> tuple[int, int, int]:
     return tuple(counts)
 
 
+def build_text_request(
+    source, conditions, *, config, bundle, metadata
+) -> bytes:
+    """Build the shared exact text payload without accounting or dispatch."""
+    request = _validated_input(source, conditions)
+    request["response_language"] = config.response_language
+    # Split trusted placeholders before insertion: source placeholders are
+    # serialized as inert data and never recursively expanded.
+    template = bundle.user_template
+    before, rest = template.split("{{request_json}}")
+    middle, after = rest.split("{{output_schema_json}}")
+    user = (
+        before + canonical(request) + middle + bundle.wire_schema_json + after
+    )
+    payload = {
+        "model": config.model,
+        "service_tier": config.service_tier,
+        "instructions": bundle.system,
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": user}],
+            }
+        ],
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "cartreadback_proposal_v1",
+                "strict": True,
+                "schema": json.loads(bundle.wire_schema_json),
+            }
+        },
+        "reasoning": {"effort": "none"},
+        "tools": [],
+        "prompt_cache_options": {"mode": "explicit"},
+        "store": False,
+        "background": False,
+        "stream": False,
+        "max_output_tokens": metadata["max_output_tokens"],
+    }
+    raw = canonical(payload).encode("utf-8")
+    if len(raw) > metadata["max_request_bytes"]:
+        raise AppError("MODEL_BUDGET_EXCEEDED", "Model request too large.", 422)
+    return raw
+
+
 class OfflineResponsesAdapter:
     """One-attempt wire adapter, unavailable to the default fixture service.
 
@@ -261,52 +307,13 @@ class OfflineResponsesAdapter:
 
     def build_request(self, source: dict, conditions: list[dict]) -> bytes:
         """Build the exact intended payload without dispatching or token counting."""
-        request = _validated_input(source, conditions)
-        request["response_language"] = self._config.response_language
-        # Split trusted placeholders before insertion: source placeholders are
-        # serialized as inert data and never recursively expanded.
-        template = self._bundle.user_template
-        before, rest = template.split("{{request_json}}")
-        middle, after = rest.split("{{output_schema_json}}")
-        user = (
-            before
-            + canonical(request)
-            + middle
-            + self._bundle.wire_schema_json
-            + after
+        return build_text_request(
+            source,
+            conditions,
+            config=self._config,
+            bundle=self._bundle,
+            metadata=self._metadata,
         )
-        payload = {
-            "model": self._config.model,
-            "service_tier": self._config.service_tier,
-            "instructions": self._bundle.system,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": user}],
-                }
-            ],
-            "text": {
-                "format": {
-                    "type": "json_schema",
-                    "name": "cartreadback_proposal_v1",
-                    "strict": True,
-                    "schema": json.loads(self._bundle.wire_schema_json),
-                }
-            },
-            "reasoning": {"effort": "none"},
-            "tools": [],
-            "prompt_cache_options": {"mode": "explicit"},
-            "store": False,
-            "background": False,
-            "stream": False,
-            "max_output_tokens": self._metadata["max_output_tokens"],
-        }
-        raw = canonical(payload).encode("utf-8")
-        if len(raw) > self._metadata["max_request_bytes"]:
-            raise AppError(
-                "MODEL_BUDGET_EXCEEDED", "Model request too large.", 422
-            )
-        return raw
 
     def propose(self, source: dict, conditions: list[dict]) -> list[dict]:
         """Return strictly validated results from one injected offline exchange."""

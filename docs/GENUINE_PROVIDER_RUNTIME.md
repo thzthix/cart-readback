@@ -193,3 +193,28 @@ runtime or UI check was run for this note. Secure key provisioning is a separate
 pending gate; this issue supplies neither a manual secret workaround nor a
 working integration. All future application changes still require the repository
 issue/branch/draft-PR/separate-review flow and exact-revision checks.
+
+## Issue #39: executable bridge, still no supported live installation
+
+The context-capacity alternative is now wired through the service's reservation,
+claim, exchange, independent accounting and proposal compare-and-set. It does not
+resolve or select the earlier counted-plan identity in `genuine_runtime.py`.
+The default CLI remains fixture-only. The only executed provider-shaped evidence
+for this bridge is fabricated host records/handles and fake HTTPS connections.
+
+A trusted external provisioner would have to establish binding, pricing adoption,
+concrete data/owner scope and bounded approval before installing the host context.
+No supported provisioner/resolver presently supplies those facts. A Python record,
+metadata hash, opaque handle or caller label is not proof. The unselected stdlib
+constructor supplies mechanics only, not missing authorization or environment
+readiness. The installation now owns an exact transport binding: the fixed shipped
+provider constructor or a separately identified fabricated factory. Fake factory
+replacement receives a fresh nonsecret generation and cannot reuse old approval
+or masquerade as provider evidence. These are identity/freshness checks, not an
+attestation or arbitrary Python sandbox. No actual key, endpoint call or live activation is part of this change.
+
+See [the service bridge and limits](CONTEXT_ANALYSIS_BRIDGE.md) and API C12 for
+exact lifecycle, history, public metadata and the independent-observation contract.
+Reference-price arithmetic stays labelled unselected reference estimation, not
+adopted project prices or actual charges, even when a separate adoption record is
+carried through the host seam.
