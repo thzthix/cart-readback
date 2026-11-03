@@ -51,11 +51,13 @@ the preserved small editorial buying desk and its evidence limits.
   guards reject unsupported requests.
 - Timeout/restart ambiguity stays `PAYMENT_UNKNOWN`. Reconciliation checks the
   same known order; without a provider ID create recovery remains unknown.
-  No replacement payment or automatic capture retry clears uncertainty. There is
-  no cancel/restart flow after order creation.
+  No replacement payment or automatic capture retry clears uncertainty. A buyer
+  cancellation return records intent only; it never voids or replaces an order.
 
 **All catalog data, proposals and payment responses are synthetic fixtures.
-No genuine model call, PayPal call or money movement occurs.** Real adapter
+No genuine model call, PayPal call or money movement occurs.** Analysis and
+payment provider modes are labelled separately. Injected fabricated PayPal wire
+responses are not fixture-model evidence or a connected checkout. Real adapter
 interfaces are disabled and have no live fallback. This is a local/demo server,
 not a production-security endorsement.
 
@@ -111,8 +113,10 @@ of genuine AI. The default server/CLI still use only the synthetic fixture.
 
 An [injected-only PayPal Orders wire adapter](docs/OFFLINE_PAYPAL_BOUNDARY.md)
 adds fabricated-envelope checks through the existing durable payment seam.
-It has no network implementation, credentials, runtime switch or buyer return
-flow. The default server remains fixture-only; genuine sandbox and payments are
+It has no network implementation, credentials or runtime switch. An injected-only
+[buyer-return preparation](docs/OFFLINE_BUYER_RETURN.md) now binds inert callback
+URLs to a one-use owner/order/snapshot state. The default server remains
+fixture-only; genuine sandbox and payments are
 still UNCONNECTED. Missing returned facts remain unknown, never request-backed
 verification. This prerequisite does not establish PayPal acceptance or approval.
 

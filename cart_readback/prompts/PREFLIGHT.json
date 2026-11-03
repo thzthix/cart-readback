@@ -82,7 +82,7 @@
     "verify_artifacts.py": "05fc14cfdd2979f528296b0893381f59ee2cf16f4504a1f88cb408dec973a5bc"
   },
   "contract_dependency_sha256": {
-    "cart_readback/API_CONTRACT.md": "3a171526f8948dac01133975131748562469f3715870a71dac933195459325b2",
+    "cart_readback/API_CONTRACT.md": "f0ca1eaa1f732fb35b7640164ab1b2e797befdadee27339fe07d1f4f430bacd5",
     "PROJECT_BRIEF.md": "01578fd0a150164e6606059465b9b4b7420c9286195c9fb84651cbbdd68fd1d8",
     "cart_readback/cartreadback_app/inference.py": "145c4655be4fe54c21a6800048ffd61f27447ec523b46d9b1f59bd4b008d654f",
     "cart_readback/cartreadback_app/validation.py": "e343efd1b6806336f0588398fe9ee8ca5a0ea436303810ee05ba0480660bf6f2"

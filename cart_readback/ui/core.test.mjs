@@ -129,3 +129,58 @@ test('stale existing order remains readable but cannot be re-confirmed', () => {
   assert.equal(isOrderLocked(historical), true);
   assert.throws(() => confirmPayload(historical, 1, true, new Set(['c2'])));
 });
+
+import {validateEnvelope, validateProviders, parseBuyerReturn, buyerReturnPayload} from './core.mjs';
+const offline = {analysis: {mode: 'injected-offline', is_fixture: false}, payment: {mode: 'paypal-sandbox-offline', is_fixture: false}, network_enabled: false};
+const localId = '11111111-1111-4111-8111-111111111111';
+const query = `?order_id=${localId}&state=${'a'.repeat(43)}&outcome=approved&token=REMOTE1`;
+const returnOrder = {...checkout, state: 'ORDER_CREATED', model: {is_fixture: false}, order: {order_id: localId,
+  provider_mode: 'paypal-sandbox-offline', provider_order_id: 'REMOTE1', approval_url: 'https://www.sandbox.paypal.com/checkoutnow?token=REMOTE1',
+  buyer_return: {available: true, consumed: false, cancelled: false, expires_at: '2099-01-01T00:00:00Z'}}};
+test('offline providers are independently validated and never imply genuine calls', () => {
+  for (const analysis of [offline.analysis, {mode: 'fixture', is_fixture: true}]) {
+    assert.equal(validateEnvelope({api_version: '1', mode: 'offline', providers: {...offline, analysis}}).payment.mode, 'paypal-sandbox-offline');
+  }
+  assert.equal(validateCheckout(returnOrder, catalog, offline), returnOrder);
+  for (const providers of [{...offline, network_enabled: true}, {...offline, analysis: {mode: 'live', is_fixture: false}},
+    {...offline, payment: {mode: 'sandbox', is_fixture: false}}, {...offline, payment: {mode: 'fixture', is_fixture: false}}]) {
+    assert.throws(() => validateProviders(providers));
+  }
+  assert.throws(() => validateEnvelope({api_version: '1', mode: 'fixture', providers: offline}));
+  assert.throws(() => validateCheckout({...returnOrder, model: {is_fixture: true}}, catalog, offline));
+  assert.throws(() => validateCheckout({...returnOrder, order: {...returnOrder.order, provider_mode: 'fixture'}}, catalog, offline));
+});
+test('approval URL stays exact, sandbox-only, token-bound and text-only', () => {
+  for (const url of ['https://www.paypal.com/checkoutnow?token=REMOTE1', 'javascript:alert(1)',
+    'https://www.sandbox.paypal.com.evil/checkoutnow?token=REMOTE1',
+    'https://www.sandbox.paypal.com/checkoutnow?token=OTHER',
+    `${returnOrder.order.approval_url}&extra=1`, `${returnOrder.order.approval_url}#fragment`]) {
+    assert.throws(() => validateCheckout({...returnOrder, order: {...returnOrder.order, approval_url: url}}, catalog, offline));
+  }
+});
+test('return parsing rejects duplicate, unknown, missing, encoded attacks and malformed fields', () => {
+  assert.equal(parseBuyerReturn('/payment-return', query).provider_order_id, 'REMOTE1');
+  assert.deepEqual(parseBuyerReturn('/payment-return', `${query}&PayerID=PAYER1`), parseBuyerReturn('/payment-return', query));
+  assert.equal(parseBuyerReturn('/', query), null);
+  assert.equal(parseBuyerReturn('/payment-return', '', ''), null);
+  assert.throws(() => parseBuyerReturn('/payment-return', '', '#state')); 
+  for (const bad of ['?', query + '&token=REMOTE1', query + '&%74oken=REMOTE1', query + '&next=https://evil',
+    query.replace('approved', 'captured'), query.replace(localId, '../bad'), query.replace('REMOTE1', '%0AREMOTE1'),
+    query.replace('REMOTE1', '%ZZ'), query.replace('REMOTE1', '%FF'), query.replace('&token=REMOTE1', ''),
+    query.replace('a'.repeat(43), 'a'.repeat(42)), query + '&PayerID=']) assert.throws(() => parseBuyerReturn('/payment-return', bad));
+  assert.throws(() => parseBuyerReturn('/payment-return', query, '#fragment'));
+});
+test('return matching blocks stale/foreign/expired/consumed and never supplies capture intent', () => {
+  const returned = parseBuyerReturn('/payment-return', query);
+  const payload = buyerReturnPayload(returned, returnOrder, 4, offline);
+  assert.deepEqual(Object.keys(payload).sort(), ['expected_revision', 'snapshot_hash', 'return_state', 'provider_order_id', 'outcome'].sort());
+  for (const changed of [{...returnOrder, stale: true}, {...returnOrder, state: 'SERVER_RECHECKED'},
+    {...returnOrder, order: {...returnOrder.order, order_id: 'foreign'}},
+    {...returnOrder, order: {...returnOrder.order, provider_order_id: 'OTHER'}}]) {
+    assert.throws(() => buyerReturnPayload(returned, changed, 4, offline));
+  }
+  for (const patch of [{consumed: true}, {cancelled: true}, {available: false}, {expires_at: 'bad'}, {expires_at: '2000-01-01T00:00:00Z'}]) {
+    assert.throws(() => buyerReturnPayload(returned, {...returnOrder, order: {...returnOrder.order,
+      buyer_return: {...returnOrder.order.buyer_return, ...patch}}}, 4, offline));
+  }
+});

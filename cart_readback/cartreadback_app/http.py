@@ -8,6 +8,7 @@ import sqlite3
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
 
 from cartreadback_app.service import Service
 from cartreadback_app.validation import (
@@ -19,11 +20,12 @@ from cartreadback_app.validation import (
 )
 
 ORDER_ROUTE = re.compile(
-    r"^/api/orders/([0-9a-f-]{36})/(fixture-approve|verify|capture|reconcile)$"
+    r"^/api/orders/([0-9a-f-]{36})/(fixture-approve|buyer-return|verify|capture|reconcile)$"
 )
 STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/index.html": ("index.html", "text/html; charset=utf-8"),
+    "/payment-return": ("index.html", "text/html; charset=utf-8"),
     "/styles.css": ("styles.css", "text/css; charset=utf-8"),
     "/app.mjs": ("app.mjs", "text/javascript; charset=utf-8"),
     "/core.mjs": ("core.mjs", "text/javascript; charset=utf-8"),
@@ -47,6 +49,14 @@ class LocalServer(ThreadingHTTPServer):
         super().__init__(address, Handler)
         self.allowed_host = f"127.0.0.1:{self.server_port}"
         self.origin = f"http://{self.allowed_host}"
+        configured_origin = getattr(
+            service.payments, "buyer_return_origin", None
+        )
+        if configured_origin is not None and configured_origin != self.origin:
+            self.server_close()
+            raise ValueError(
+                "Buyer return origin must match the exact local server"
+            )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -106,7 +116,8 @@ class Handler(BaseHTTPRequestHandler):
             error.status,
             {
                 "api_version": "1",
-                "mode": "fixture",
+                "mode": self.server.service.runtime_mode(),
+                "providers": self.server.service.provider_contract(),
                 "revision": revision,
                 "error": {"code": error.code, "message": error.message},
             },
@@ -119,11 +130,56 @@ class Handler(BaseHTTPRequestHandler):
                 "Host does not match the configured origin.",
                 403,
             )
-        if "?" in self.path or "#" in self.path or len(self.path) > 300:
+        is_return = self.command in {"GET", "HEAD"} and self.path.startswith(
+            "/payment-return?"
+        )
+        if is_return:
+            self._return_query()
+        if (
+            ("?" in self.path and not is_return)
+            or "#" in self.path
+            or len(self.path) > (600 if is_return else 300)
+        ):
             raise AppError(
                 "INVALID_INPUT",
                 "Query parameters and fragments are unsupported.",
             )
+
+    def _return_query(self) -> None:
+        """Validate inert landing syntax, without owner lookup or mutation."""
+        parsed = urlsplit(self.path)
+        try:
+            pairs = parse_qsl(
+                parsed.query,
+                keep_blank_values=True,
+                strict_parsing=True,
+                max_num_fields=6,
+            )
+        except ValueError:
+            raise AppError(
+                "RETURN_REJECTED", "Malformed buyer return."
+            ) from None
+        values = dict(pairs)
+        if (
+            parsed.path != "/payment-return"
+            or len(values) != len(pairs)
+            or not {"order_id", "state", "outcome", "token"} <= set(values)
+            or set(values)
+            - {"order_id", "state", "outcome", "token", "PayerID"}
+            or re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                values["order_id"],
+            )
+            is None
+            or re.fullmatch(r"[A-Za-z0-9_-]{43}", values["state"]) is None
+            or values["outcome"] not in {"approved", "cancelled"}
+            or re.fullmatch(r"[A-Z0-9]{1,36}", values["token"]) is None
+            or (
+                "PayerID" in values
+                and re.fullmatch(r"[A-Z0-9]{1,36}", values["PayerID"]) is None
+            )
+        ):
+            raise AppError("RETURN_REJECTED", "Malformed buyer return.")
 
     def _owner_cookie(self) -> str | None:
         headers = self.headers.get_all("Cookie") or []
@@ -156,8 +212,10 @@ class Handler(BaseHTTPRequestHandler):
                 else None
             )
             self._json(200, self.server.service.bootstrap(self.sid), cookie)
-        elif self.path in STATIC:
-            filename, content_type = STATIC[self.path]
+        elif self.path in STATIC or self.path.startswith("/payment-return?"):
+            filename, content_type = STATIC[
+                "/" if self.path.startswith("/payment-return?") else self.path
+            ]
             try:
                 body = (self.server.ui_root / filename).read_bytes()
             except FileNotFoundError as error:

@@ -2,16 +2,18 @@
 
 No HTTP implementation, credentials, OAuth flow, live fallback or CLI gate is
 shipped. The default fixture service never constructs this adapter. A future
-network transport and buyer approval/return flow require separate authorization
+network transport and genuine buyer approval flow require separate authorization
 and review; these tests cannot establish genuine PayPal acceptance or settlement.
 """
 
+import json
 import queue
 import re
 import threading
 import time
 from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import urlencode
 from uuid import UUID
 
 from cartreadback_app.payments import PaymentRequest, ProviderAmbiguity
@@ -157,7 +159,7 @@ def sandbox_approval_url(document: object) -> str | None:
 
     No navigation occurs. Non-approval HATEOAS links are not followed. A missing
     link remains None; multiple, live, ambiguous or malformed links are rejected.
-    This helper is deliberately not wired into the buyer UI/return route yet.
+    Opt-in offline preparation exposes the result only as nonnavigable UI text.
     """
     raw = _object(document)
     order_id = _order_id(raw.get("id"))
@@ -311,10 +313,17 @@ class OfflinePayPalSandboxAdapter:
     transport: SandboxOfflineTransport
     merchant_id: str
     timeout_seconds: float = 2.0
+    buyer_return_origin: str | None = None
 
     def __post_init__(self) -> None:
         """Validate local settings without inspecting environment or accounts."""
         _pattern(self.merchant_id, r"[2-9A-HJ-NP-Z]{13}")
+        if self.buyer_return_origin is not None:
+            _pattern(
+                self.buyer_return_origin, r"http://127\.0\.0\.1:[1-9][0-9]{0,4}"
+            )
+            if int(self.buyer_return_origin.rsplit(":", 1)[1]) > 65535:
+                raise _invalid()
         if (
             type(self.timeout_seconds) not in (int, float)
             or not 0 < self.timeout_seconds <= 30
@@ -337,6 +346,7 @@ class OfflinePayPalSandboxAdapter:
                 "timeout_seconds": self.timeout_seconds,
                 "endpoint": SANDBOX_ENDPOINT,
                 "parser": PARSER_VERSION,
+                "buyer_return_origin": self.buyer_return_origin,
                 "max_body_bytes": MAX_BODY_BYTES,
                 "max_body_depth": MAX_BODY_DEPTH,
             }
@@ -385,6 +395,44 @@ class OfflinePayPalSandboxAdapter:
         }
         return PaymentRequest("POST", ORDER_PATH, canonical(body))
 
+    def prepare_checkout(
+        self, expected: dict, return_state: str
+    ) -> PaymentRequest:
+        """Prepare inert callback URLs for injected offline tests, never navigate.
+
+        The Service owns the random state and its durable owner/snapshot binding.
+        This opt-in does not add a runtime switch or a network implementation.
+        """
+        if self.buyer_return_origin is None:
+            raise _invalid()
+        _pattern(return_state, r"[A-Za-z0-9_-]{43}")
+        request = self.prepare("orders", expected, None)
+        body = json.loads(request.body)
+        body["payment_source"] = {
+            "paypal": {
+                "experience_context": {
+                    "user_action": "CONTINUE",
+                    "shipping_preference": "NO_SHIPPING",
+                    **{
+                        name: self.buyer_return_origin
+                        + "/payment-return?"
+                        + urlencode(
+                            {
+                                "order_id": expected["reference_id"],
+                                "state": return_state,
+                                "outcome": outcome,
+                            }
+                        )
+                        for name, outcome in (
+                            ("return_url", "approved"),
+                            ("cancel_url", "cancelled"),
+                        )
+                    },
+                }
+            }
+        }
+        return PaymentRequest(request.method, request.path, canonical(body))
+
     def dispatch(self, operation_id: str, request: PaymentRequest) -> dict:
         """Exchange the exact reserved POST once with its server UUID identity."""
         _uuid(operation_id)
@@ -416,7 +464,35 @@ class OfflinePayPalSandboxAdapter:
                 }
             )
             facts.pop("provider_order_id")
-            if self.prepare("orders", facts, None) != request:
+            if "payment_source" in raw:
+                context = _object(
+                    _object(
+                        _object(raw["payment_source"], {"paypal"})["paypal"],
+                        {"experience_context"},
+                    )["experience_context"],
+                    {
+                        "user_action",
+                        "shipping_preference",
+                        "return_url",
+                        "cancel_url",
+                    },
+                )
+                # Extract only a strict state from the exact callback shape,
+                # then compare the complete canonical wire request again.
+                prefix = (
+                    str(self.buyer_return_origin)
+                    + "/payment-return?order_id="
+                    + facts["reference_id"]
+                    + "&state="
+                )
+                url = context["return_url"]
+                if type(url) is not str or not url.startswith(prefix):
+                    raise _invalid()
+                state = url[len(prefix) :].removesuffix("&outcome=approved")
+                prepared = self.prepare_checkout(facts, state)
+            else:
+                prepared = self.prepare("orders", facts, None)
+            if prepared != request:
                 raise _invalid()
         else:
             prefix, suffix = ORDER_PATH + "/", "/capture"
@@ -510,6 +586,10 @@ class OfflinePayPalSandboxAdapter:
                 identity = _order_id(document.get("id"))
                 try:
                     normalized = normalize_paypal_order(document)
+                    if self.buyer_return_origin is not None:
+                        approval_url = sandbox_approval_url(document)
+                        if approval_url:
+                            normalized["approval_url"] = approval_url
                 except (AppError, ValueError, TypeError, UnicodeError):
                     normalized = {
                         "provider_mode": OFFLINE_MODE,

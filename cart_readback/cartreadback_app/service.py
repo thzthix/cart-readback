@@ -1,10 +1,12 @@
 """Deterministic review, consent, and one-order fixture workflow."""
 
 import json
+import re
+import secrets
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from cartreadback_app.analysis import AnalysisPolicy, checked_observation
@@ -169,6 +171,7 @@ class Service:
         public = json.loads(canonical(checkout))
         public.pop("catalog_hash", None)
         public.pop("consent", None)
+        public.pop("approval_return", None)
         if not self._fresh(connection, checkout):
             public["stale"] = True
             public["confirmation_id"] = None
@@ -180,10 +183,42 @@ class Service:
                 public["state"] = "REVIEW_REQUIRED"
         return public
 
+    def provider_contract(self) -> dict:
+        """Describe analysis and payments separately, never infer live readiness.
+
+        There is no runtime credential/transport factory. Nonfixture adapters in
+        this build are explicitly injected offline test seams, not genuine calls.
+        Unknown adapters remain unsupported and are blocked by the buyer UI.
+        """
+        analysis_fixture = self.inference.metadata.get("is_fixture") is True
+        payment_mode = self.payments.mode
+        return {
+            "analysis": {
+                "mode": "fixture" if analysis_fixture else "injected-offline",
+                "is_fixture": analysis_fixture,
+            },
+            "payment": {
+                "mode": payment_mode,
+                "is_fixture": payment_mode == "fixture",
+            },
+            "network_enabled": False,
+        }
+
+    def runtime_mode(self) -> str:
+        """Retain fixture for its exact default, otherwise identify offline mode."""
+        providers = self.provider_contract()
+        return (
+            "fixture"
+            if providers["analysis"]["is_fixture"]
+            and providers["payment"]["is_fixture"]
+            else "offline"
+        )
+
     def _envelope(self, connection: sqlite3.Connection, session: dict) -> dict:
         return {
             "api_version": "1",
-            "mode": "fixture",
+            "mode": self.runtime_mode(),
+            "providers": self.provider_contract(),
             "revision": session["revision"],
             "checkout": self._public_checkout(connection, session["checkout"]),
         }
@@ -200,7 +235,12 @@ class Service:
             ]
             return {
                 **self._envelope(connection, session),
-                "notice": NOTICE,
+                "notice": (
+                    NOTICE
+                    if self.runtime_mode() == "fixture"
+                    else "Synthetic catalog and injected offline adapters. "
+                    "No genuine inference, PayPal connection or payment."
+                ),
                 "csrf_token": csrf_for(sid),
                 "catalog": catalog,
             }
@@ -286,6 +326,8 @@ class Service:
             },
             "orders": BASE | {"review_id", "confirmation_id"},
             "fixture-approve": BASE,
+            "buyer-return": BASE
+            | {"return_state", "provider_order_id", "outcome"},
             "verify": BASE,
             "reconcile": BASE,
             "capture": BASE | {"confirmation_id", "final_confirmation"},
@@ -853,9 +895,10 @@ class Service:
         expected,
         provider_id,
         adapter,
+        request=None,
     ):
         operation_id = str(uuid4())
-        request = adapter.prepare(kind, expected, provider_id)
+        request = request or adapter.prepare(kind, expected, provider_id)
         if (
             type(request) is not PaymentRequest
             or request.method != "POST"
@@ -942,6 +985,20 @@ class Service:
                 canonical(expected),
             ),
         )
+        request = None
+        if (
+            adapter.mode == "paypal-sandbox-offline"
+            and getattr(adapter, "buyer_return_origin", None) is not None
+        ):
+            state = secrets.token_urlsafe(32)
+            expires_at = (self.clock() + timedelta(minutes=20)).isoformat()
+            checkout["approval_return"] = {
+                "state_hash": text_hash(state),
+                "expires_at": expires_at,
+                "consumed": False,
+                "cancelled": False,
+            }
+            request = adapter.prepare_checkout(expected, state)
         reservation = self._reserve(
             connection,
             session,
@@ -952,6 +1009,7 @@ class Service:
             expected,
             None,
             adapter,
+            request=request,
         )
         operation_id = reservation["operation_id"]
         checkout["order"] = {
@@ -963,6 +1021,14 @@ class Service:
             "operation_id": operation_id,
             "operation_kind": "orders",
         }
+        if "approval_return" in checkout:
+            checkout["order"]["buyer_return"] = {
+                "available": True,
+                **{
+                    key: checkout["approval_return"][key]
+                    for key in ("expires_at", "consumed", "cancelled")
+                },
+            }
         checkout["state"] = "ORDER_CREATE_PENDING"
         self._save(connection, session, "create_reserved")
         self._checkpoint("before_reservation_commit", operation_id)
@@ -1201,6 +1267,8 @@ class Service:
         order = checkout["order"]
         order.pop("reconciliation_code", None)
         order["status"] = document["status"]
+        if "buyer_return" in order:
+            order["approval_url"] = document.get("approval_url")
         if kind == "capture":
             order["capture_id"] = document["captures"][0]["capture_id"]
             checkout["state"] = "COMPLETED"
@@ -1248,6 +1316,7 @@ class Service:
         )
         allowed = {
             "fixture-approve": {"ORDER_CREATED"},
+            "buyer-return": {"ORDER_CREATED", "PAYPAL_APPROVED"},
             "verify": {"ORDER_CREATED", "PAYPAL_APPROVED", "SERVER_RECHECKED"},
             "capture": {"SERVER_RECHECKED", "COMPLETED"},
             "reconcile": {
@@ -1264,6 +1333,8 @@ class Service:
             raise AppError(
                 "INVALID_STATE", "Fixture approval requires fixture mode.", 409
             )
+        if action == "buyer-return":
+            self._validate_buyer_return(checkout, body, adapter)
         if action == "capture" and checkout["state"] != "COMPLETED":
             self._assert_consent(connection, session, checkout, body)
         operation = connection.execute(
@@ -1280,6 +1351,40 @@ class Service:
             "completed": checkout["state"] == "COMPLETED",
             "operation": dict(operation) if operation else None,
         }
+
+    def _validate_buyer_return(self, checkout, body, adapter):
+        context = checkout.get("approval_return")
+        state = body["return_state"]
+        if (
+            adapter.mode != "paypal-sandbox-offline"
+            or not context
+            or context["consumed"]
+            or self.clock() >= datetime.fromisoformat(context["expires_at"])
+            or type(state) is not str
+            or re.fullmatch(r"[A-Za-z0-9_-]{43}", state) is None
+            or not secrets.compare_digest(
+                text_hash(state), context["state_hash"]
+            )
+            or type(body["outcome"]) is not str
+            or body["outcome"] not in {"approved", "cancelled"}
+            or type(body["provider_order_id"]) is not str
+            or body["provider_order_id"]
+            != checkout["order"]["provider_order_id"]
+        ):
+            raise AppError(
+                "RETURN_REJECTED",
+                "Return does not match the current owned order.",
+                409,
+            )
+
+    def _consume_buyer_return(self, checkout, body, adapter):
+        self._validate_buyer_return(checkout, body, adapter)
+        context = checkout["approval_return"]
+        context["consumed"] = True
+        context["cancelled"] = body["outcome"] == "cancelled"
+        checkout["order"]["buyer_return"].update(
+            consumed=True, cancelled=context["cancelled"]
+        )
 
     def _perform_order_action(
         self, sid, action, body, order_id, key, request_hash, adapter, plan
@@ -1348,17 +1453,52 @@ class Service:
                 raise AppError(
                     "STALE_SNAPSHOT", "Payment authorization changed.", 409
                 )
+            if action == "buyer-return":
+                self._consume_buyer_return(checkout, body, adapter)
+                if body["outcome"] == "cancelled":
+                    if not self._checked_provider(
+                        connection,
+                        session,
+                        document,
+                        expected,
+                        plan["provider_id"],
+                        {"CREATED", "APPROVED"},
+                    ):
+                        return
+                    checkout["order"]["status"] = document["status"]
+                    checkout["state"] = (
+                        "ORDER_CREATED"
+                        if document["status"] == "CREATED"
+                        else "PAYPAL_APPROVED"
+                    )
+                    self._persist_order(connection, checkout)
+                    self._save(connection, session, "buyer_return_cancelled")
+                    return
             if action == "capture":
                 self._state(checkout, {"SERVER_RECHECKED"})
                 self._assert_consent(connection, session, checkout, body)
             if (
-                action == "verify"
+                action in {"verify", "buyer-return"}
                 and type(document) is dict
                 and document.get("status") == "CREATED"
             ):
+                if action == "buyer-return":
+                    if not self._checked_provider(
+                        connection,
+                        session,
+                        document,
+                        expected,
+                        plan["provider_id"],
+                        {"CREATED"},
+                    ):
+                        return
+                    checkout["order"]["status"] = "CREATED"
+                    checkout["state"] = "ORDER_CREATED"
+                    self._save(connection, session, "buyer_return_unapproved")
+                    return
                 raise AppError(
                     "ORDER_NOT_APPROVED",
-                    "Explicit fixture approval is still required.",
+                    "Buyer approval has not been established.",
                     409,
                 )
             if not self._checked_provider(
@@ -1393,7 +1533,7 @@ class Service:
                 checkout["order"]["status"] = "APPROVED"
                 checkout["state"] = (
                     "SERVER_RECHECKED"
-                    if action == "verify"
+                    if action in {"verify", "buyer-return"}
                     else "PAYPAL_APPROVED"
                 )
                 self._persist_order(connection, checkout)

@@ -39,10 +39,67 @@ export function evidenceText(source, span) {
   return span.quote;
 }
 
-export function validateBootstrap(data) {
-  if (data.api_version !== '1' || data.mode !== 'fixture' || !FEATURE_FLAGS.fixture) {
-    throw new Error('This UI supports fixture mode only. Live/model/PayPal integrations are not enabled.');
+const FIXTURE_PROVIDERS = Object.freeze({analysis: {mode: 'fixture', is_fixture: true},
+  payment: {mode: 'fixture', is_fixture: true}, network_enabled: false});
+
+export function validateProviders(providers = FIXTURE_PROVIDERS) {
+  if (!providers || providers.network_enabled !== false
+      || !['fixture', 'injected-offline'].includes(providers.analysis?.mode)
+      || !['fixture', 'paypal-sandbox-offline'].includes(providers.payment?.mode)
+      || providers.analysis.is_fixture !== (providers.analysis.mode === 'fixture')
+      || providers.payment.is_fixture !== (providers.payment.mode === 'fixture')) {
+    throw new Error('Unsupported provider or network mode. All actions are blocked.');
   }
+  return providers;
+}
+
+export function validateEnvelope(data) {
+  if (data.api_version !== '1' || !['fixture', 'offline'].includes(data.mode)
+      || (data.mode === 'offline' && !data.providers)) {
+    throw new Error('Unsupported server mode or API version. All actions are blocked.');
+  }
+  const providers = validateProviders(data.providers);
+  const fixture = providers.analysis.is_fixture && providers.payment.is_fixture;
+  if ((data.mode === 'fixture') !== fixture) throw new Error('Inconsistent provider mode.');
+  return providers;
+}
+
+/** Return secrets live only in this page's memory, never history or storage. */
+export function parseBuyerReturn(pathname, search, hash = '') {
+  if (pathname !== '/payment-return' || (search === '' && hash === '')) return null;
+  const invalid = () => { throw new Error('Invalid buyer return. No action was sent.'); };
+  if (hash || typeof search !== 'string' || !search.startsWith('?') || search.length > 1024
+      || /%(?![0-9a-f]{2})/i.test(search)) invalid();
+  const params = new URLSearchParams(search);
+  const allowed = new Set(['order_id', 'state', 'outcome', 'token', 'PayerID']);
+  for (const key of params.keys()) if (!allowed.has(key) || params.getAll(key).length !== 1) invalid();
+  const result = {order_id: params.get('order_id'), return_state: params.get('state'),
+    outcome: params.get('outcome'), provider_order_id: params.get('token')};
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(result.order_id || '')
+      || !/^[A-Za-z0-9_-]{43}$/.test(result.return_state || '')
+      || !['approved', 'cancelled'].includes(result.outcome)
+      || !/^[A-Z0-9]{1,36}$/.test(result.provider_order_id || '')
+      || (params.has('PayerID') && !/^[A-Z0-9]{1,36}$/.test(params.get('PayerID')))) invalid();
+  return result;
+}
+
+export function buyerReturnPayload(returned, checkout, revision, providers, now = Date.now()) {
+  validateProviders(providers);
+  const order = checkout?.order;
+  const prepared = order?.buyer_return;
+  if (!returned || providers?.payment.mode !== 'paypal-sandbox-offline' || checkout.stale === true
+      || !['ORDER_CREATED', 'PAYPAL_APPROVED'].includes(checkout.state)
+      || order?.order_id !== returned.order_id || order?.provider_order_id !== returned.provider_order_id
+      || prepared?.available !== true || prepared.consumed !== false || prepared.cancelled !== false
+      || !Number.isFinite(Date.parse(prepared.expires_at)) || Date.parse(prepared.expires_at) <= now) {
+    throw new Error('This return is stale, expired, consumed, or belongs to another order. No action was sent.');
+  }
+  return {expected_revision: revision, snapshot_hash: checkout.snapshot_hash,
+    return_state: returned.return_state, provider_order_id: returned.provider_order_id, outcome: returned.outcome};
+}
+
+export function validateBootstrap(data) {
+  validateEnvelope(data);
   if (!Number.isSafeInteger(data.revision) || typeof data.csrf_token !== 'string' || !data.csrf_token
       || !Array.isArray(data.catalog) || data.catalog.length !== 6) {
     throw new Error('The sample catalog contract is incomplete. No order can be created.');
@@ -59,7 +116,7 @@ export function validateBootstrap(data) {
   return data;
 }
 
-export function validateCheckout(checkout, catalog) {
+export function validateCheckout(checkout, catalog, providers) {
   if (!checkout) return null;
   const product = catalog.find(item => item.sku_id === checkout.sku_id);
   const historicalOrder = checkout.stale === true && Boolean(checkout.order);
@@ -78,8 +135,16 @@ export function validateCheckout(checkout, catalog) {
   if (!historicalOrder && (checkout.amount.minor !== product.price_minor || checkout.amount.currency !== product.currency)) {
     throw new Error('The reviewed item total differs from the catalog. No order can be created.');
   }
-  if (checkout.model?.is_fixture !== true || (checkout.order && checkout.order.provider_mode !== 'fixture')) {
-    throw new Error('An unsupported non-fixture adapter response was blocked.');
+  const modes = validateProviders(providers);
+  if (checkout.model?.is_fixture !== modes.analysis.is_fixture
+      || (checkout.order && checkout.order.provider_mode !== modes.payment.mode)) {
+    throw new Error('An inconsistent adapter response was blocked.');
+  }
+  const order = checkout.order;
+  if (order?.approval_url != null && (modes.payment.mode !== 'paypal-sandbox-offline'
+      || !/^[A-Z0-9]{1,36}$/.test(order.provider_order_id)
+      || order.approval_url !== `https://www.sandbox.paypal.com/checkoutnow?token=${order.provider_order_id}`)) {
+    throw new Error('Unsupported approval URL. No navigation is permitted.');
   }
   if (!Array.isArray(checkout.conditions) || checkout.conditions.length < 1 || checkout.conditions.length > 2
       || !Array.isArray(checkout.results)) throw new Error('The review conditions are incomplete.');
