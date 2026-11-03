@@ -268,12 +268,22 @@ def verify_provider_order(
     allowed_statuses: set[str],
     capture_request_id: str | None = None,
 ) -> None:
-    """Compare normalized complete fake data to the immutable server snapshot.
+    """Compare normalized returned facts to the immutable server snapshot.
 
     No environment field from provider JSON is trusted. The adapter owns its
-    transport/mode. Real PayPal minimal responses require its own GET mapping;
-    they must never be treated as this complete fixture representation.
+    transport/mode. Sparse PayPal wire observations fail closed unless all facts
+    required for this transition were actually returned. No live I/O is enabled.
     """
+    fields = set(expected) | {"provider_order_id", "status", "captures"}
+    # PayPal may omit payments before capture. Do not manufacture a returned
+    # empty capture list merely to match the fixture's complete representation.
+    if (
+        expected.get("provider_mode") == "paypal-sandbox-offline"
+        and capture_request_id is None
+        and type(document) is dict
+        and "captures" not in document
+    ):
+        fields.remove("captures")
     if (
         type(provider_id) is not str
         or not provider_id
@@ -283,13 +293,13 @@ def verify_provider_order(
             or document.get("merchant_id") != merchant_id
             or type(document.get("status")) is not str
             or document.get("status") not in allowed_statuses
-            or set(document)
-            != set(expected)
-            | {
-                "provider_order_id",
-                "status",
-                "captures",
-            }
+            or set(document) != fields
+            or (
+                expected.get("provider_mode") == "paypal-sandbox-offline"
+                and capture_request_id is None
+                and "captures" in document
+                and document["captures"] != []
+            )
             or canonical({key: document.get(key) for key in expected})
             != canonical(expected)
         )

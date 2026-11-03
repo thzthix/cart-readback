@@ -107,6 +107,15 @@ See [analysis dispatch and limits](docs/ANALYSIS_DISPATCH.md). This is offline
 infrastructure, not an enabled model service, input-token/USD budget or evidence
 of genuine AI. The default server/CLI still use only the synthetic fixture.
 
+## Offline PayPal wire preparation
+
+An [injected-only PayPal Orders wire adapter](docs/OFFLINE_PAYPAL_BOUNDARY.md)
+adds fabricated-envelope checks through the existing durable payment seam.
+It has no network implementation, credentials, runtime switch or buyer return
+flow. The default server remains fixture-only; genuine sandbox and payments are
+still UNCONNECTED. Missing returned facts remain unknown, never request-backed
+verification. This prerequisite does not establish PayPal acceptance or approval.
+
 ## Checks
 
 Run backend checks from `cart_readback/`, with no UI/eval directory required:
