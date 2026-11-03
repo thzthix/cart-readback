@@ -85,6 +85,17 @@ Stop the server with `Ctrl-C`. Keep `.local/` private; it stores sessions and or
 history. Do not expose the service publicly or erase an unresolved checkout to
 manufacture a fresh success.
 
+## Offline payment recovery boundary
+
+Payment reservation, single dispatch claim and fenced observation now use short
+separate transactions; provider calls hold no application SQLite transaction.
+The synthetic provider has an independently committed adjacent database so crash
+checks cannot roll back its side effects. Restart preserves UNKNOWN and never
+replays a monetary request. One service instance owns each database. See the
+[dispatch/recovery design and limits](docs/PAYMENT_DISPATCH.md), including the
+real subprocess crash matrix and private database/lock lifecycle. This remains
+fixture-only; PayPal and real inference are disabled.
+
 ## Checks
 
 Run backend checks from `cart_readback/`, with no UI/eval directory required:

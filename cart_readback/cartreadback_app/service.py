@@ -2,6 +2,8 @@
 
 import json
 import sqlite3
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
@@ -12,6 +14,8 @@ from cartreadback_app.inference import (
 )
 from cartreadback_app.payments import (
     FixturePaymentAdapter,
+    PaymentAdapter,
+    PaymentRequest,
     ProviderAmbiguity,
     verify_provider_order,
 )
@@ -25,6 +29,7 @@ from cartreadback_app.validation import (
     integer,
     object_fields,
     string,
+    text_hash,
 )
 
 NOTICE = "Synthetic catalog, model and payment fixtures. No money moves."
@@ -38,15 +43,74 @@ class Service:
         self,
         store: Store,
         inference: InferenceAdapter | None = None,
-        payments: FixturePaymentAdapter | None = None,
+        payments: PaymentAdapter | None = None,
         clock=None,
     ):
         """Inject offline adapters; HTTP setup never loads credentials."""
         self.store = store
+        self._lease = store.acquire_service()
+        self._activity_lock = threading.Lock()
+        self._active = 0
+        self._closed = False
         self.inference = inference or FixtureInferenceAdapter()
-        self.payments = payments or FixturePaymentAdapter()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
-        self._recover_pending()
+        try:
+            self.payments = payments or FixturePaymentAdapter()
+            self._recover_pending()
+        except BaseException:
+            self.close()
+            raise
+
+    @property
+    def payments(self) -> PaymentAdapter:
+        """Return the configured offline payment adapter."""
+        return self._payments
+
+    @payments.setter
+    def payments(self, adapter: PaymentAdapter) -> None:
+        if isinstance(adapter, FixturePaymentAdapter):
+            with self.store.transaction() as connection:
+                legacy = connection.execute(
+                    "SELECT * FROM fixture_provider_orders"
+                ).fetchall()
+            adapter.bind(
+                self.store.path.with_name(
+                    self.store.path.name + ".fixture.sqlite3"
+                ),
+                [tuple(row) for row in legacy],
+            )
+        self._payments = adapter
+
+    def close(self) -> None:
+        """Release ownership only when no request can still dispatch."""
+        with self._activity_lock:
+            if self._active:
+                raise AppError(
+                    "INVALID_STATE", "Service still has active work.", 409
+                )
+            self._closed = True
+            self._lease.close()
+
+    def __del__(self):
+        """Release the OS guard when the service is discarded."""
+        if hasattr(self, "_lease"):
+            self._lease.close()
+
+    @contextmanager
+    def _activity(self):
+        with self._activity_lock:
+            if self._closed:
+                raise AppError("INVALID_STATE", "Service is closed.", 409)
+            self._active += 1
+        try:
+            yield
+        finally:
+            with self._activity_lock:
+                self._active -= 1
+
+    def _checkpoint(self, _name: str, _operation_id: str) -> None:
+        # Test-only interruption hook, never selectable through HTTP.
+        pass
 
     def _recover_pending(self) -> None:
         # A reserved operation surviving service startup may have dispatched.
@@ -67,7 +131,7 @@ class Service:
                 checkout["state"] = "PAYMENT_UNKNOWN"
                 checkout["order"]["status"] = "UNKNOWN"
                 connection.execute(
-                    "UPDATE operations SET status = 'UNKNOWN' WHERE sid = ? AND status = 'PENDING'",
+                    "UPDATE operations SET status = 'UNKNOWN' WHERE sid = ? AND status IN ('PENDING', 'RESERVED', 'DISPATCHED')",
                     (row["sid"],),
                 )
                 self._persist_order(connection, checkout)
@@ -197,7 +261,11 @@ class Service:
         order_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict:
-        """Validate owner/revision and transition under one SQLite write lock."""
+        """Authorize short local transitions; payment I/O never holds a DB lock."""
+        with self._activity():
+            return self._mutate(sid, action, body, order_id, idempotency_key)
+
+    def _mutate(self, sid, action, body, order_id, idempotency_key):
         fields = {
             "analyze": {"expected_revision", "sku_id", "conditions"},
             "confirm": BASE
@@ -276,28 +344,54 @@ class Service:
             elif action == "confirm":
                 self._confirm(connection, session, body)
             elif action == "orders":
-                self._create(
-                    connection, session, body, idempotency_key, request_hash
+                adapter = self.payments
+                reservation = self._create(
+                    connection,
+                    session,
+                    body,
+                    idempotency_key,
+                    request_hash,
+                    adapter,
                 )
             else:
-                self._order_action(
+                adapter = self.payments
+                plan = self._plan_order_action(
                     connection,
                     session,
                     action,
                     body,
                     order_id,
-                    idempotency_key,
-                    locals().get("request_hash"),
+                    adapter,
                 )
-            result = self._envelope(connection, session)
-            if result["checkout"] and result["checkout"].get(
-                "verification_error"
-            ):
-                result["error"] = {
-                    "code": "ORDER_MISMATCH",
-                    "message": "Provider order failed verification; reconcile this order.",
-                }
-            return result
+            if action in {"analyze", "confirm"}:
+                return self._result(connection, session)
+        if action == "orders":
+            self._checkpoint(
+                "after_reservation_commit", reservation["operation_id"]
+            )
+            self._dispatch(reservation, adapter)
+        else:
+            self._perform_order_action(
+                sid,
+                action,
+                body,
+                order_id,
+                idempotency_key,
+                locals().get("request_hash"),
+                adapter,
+                plan,
+            )
+        with self.store.transaction() as connection:
+            return self._result(connection, self._session(connection, sid))
+
+    def _result(self, connection, session):
+        result = self._envelope(connection, session)
+        if result["checkout"] and result["checkout"].get("verification_error"):
+            result["error"] = {
+                "code": "ORDER_MISMATCH",
+                "message": "Provider order failed verification; reconcile this order.",
+            }
+        return result
 
     def _analyze(
         self, connection: sqlite3.Connection, session: dict, body: dict
@@ -431,20 +525,75 @@ class Service:
                 409,
             )
 
+    def _config(self, adapter: PaymentAdapter) -> dict:
+        return {
+            "provider_mode": adapter.mode,
+            "merchant_id": adapter.merchant_id,
+            "adapter_version": adapter.version,
+        }
+
+    def _assert_consent(self, connection, session, checkout, body):
+        self._assert_confirmation(checkout, body)
+        row = connection.execute(
+            "SELECT * FROM confirmations WHERE confirmation_id = ? AND sid = ?",
+            (checkout["confirmation_id"], session["sid"]),
+        ).fetchone()
+        if (
+            not row
+            or row["review_id"] != checkout["review_id"]
+            or row["snapshot_hash"] != checkout["snapshot_hash"]
+            or row["document"] != canonical(checkout["consent"])
+        ):
+            raise AppError(
+                "ACKNOWLEDGEMENT_REQUIRED",
+                "Current explicit consent is required.",
+                409,
+            )
+
+    def _assert_config(self, adapter, config, expected):
+        if (
+            self.payments is not adapter
+            or self._config(adapter) != config
+            or expected["provider_mode"] != config["provider_mode"]
+            or expected["merchant_id"] != config["merchant_id"]
+        ):
+            raise AppError(
+                "STALE_SNAPSHOT", "Payment configuration changed.", 409
+            )
+
     def _reserve(
         self,
-        connection: sqlite3.Connection,
-        session: dict,
-        kind: str,
-        key: str,
-        request_hash: str,
-        order_id: str,
-        upstream_payload: dict,
-    ) -> str:
+        connection,
+        session,
+        kind,
+        key,
+        request_hash,
+        order_id,
+        expected,
+        provider_id,
+        adapter,
+    ):
         operation_id = str(uuid4())
+        request = adapter.prepare(kind, expected, provider_id)
+        if (
+            type(request) is not PaymentRequest
+            or request.method != "POST"
+            or type(request.path) is not str
+            or not request.path.startswith("/")
+            or type(request.body) is not str
+            or canonical(json.loads(request.body)) != request.body
+        ):
+            raise AppError(
+                "INVALID_STATE", "Invalid prepared payment request.", 409
+            )
+        config = self._config(adapter)
         try:
             connection.execute(
-                "INSERT INTO operations(operation_id, sid, kind, idempotency_key, request_hash, order_id, status, upstream_payload, upstream_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO operations(operation_id, sid, kind, idempotency_key, "
+                "request_hash, order_id, status, upstream_payload, upstream_hash, "
+                "method, path, expected_hash, provider_mode, merchant_id, "
+                "adapter_version, reserved_revision, reserved_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     operation_id,
                     session["sid"],
@@ -452,34 +601,40 @@ class Service:
                     key,
                     request_hash,
                     order_id,
-                    "PENDING",
-                    canonical(upstream_payload),
-                    digest(upstream_payload),
+                    "RESERVED",
+                    request.body,
+                    text_hash(request.body),
+                    request.method,
+                    request.path,
+                    digest(expected),
+                    config["provider_mode"],
+                    config["merchant_id"],
+                    config["adapter_version"],
+                    session["revision"] + 1,
+                    self.clock().isoformat(),
                 ),
             )
         except sqlite3.IntegrityError as error:
             raise AppError(
                 "INVALID_STATE", "This business operation already exists.", 409
             ) from error
-        return operation_id
+        return dict(
+            connection.execute(
+                "SELECT * FROM operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        )
 
-    def _create(
-        self,
-        connection: sqlite3.Connection,
-        session: dict,
-        body: dict,
-        key: str,
-        request_hash: str,
-    ) -> None:
+    def _create(self, connection, session, body, key, request_hash, adapter):
         checkout = self._current(connection, session, body)
         self._state(checkout, {"SNAPSHOT_CONFIRMED"})
-        self._assert_confirmation(checkout, body)
+        self._assert_consent(connection, session, checkout, body)
         product = product_for(connection, checkout["sku_id"])
         order_id = str(uuid4())
         expected = {
-            "provider_mode": self.payments.mode,
+            "provider_mode": adapter.mode,
             "intent": "CAPTURE",
-            "merchant_id": self.payments.merchant_id,
+            "merchant_id": adapter.merchant_id,
             "reference_id": order_id,
             "custom_id": checkout["snapshot_hash"],
             "items": [
@@ -506,13 +661,22 @@ class Service:
                 canonical(expected),
             ),
         )
-        operation_id = self._reserve(
-            connection, session, "orders", key, request_hash, order_id, expected
+        reservation = self._reserve(
+            connection,
+            session,
+            "orders",
+            key,
+            request_hash,
+            order_id,
+            expected,
+            None,
+            adapter,
         )
+        operation_id = reservation["operation_id"]
         checkout["order"] = {
             "order_id": order_id,
             "provider_order_id": None,
-            "provider_mode": "fixture",
+            "provider_mode": adapter.mode,
             "status": "PENDING",
             "approval_url": None,
             "operation_id": operation_id,
@@ -520,109 +684,260 @@ class Service:
         }
         checkout["state"] = "ORDER_CREATE_PENDING"
         self._save(connection, session, "create_reserved")
-        # Reserve durably before dispatch. Concurrent actions observe pending.
-        connection.commit()
-        connection.execute("BEGIN IMMEDIATE")
-        self._resume_reserved(connection, session, operation_id)
-        # Fake provider writes and observation share this second transaction.
-        # A real remote provider needs independently reviewed normalization.
-        try:
-            document = self.payments.create(connection, operation_id, expected)
-            provider_id = (
-                document.get("provider_order_id")
-                if type(document) is dict
-                else None
-            )
-            verify_provider_order(
-                document,
-                expected,
-                provider_id,
-                self.payments.merchant_id,
-                {"CREATED"},
-            )
-            checkout["order"].update(
-                provider_order_id=provider_id, status="CREATED"
-            )
-            checkout["state"] = "ORDER_CREATED"
-            connection.execute(
-                "UPDATE operations SET status = 'SUCCEEDED' WHERE operation_id = ?",
-                (operation_id,),
-            )
-        except (ProviderAmbiguity, AppError):
-            checkout["state"] = "PAYMENT_UNKNOWN"
-            checkout["order"]["status"] = "UNKNOWN"
-            connection.execute(
-                "UPDATE operations SET status = 'UNKNOWN' WHERE operation_id = ?",
-                (operation_id,),
-            )
-        self._persist_order(connection, checkout)
-        self._save(connection, session, "create_observed")
+        self._checkpoint("before_reservation_commit", operation_id)
+        return reservation
 
-    def _resume_reserved(
-        self, connection: sqlite3.Connection, session: dict, operation_id: str
-    ) -> None:
-        current = self._session(connection, session["sid"])
+    def _claim(self, reservation, adapter):
+        operation_id = reservation["operation_id"]
+        with self.store.transaction() as connection:
+            operation = connection.execute(
+                "SELECT * FROM operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if not operation or operation["status"] != "RESERVED":
+                return None
+            operation = dict(operation)
+            immutable = (
+                "sid",
+                "kind",
+                "order_id",
+                "upstream_payload",
+                "upstream_hash",
+                "method",
+                "path",
+                "expected_hash",
+                "provider_mode",
+                "merchant_id",
+                "adapter_version",
+                "reserved_revision",
+            )
+            if any(
+                operation[field] != reservation[field] for field in immutable
+            ):
+                raise AppError(
+                    "PAYMENT_UNKNOWN", "Reserved wire identity changed.", 409
+                )
+            session = self._session(connection, operation["sid"])
+            row = connection.execute(
+                "SELECT * FROM orders WHERE order_id = ? AND sid = ?",
+                (operation["order_id"], operation["sid"]),
+            ).fetchone()
+            expected = json.loads(row["expected"])
+            self._assert_config(
+                adapter,
+                {key: operation[key] for key in self._config(adapter)},
+                expected,
+            )
+            if (
+                session["revision"] != operation["reserved_revision"]
+                or session["checkout"]["order"]["operation_id"] != operation_id
+                or operation["upstream_hash"]
+                != text_hash(operation["upstream_payload"])
+                or operation["expected_hash"] != digest(expected)
+            ):
+                raise AppError(
+                    "PAYMENT_UNKNOWN",
+                    "Reserved operation changed; reconcile.",
+                    409,
+                )
+            token = str(uuid4())
+            changed = connection.execute(
+                "UPDATE operations SET status = 'DISPATCHED', dispatch_token = ?, "
+                "dispatched_at = ? WHERE operation_id = ? AND status = 'RESERVED' "
+                "AND upstream_hash = ? AND expected_hash = ?",
+                (
+                    token,
+                    self.clock().isoformat(),
+                    operation_id,
+                    operation["upstream_hash"],
+                    operation["expected_hash"],
+                ),
+            ).rowcount
+            if changed != 1:
+                return None
+            operation.update(dispatch_token=token, status="DISPATCHED")
+            return operation
+
+    def _dispatch(self, reservation, adapter):
+        operation_id = reservation["operation_id"]
+        operation = self._claim(reservation, adapter)
+        if not operation:
+            return
+        self._checkpoint("after_claim_commit", operation_id)
+        try:
+            document = adapter.dispatch(
+                operation_id,
+                PaymentRequest(
+                    operation["method"],
+                    operation["path"],
+                    operation["upstream_payload"],
+                ),
+            )
+            error_code = None
+        except ProviderAmbiguity:
+            document, error_code = None, "PROVIDER_OUTCOME_UNKNOWN"
+        except AppError:
+            document, error_code = None, "PROVIDER_ERROR"
+        self._checkpoint("after_provider_response", operation_id)
+        with self.store.transaction() as connection:
+            self._observe_dispatch(connection, operation, document, error_code)
+            self._checkpoint("before_observation_commit", operation_id)
+        self._checkpoint("after_observation_commit", operation_id)
+
+    def _fenced(self, connection, fence):
         operation = connection.execute(
-            "SELECT status FROM operations WHERE operation_id = ?",
-            (operation_id,),
+            "SELECT * FROM operations WHERE operation_id = ? AND sid = ? AND order_id = ?",
+            (fence["operation_id"], fence["sid"], fence["order_id"]),
+        ).fetchone()
+        fields = (
+            "kind",
+            "dispatch_token",
+            "upstream_hash",
+            "upstream_payload",
+            "method",
+            "path",
+            "expected_hash",
+            "provider_mode",
+            "merchant_id",
+            "adapter_version",
+        )
+        if not operation or any(operation[key] != fence[key] for key in fields):
+            raise AppError(
+                "PAYMENT_UNKNOWN", "Payment observation fence rejected.", 409
+            )
+        session = self._session(connection, fence["sid"])
+        checkout = session["checkout"]
+        row = connection.execute(
+            "SELECT * FROM orders WHERE order_id = ? AND sid = ?",
+            (fence["order_id"], fence["sid"]),
         ).fetchone()
         if (
-            current["revision"] != session["revision"]
-            or not operation
-            or operation["status"] != "PENDING"
+            not row
+            or not checkout
+            or not checkout["order"]
+            or checkout["order"]["order_id"] != row["order_id"]
+            or checkout["order"]["operation_id"] != operation["operation_id"]
+            or checkout["order"]["operation_kind"] != operation["kind"]
+            or checkout["review_id"] != row["review_id"]
+            or checkout["snapshot_hash"] != row["snapshot_hash"]
+            or (
+                operation["expected_hash"]
+                and digest(json.loads(row["expected"]))
+                != operation["expected_hash"]
+            )
         ):
             raise AppError(
-                "PAYMENT_UNKNOWN",
-                "Reserved operation changed; reconcile instead of dispatching.",
-                409,
+                "PAYMENT_UNKNOWN", "Owned payment binding changed.", 409
             )
+        return dict(operation), session, json.loads(row["expected"])
 
-    def _checked_provider(
-        self,
-        connection: sqlite3.Connection,
-        session: dict,
-        document: object,
-        expected: dict,
-        provider_id: str,
-        statuses: set[str],
-    ) -> bool:
+    def _observe_dispatch(self, connection, fence, document, error_code):
+        operation, session, expected = self._fenced(connection, fence)
+        checkout, order = session["checkout"], session["checkout"]["order"]
+        if (
+            operation["status"] == "SUCCEEDED"
+            or checkout["state"] == "COMPLETED"
+        ):
+            event(
+                connection,
+                session["sid"],
+                "late_observation_ignored",
+                {
+                    "operation_id": operation["operation_id"],
+                    "reason": "TERMINAL_SUCCESS",
+                },
+            )
+            return
+        if operation["status"] not in {"DISPATCHED", "UNKNOWN"}:
+            raise AppError(
+                "PAYMENT_UNKNOWN", "Operation was never dispatched.", 409
+            )
+        if operation["kind"] == "orders" and type(document) is dict:
+            provider_id = document.get("provider_order_id")
+            if (
+                type(provider_id) is str
+                and 0 < len(provider_id) <= 128
+                and provider_id.isascii()
+                and all(c.isalnum() or c == "-" for c in provider_id)
+            ):
+                if order["provider_order_id"] not in {None, provider_id}:
+                    raise AppError(
+                        "ORDER_MISMATCH", "Provider identity changed.", 409
+                    )
+                order["provider_order_id"] = provider_id
         try:
+            if error_code:
+                raise AppError(error_code, "Provider outcome unknown.", 409)
             verify_provider_order(
                 document,
                 expected,
-                provider_id,
-                self.payments.merchant_id,
-                statuses,
+                order["provider_order_id"],
+                operation["merchant_id"],
+                {"CREATED"} if operation["kind"] == "orders" else {"COMPLETED"},
+                operation["operation_id"]
+                if operation["kind"] == "capture"
+                else None,
             )
-        except AppError as error:
-            checkout = session["checkout"]
-            checkout["state"] = "PAYMENT_UNKNOWN"
-            checkout["order"]["status"] = "UNKNOWN"
-            checkout["verification_error"] = error.code
-            self._persist_order(connection, checkout)
-            self._save(connection, session, "verification_failed")
-            return False
-        return True
+        except AppError:
+            checkout["state"], order["status"] = "PAYMENT_UNKNOWN", "UNKNOWN"
+            status = "UNKNOWN"
+            error_code = error_code or "ORDER_MISMATCH"
+        else:
+            self._apply_success(checkout, document, operation["kind"])
+            status = "SUCCEEDED"
+        self._record_observation(
+            connection, operation, checkout, status, error_code
+        )
+        self._persist_order(connection, checkout)
+        self._save(connection, session, "dispatch_observed")
 
-    def _persist_order(
-        self, connection: sqlite3.Connection, checkout: dict
-    ) -> None:
+    def _record_observation(
+        self, connection, operation, checkout, status, error_code
+    ):
+        order = checkout["order"]
+        # Only bounded normalized facts, never a raw provider body/exception.
+        observation = {"status": order["status"]}
+        for key in ("provider_order_id", "capture_id"):
+            value = order.get(key)
+            if value is None or (
+                type(value) is str and len(value) <= 128 and value.isascii()
+            ):
+                observation[key] = value
+        connection.execute(
+            "UPDATE operations SET status = ?, observed_at = ?, last_observation = ?, error_code = ? "
+            "WHERE operation_id = ? AND status != 'SUCCEEDED'",
+            (
+                status,
+                self.clock().isoformat(),
+                canonical(observation),
+                error_code or "",
+                operation["operation_id"],
+            ),
+        )
+
+    def _apply_success(self, checkout, document, kind):
+        checkout.pop("verification_error", None)
+        order = checkout["order"]
+        order.pop("reconciliation_code", None)
+        order["status"] = document["status"]
+        if kind == "capture":
+            order["capture_id"] = document["captures"][0]["capture_id"]
+            checkout["state"] = "COMPLETED"
+        else:
+            checkout["state"] = (
+                "ORDER_CREATED"
+                if document["status"] == "CREATED"
+                else "PAYPAL_APPROVED"
+            )
+
+    def _persist_order(self, connection, checkout):
         order = checkout["order"]
         connection.execute(
             "UPDATE orders SET provider_order_id = ?, status = ? WHERE order_id = ?",
             (order["provider_order_id"], order["status"], order["order_id"]),
         )
 
-    def _order_action(
-        self,
-        connection: sqlite3.Connection,
-        session: dict,
-        action: str,
-        body: dict,
-        order_id: str,
-        key: str | None,
-        request_hash: str | None,
-    ) -> None:
+    def _owned_order(self, connection, session, body, order_id, fresh=True):
         checkout = session["checkout"]
         if (
             not checkout
@@ -636,32 +951,130 @@ class Service:
         ).fetchone()
         if not row or body["snapshot_hash"] != row["snapshot_hash"]:
             raise AppError("NOT_FOUND", "Unknown owned order binding.", 404)
-        if action != "reconcile":
+        if fresh:
             self._current(connection, session, body)
-        order = checkout["order"]
-        expected = json.loads(row["expected"])
-        provider_id = order["provider_order_id"]
-        if action == "fixture-approve":
-            self._state(checkout, {"ORDER_CREATED"})
-            document = self.payments.approve(connection, provider_id)
-            if not self._checked_provider(
-                connection,
-                session,
-                document,
-                expected,
-                provider_id,
-                {"APPROVED"},
-            ):
-                return
-            order["status"] = "APPROVED"
-            checkout["state"] = "PAYPAL_APPROVED"
-        elif action == "verify":
-            self._state(
-                checkout,
-                {"ORDER_CREATED", "PAYPAL_APPROVED", "SERVER_RECHECKED"},
+        return checkout, json.loads(row["expected"])
+
+    def _plan_order_action(
+        self, connection, session, action, body, order_id, adapter
+    ):
+        checkout, expected = self._owned_order(
+            connection,
+            session,
+            body,
+            order_id,
+            fresh=action != "reconcile",
+        )
+        allowed = {
+            "fixture-approve": {"ORDER_CREATED"},
+            "verify": {"ORDER_CREATED", "PAYPAL_APPROVED", "SERVER_RECHECKED"},
+            "capture": {"SERVER_RECHECKED", "COMPLETED"},
+            "reconcile": {
+                "PAYMENT_UNKNOWN",
+                "COMPLETED",
+                "CAPTURE_PENDING",
+                "ORDER_CREATE_PENDING",
+            },
+        }
+        self._state(checkout, allowed[action])
+        config = self._config(adapter)
+        self._assert_config(adapter, config, expected)
+        if action == "fixture-approve" and adapter.mode != "fixture":
+            raise AppError(
+                "INVALID_STATE", "Fixture approval requires fixture mode.", 409
             )
-            document = self.payments.get(connection, provider_id)
-            if type(document) is dict and document.get("status") == "CREATED":
+        if action == "capture" and checkout["state"] != "COMPLETED":
+            self._assert_consent(connection, session, checkout, body)
+        operation = connection.execute(
+            "SELECT * FROM operations WHERE order_id = ? AND kind = ?",
+            (order_id, checkout["order"]["operation_kind"]),
+        ).fetchone()
+        return {
+            "revision": session["revision"],
+            "expected": expected,
+            "config": config,
+            "provider_id": checkout["order"]["provider_order_id"],
+            "consent": canonical(checkout["consent"]),
+            "confirmation_id": checkout["confirmation_id"],
+            "completed": checkout["state"] == "COMPLETED",
+            "operation": dict(operation) if operation else None,
+        }
+
+    def _perform_order_action(
+        self, sid, action, body, order_id, key, request_hash, adapter, plan
+    ):
+        if plan["completed"]:
+            return
+        if action == "reconcile" and plan["provider_id"] is None:
+            with self.store.transaction() as connection:
+                operation, session, _ = self._fenced(
+                    connection, plan["operation"]
+                )
+                if self._ignore_stale_reconcile(connection, operation, session):
+                    return
+                if (
+                    session["checkout"]["order"]["provider_order_id"]
+                    is not None
+                ):
+                    # Absence belongs to the old plan, not this owned state.
+                    # A fresh user reconcile can GET the now-known order.
+                    return
+                session["checkout"]["state"] = "PAYMENT_UNKNOWN"
+                session["checkout"]["order"]["status"] = "UNKNOWN"
+                session["checkout"]["order"]["reconciliation_code"] = (
+                    "CREATE_OUTCOME_UNKNOWN"
+                )
+                self._record_observation(
+                    connection,
+                    operation,
+                    session["checkout"],
+                    "UNKNOWN",
+                    "CREATE_OUTCOME_UNKNOWN",
+                )
+                self._persist_order(connection, session["checkout"])
+                self._save(connection, session, "reconcile_unknown")
+            return
+        try:
+            document = (
+                adapter.approve(plan["provider_id"])
+                if action == "fixture-approve"
+                else adapter.get(plan["provider_id"])
+            )
+        except (ProviderAmbiguity, AppError):
+            document = None
+        with self.store.transaction() as connection:
+            if action == "reconcile":
+                self._reconcile_observation(
+                    connection, plan["operation"], document
+                )
+                return
+            session = self._session(connection, sid)
+            if session["revision"] != plan["revision"]:
+                raise AppError(
+                    "STALE_REVISION",
+                    "Reload the current review before continuing.",
+                    409,
+                )
+            checkout, expected = self._owned_order(
+                connection, session, body, order_id
+            )
+            self._assert_config(adapter, plan["config"], expected)
+            if (
+                expected != plan["expected"]
+                or canonical(checkout["consent"]) != plan["consent"]
+                or checkout["confirmation_id"] != plan["confirmation_id"]
+            ):
+                raise AppError(
+                    "STALE_SNAPSHOT", "Payment authorization changed.", 409
+                )
+            if action == "capture":
+                self._state(checkout, {"SERVER_RECHECKED"})
+                self._assert_consent(connection, session, checkout, body)
+            if (
+                action == "verify"
+                and type(document) is dict
+                and document.get("status") == "CREATED"
+            ):
                 raise AppError(
                     "ORDER_NOT_APPROVED",
                     "Explicit fixture approval is still required.",
@@ -672,139 +1085,119 @@ class Service:
                 session,
                 document,
                 expected,
-                provider_id,
+                plan["provider_id"],
                 {"APPROVED"},
             ):
                 return
-            order["status"] = "APPROVED"
-            checkout["state"] = "SERVER_RECHECKED"
-        elif action == "capture":
-            if checkout["state"] == "COMPLETED":
-                return
-            self._state(checkout, {"SERVER_RECHECKED"})
-            self._assert_confirmation(checkout, body)
-            if body["final_confirmation"] is not True:
-                raise AppError(
-                    "ACKNOWLEDGEMENT_REQUIRED",
-                    "Explicit final confirmation must be true.",
-                    409,
+            if action == "capture":
+                reservation = self._reserve(
+                    connection,
+                    session,
+                    "capture",
+                    key,
+                    request_hash,
+                    order_id,
+                    expected,
+                    plan["provider_id"],
+                    adapter,
                 )
-            document = self.payments.get(connection, provider_id)
-            if not self._checked_provider(
-                connection,
-                session,
+                operation_id = reservation["operation_id"]
+                checkout["state"] = "CAPTURE_PENDING"
+                checkout["order"].update(
+                    operation_id=operation_id, operation_kind="capture"
+                )
+                self._save(connection, session, "capture_reserved")
+                self._checkpoint("before_reservation_commit", operation_id)
+            else:
+                checkout["order"]["status"] = "APPROVED"
+                checkout["state"] = (
+                    "SERVER_RECHECKED"
+                    if action == "verify"
+                    else "PAYPAL_APPROVED"
+                )
+                self._persist_order(connection, checkout)
+                self._save(connection, session, f"{action}_observed")
+        if action == "capture":
+            self._checkpoint("after_reservation_commit", operation_id)
+            self._dispatch(reservation, adapter)
+
+    def _checked_provider(
+        self, connection, session, document, expected, provider_id, statuses
+    ):
+        try:
+            verify_provider_order(
                 document,
                 expected,
                 provider_id,
-                {"APPROVED"},
-            ):
-                return
-            operation_id = self._reserve(
+                expected["merchant_id"],
+                statuses,
+            )
+        except AppError as error:
+            checkout = session["checkout"]
+            checkout["state"] = "PAYMENT_UNKNOWN"
+            checkout["order"]["status"] = "UNKNOWN"
+            checkout["verification_error"] = error.code
+            self._persist_order(connection, checkout)
+            self._save(connection, session, "verification_failed")
+            return False
+        return True
+
+    def _ignore_stale_reconcile(self, connection, operation, session):
+        checkout = session["checkout"]
+        terminal = checkout["state"] == "COMPLETED" or (
+            operation["status"] == "SUCCEEDED"
+            and checkout["state"] != "PAYMENT_UNKNOWN"
+        )
+        if terminal:
+            event(
                 connection,
-                session,
-                "capture",
-                key,
-                request_hash,
-                order_id,
+                session["sid"],
+                "late_reconcile_ignored",
                 {
-                    "provider_order_id": provider_id,
-                    "snapshot_hash": checkout["snapshot_hash"],
-                    "confirmation_id": checkout["confirmation_id"],
-                    "expected": expected,
+                    "operation_id": operation["operation_id"],
+                    "reason": "TERMINAL_SUCCESS",
                 },
             )
-            checkout["state"] = "CAPTURE_PENDING"
-            order.update(operation_id=operation_id, operation_kind="capture")
-            self._save(connection, session, "capture_reserved")
-            connection.commit()
-            connection.execute("BEGIN IMMEDIATE")
-            self._resume_reserved(connection, session, operation_id)
-            try:
-                document = self.payments.capture(
-                    connection, provider_id, operation_id
-                )
-                verify_provider_order(
-                    document,
-                    expected,
-                    provider_id,
-                    self.payments.merchant_id,
-                    {"COMPLETED"},
-                    operation_id,
-                )
-                order["status"] = "COMPLETED"
-                order["capture_id"] = document["captures"][0]["capture_id"]
-                checkout["state"] = "COMPLETED"
-                connection.execute(
-                    "UPDATE operations SET status = 'SUCCEEDED' WHERE operation_id = ?",
-                    (operation_id,),
-                )
-            except (ProviderAmbiguity, AppError):
-                order["status"] = "UNKNOWN"
-                checkout["state"] = "PAYMENT_UNKNOWN"
-                connection.execute(
-                    "UPDATE operations SET status = 'UNKNOWN' WHERE operation_id = ?",
-                    (operation_id,),
-                )
-        elif action == "reconcile":
-            self._state(
-                checkout,
-                {
-                    "PAYMENT_UNKNOWN",
-                    "COMPLETED",
-                    "CAPTURE_PENDING",
-                    "ORDER_CREATE_PENDING",
-                },
+        return terminal
+
+    def _reconcile_observation(self, connection, fence, document):
+        operation, session, expected = self._fenced(connection, fence)
+        checkout, order = session["checkout"], session["checkout"]["order"]
+        if self._ignore_stale_reconcile(connection, operation, session):
+            return
+        try:
+            capture = operation["kind"] == "capture"
+            verify_provider_order(
+                document,
+                expected,
+                order["provider_order_id"],
+                expected["merchant_id"],
+                {"COMPLETED"} if capture else {"CREATED", "APPROVED"},
+                operation["operation_id"] if capture else None,
             )
-            if checkout["state"] in {"CAPTURE_PENDING", "ORDER_CREATE_PENDING"}:
-                checkout["state"] = "PAYMENT_UNKNOWN"
-                order["status"] = "UNKNOWN"
-                connection.execute(
-                    "UPDATE operations SET status = 'UNKNOWN' WHERE order_id = ? AND status = 'PENDING'",
-                    (order_id,),
+            if (
+                capture
+                and not operation["dispatch_token"]
+                and operation["adapter_version"]
+            ):
+                raise AppError(
+                    "PAYMENT_UNKNOWN", "Capture was never claimed.", 409
                 )
-            if provider_id is None:
-                order["reconciliation_code"] = "CREATE_OUTCOME_UNKNOWN"
-            else:
-                document = self.payments.get(connection, provider_id)
-                if (
-                    type(document) is dict
-                    and document.get("status") == "COMPLETED"
-                ):
-                    operation = connection.execute(
-                        "SELECT * FROM operations WHERE order_id = ? AND kind = 'capture'",
-                        (order_id,),
-                    ).fetchone()
-                    if not operation:
-                        raise AppError(
-                            "ORDER_MISMATCH",
-                            "No authorized capture operation exists.",
-                            409,
-                        )
-                    verify_provider_order(
-                        document,
-                        expected,
-                        provider_id,
-                        self.payments.merchant_id,
-                        {"COMPLETED"},
-                        operation["operation_id"],
-                    )
-                    checkout["state"] = "COMPLETED"
-                    order["status"] = "COMPLETED"
-                    order["capture_id"] = document["captures"][0]["capture_id"]
-                    connection.execute(
-                        "UPDATE operations SET status = 'SUCCEEDED' WHERE operation_id = ?",
-                        (operation["operation_id"],),
-                    )
-                else:
-                    verify_provider_order(
-                        document,
-                        expected,
-                        provider_id,
-                        self.payments.merchant_id,
-                        {"CREATED", "APPROVED", "PENDING"},
-                    )
-                    # APPROVED on a lookup does not prove a timed-out capture
-                    # cannot complete later. Never clear capture uncertainty.
-                    order["reconciliation_code"] = "PAYMENT_UNKNOWN"
+        except AppError:
+            checkout["state"], order["status"] = "PAYMENT_UNKNOWN", "UNKNOWN"
+            order["reconciliation_code"] = "PAYMENT_UNKNOWN"
+            status = "UNKNOWN"
+        else:
+            self._apply_success(checkout, document, operation["kind"])
+            status = "SUCCEEDED"
+        self._record_observation(
+            connection,
+            operation,
+            checkout,
+            status,
+            ("LOOKUP_UNAVAILABLE" if document is None else "ORDER_MISMATCH")
+            if status == "UNKNOWN"
+            else None,
+        )
         self._persist_order(connection, checkout)
-        self._save(connection, session, f"{action}_observed")
+        self._save(connection, session, "reconcile_observed")

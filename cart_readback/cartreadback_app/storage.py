@@ -1,11 +1,12 @@
 """SQLite persistence with serialized local transitions and durable audit data."""
 
 import json
+import os
 import secrets
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import BinaryIO, Iterator
 
 from cartreadback_app.catalog import fixtures, validate_product
 from cartreadback_app.validation import AppError, canonical, text_hash
@@ -56,7 +57,7 @@ class Store:
 
     def __init__(self, path: str | Path):
         """Create a local fixture database and seed only on first initialization."""
-        self.path = Path(path)
+        self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA)
@@ -64,10 +65,30 @@ class Store:
                 row[1]
                 for row in connection.execute("PRAGMA table_info(operations)")
             }
-            for name in ("upstream_payload", "upstream_hash"):
+            additions = {
+                name: "TEXT NOT NULL DEFAULT ''"
+                for name in (
+                    "upstream_payload",
+                    "upstream_hash",
+                    "method",
+                    "path",
+                    "expected_hash",
+                    "provider_mode",
+                    "merchant_id",
+                    "adapter_version",
+                    "dispatch_token",
+                    "reserved_at",
+                    "dispatched_at",
+                    "observed_at",
+                    "last_observation",
+                    "error_code",
+                )
+            }
+            additions["reserved_revision"] = "INTEGER NOT NULL DEFAULT -1"
+            for name, definition in additions.items():
                 if name not in columns:
                     connection.execute(
-                        f"ALTER TABLE operations ADD COLUMN {name} TEXT NOT NULL DEFAULT ''"
+                        f"ALTER TABLE operations ADD COLUMN {name} {definition}"
                     )
             connection.execute("BEGIN IMMEDIATE")
             if not connection.execute(
@@ -83,6 +104,38 @@ class Store:
                         (product["sku_id"], canonical(product)),
                     )
             connection.commit()
+
+    def acquire_service(self) -> BinaryIO:
+        """Reject another service for this DB before startup recovery.
+
+        The OS releases the advisory lock after process death. The lock file is
+        never removed: unlinking a held lock would permit a second lock inode.
+        All supported service instances must use this guard and one DB path.
+        """
+        handle = self.path.with_suffix(self.path.suffix + ".service-lock").open(
+            "a+b"
+        )
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                handle.write(b"0")
+                handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, ImportError) as error:
+            handle.close()
+            raise AppError(
+                "SERVICE_ALREADY_RUNNING",
+                "Use one service instance for this database.",
+                409,
+            ) from error
+        return handle
 
     def connect(self) -> sqlite3.Connection:
         """Return a fresh connection with an explicit bounded lock wait."""

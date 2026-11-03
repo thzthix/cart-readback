@@ -16,6 +16,7 @@ venv/
 *.sqlite
 *.sqlite3
 *.db
+*.service-lock
 *.sqlite-wal
 *.sqlite-shm
 *.sqlite3-wal

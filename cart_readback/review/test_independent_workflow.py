@@ -23,6 +23,7 @@ class IndependentWorkflowTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.store = Store(Path(self.directory.name) / "review.sqlite3")
         self.service = Service(self.store)
+        self.addCleanup(lambda: self.service.close())
         self.sid = self.store.session(None)[0]["sid"]
 
     def view(self):
@@ -110,7 +111,12 @@ class IndependentWorkflowTests(unittest.TestCase):
         )
 
     def count(self, table):
-        with self.store.connect() as connection:
+        repository = (
+            self.service.payments
+            if table == "fixture_provider_orders"
+            else self.store
+        )
+        with repository.connect() as connection:
             return connection.execute(
                 f"SELECT count(*) FROM {table}"
             ).fetchone()[0]
@@ -187,6 +193,7 @@ class IndependentWorkflowTests(unittest.TestCase):
             **adapter.metadata,
             "prompt_version": "independent-revision",
         }
+        self.service.close()
         self.service = Service(self.store, inference=adapter)
         with self.assertRaises(AppError):
             self.create()
@@ -237,7 +244,7 @@ class IndependentWorkflowTests(unittest.TestCase):
             self.ready()
             checkout = self.view()["checkout"]
             provider_id = checkout["order"]["provider_order_id"]
-            with self.store.connect() as connection:
+            with self.service.payments.connect() as connection:
                 original = json.loads(
                     connection.execute(
                         "SELECT document FROM fixture_provider_orders"
@@ -245,7 +252,7 @@ class IndependentWorkflowTests(unittest.TestCase):
                 )
             changed = deepcopy(original)
             mutate(changed)
-            with self.store.transaction() as connection:
+            with self.service.payments.connect() as connection:
                 connection.execute(
                     "UPDATE fixture_provider_orders SET document = ? WHERE provider_order_id = ?",
                     (canonical(changed), provider_id),
@@ -270,6 +277,7 @@ class IndependentWorkflowTests(unittest.TestCase):
             "capture_timeout_after_success"
         )
         self.assertEqual("PAYMENT_UNKNOWN", self.capture()["checkout"]["state"])
+        self.service.close()
         self.service = Service(Store(self.store.path))
         self.assertEqual("PAYMENT_UNKNOWN", self.view()["checkout"]["state"])
         self.assertEqual(
@@ -284,6 +292,7 @@ class IndependentWorkflowTests(unittest.TestCase):
             "capture_timeout_before_success"
         )
         self.assertEqual("PAYMENT_UNKNOWN", self.capture()["checkout"]["state"])
+        self.service.close()
         self.service = Service(Store(self.store.path))
         self.assertEqual(
             "PAYMENT_UNKNOWN", self.act("reconcile")["checkout"]["state"]
@@ -331,8 +340,8 @@ class IndependentWorkflowTests(unittest.TestCase):
 
     def test_missing_provider_id_is_unknown_not_created(self):
         class MissingOrderId(FixturePaymentAdapter):
-            def create(self, connection, request_id, expected):
-                document = super().create(connection, request_id, expected)
+            def create(self, request_id, expected):
+                document = super().create(request_id, expected)
                 document["provider_order_id"] = None
                 return document
 
@@ -346,7 +355,7 @@ class IndependentWorkflowTests(unittest.TestCase):
 
     def test_process_failure_after_create_reservation_recovers_unknown(self):
         class InterruptedCreate(FixturePaymentAdapter):
-            def create(self, connection, request_id, expected):
+            def create(self, request_id, expected):
                 raise RuntimeError(
                     "Synthetic worker interruption before side effect"
                 )
@@ -360,6 +369,7 @@ class IndependentWorkflowTests(unittest.TestCase):
             "ORDER_CREATE_PENDING", self.view()["checkout"]["state"]
         )
         self.assertEqual(1, self.count("operations"))
+        self.service.close()
         self.service = Service(Store(self.store.path))
         self.assertEqual("PAYMENT_UNKNOWN", self.view()["checkout"]["state"])
         with self.assertRaises(AppError):
@@ -368,7 +378,7 @@ class IndependentWorkflowTests(unittest.TestCase):
 
     def test_process_failure_after_capture_reservation_recovers_unknown(self):
         class InterruptedCapture(FixturePaymentAdapter):
-            def capture(self, connection, provider_order_id, request_id):
+            def capture(self, provider_order_id, request_id):
                 raise RuntimeError(
                     "Synthetic worker interruption before side effect"
                 )
@@ -378,6 +388,7 @@ class IndependentWorkflowTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.capture()
         self.assertEqual("CAPTURE_PENDING", self.view()["checkout"]["state"])
+        self.service.close()
         self.service = Service(Store(self.store.path))
         self.assertEqual("PAYMENT_UNKNOWN", self.view()["checkout"]["state"])
         self.assertEqual(

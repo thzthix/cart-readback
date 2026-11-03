@@ -134,6 +134,7 @@ class DomainTests(unittest.TestCase):
         self.path = Path(self.temp.name) / "db.sqlite3"
         self.store = Store(self.path)
         self.service = Service(self.store)
+        self.addCleanup(lambda: self.service.close())
         self.flow = Workflow(self.service)
 
     def assert_code(self, code, function, *args, **kwargs):
@@ -142,7 +143,12 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(code, caught.exception.code)
 
     def count(self, table):
-        with self.store.transaction() as connection:
+        repository = (
+            self.service.payments
+            if table == "fixture_provider_orders"
+            else self.store
+        )
+        with repository.connect() as connection:
             return connection.execute(
                 f"SELECT count(*) FROM {table}"
             ).fetchone()[0]
@@ -168,10 +174,9 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(2, self.count("operations"))
 
     def provider_document(self):
-        with self.store.transaction() as connection:
-            return self.service.payments.get(
-                connection, self.flow.checkout["order"]["provider_order_id"]
-            )
+        return self.service.payments.get(
+            self.flow.checkout["order"]["provider_order_id"]
+        )
 
     def test_iso_geometry_does_not_make_de_layout_match_uk(self):
         self.flow.analyze("KB-DE-A2C")
@@ -450,6 +455,7 @@ class DomainTests(unittest.TestCase):
         self.assertEqual("PAYMENT_UNKNOWN", self.flow.checkout["state"])
         self.assert_code("INVALID_STATE", self.flow.action, "capture")
         self.assert_code("INVALID_STATE", self.flow.analyze)
+        self.service.close()
         restarted = Service(Store(self.path))
         self.flow = Workflow(restarted, self.flow.sid)
         self.assertEqual("PAYMENT_UNKNOWN", self.flow.checkout["state"])
@@ -499,13 +505,14 @@ class DomainTests(unittest.TestCase):
         self,
     ):
         class CrashProvider(FixturePaymentAdapter):
-            def capture(self, connection, provider_order_id, request_id):
+            def capture(self, provider_order_id, request_id):
                 raise SystemExit("synthetic process failure before observation")
 
         self.flow.ready()
         self.service.payments = CrashProvider()
         with self.assertRaises(SystemExit):
             self.flow.action("capture")
+        self.service.close()
         self.flow = Workflow(Service(Store(self.path)), self.flow.sid)
         self.assertEqual("PAYMENT_UNKNOWN", self.flow.checkout["state"])
         self.flow.action("reconcile")
@@ -515,9 +522,9 @@ class DomainTests(unittest.TestCase):
 
     def test_mutated_remote_order_rechecked_before_capture(self):
         self.flow.ready()
-        with self.store.transaction() as connection:
+        with self.service.payments.connect() as connection:
             doc = self.service.payments.get(
-                connection, self.flow.checkout["order"]["provider_order_id"]
+                self.flow.checkout["order"]["provider_order_id"]
             )
             doc["amount_minor"] = 1
             connection.execute(
