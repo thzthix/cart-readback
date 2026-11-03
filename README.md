@@ -96,6 +96,17 @@ replays a monetary request. One service instance owns each database. See the
 real subprocess crash matrix and private database/lock lifecycle. This remains
 fixture-only; PayPal and real inference are disabled.
 
+## Offline analysis lifecycle
+
+Analysis now reserves, claims and attaches observations in separate short SQLite
+transactions; injected adapter work holds no application DB lock. A durable
+owner/input/config/generation fence prevents stale results from replacing a newer
+review. Nonfixture injected tests have a database-wide attempt limit and persistent
+unknown-usage stop policy. Pending/failed analysis has no confirmable snapshot.
+See [analysis dispatch and limits](docs/ANALYSIS_DISPATCH.md). This is offline
+infrastructure, not an enabled model service, input-token/USD budget or evidence
+of genuine AI. The default server/CLI still use only the synthetic fixture.
+
 ## Checks
 
 Run backend checks from `cart_readback/`, with no UI/eval directory required:

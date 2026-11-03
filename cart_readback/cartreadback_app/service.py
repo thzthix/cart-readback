@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
+from cartreadback_app.analysis import AnalysisPolicy, checked_observation
 from cartreadback_app.inference import (
     FixtureInferenceAdapter,
     InferenceAdapter,
@@ -45,6 +46,7 @@ class Service:
         inference: InferenceAdapter | None = None,
         payments: PaymentAdapter | None = None,
         clock=None,
+        analysis_policy: AnalysisPolicy | None = None,
     ):
         """Inject offline adapters; HTTP setup never loads credentials."""
         self.store = store
@@ -52,6 +54,7 @@ class Service:
         self._activity_lock = threading.Lock()
         self._active = 0
         self._closed = False
+        self.analysis_policy = analysis_policy or AnalysisPolicy()
         self.inference = inference or FixtureInferenceAdapter()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         try:
@@ -116,6 +119,7 @@ class Service:
         # A reserved operation surviving service startup may have dispatched.
         # There is no automatic provider POST replay, even for a fake provider.
         with self.store.transaction() as connection:
+            self._recover_analysis(connection)
             rows = connection.execute(
                 "SELECT * FROM sessions WHERE checkout IS NOT NULL"
             ).fetchall()
@@ -168,7 +172,11 @@ class Service:
         if not self._fresh(connection, checkout):
             public["stale"] = True
             public["confirmation_id"] = None
-            if public["state"] not in {"PAYMENT_UNKNOWN", "COMPLETED"}:
+            if public["state"] not in {
+                "PAYMENT_UNKNOWN",
+                "COMPLETED",
+                "ANALYSIS_BLOCKED",
+            }:
                 public["state"] = "REVIEW_REQUIRED"
         return public
 
@@ -261,7 +269,7 @@ class Service:
         order_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict:
-        """Authorize short local transitions; payment I/O never holds a DB lock."""
+        """Authorize short local transitions; adapter I/O never holds a DB lock."""
         with self._activity():
             return self._mutate(sid, action, body, order_id, idempotency_key)
 
@@ -340,7 +348,10 @@ class Service:
             if operation:
                 return self._envelope(connection, session)
             if action == "analyze":
-                self._analyze(connection, session, body)
+                adapter = self.inference
+                reservation = self._reserve_analysis(
+                    connection, session, body, adapter
+                )
             elif action == "confirm":
                 self._confirm(connection, session, body)
             elif action == "orders":
@@ -363,9 +374,14 @@ class Service:
                     order_id,
                     adapter,
                 )
-            if action in {"analyze", "confirm"}:
+            if action == "confirm":
                 return self._result(connection, session)
-        if action == "orders":
+        if action == "analyze":
+            self._checkpoint(
+                "analysis_after_reservation_commit", reservation["operation_id"]
+            )
+            self._dispatch_analysis(reservation, adapter)
+        elif action == "orders":
             self._checkpoint(
                 "after_reservation_commit", reservation["operation_id"]
             )
@@ -393,12 +409,60 @@ class Service:
             }
         return result
 
-    def _analyze(
-        self, connection: sqlite3.Connection, session: dict, body: dict
-    ) -> None:
+    def _recover_analysis(self, connection):
+        rows = connection.execute(
+            "SELECT * FROM analysis_operations "
+            "WHERE status IN ('RESERVED', 'DISPATCHED')"
+        ).fetchall()
+        for operation in rows:
+            connection.execute(
+                "UPDATE analysis_operations SET status = 'UNKNOWN', "
+                "error_code = 'MODEL_OUTCOME_UNKNOWN' WHERE operation_id = ?",
+                (operation["operation_id"],),
+            )
+            session = self._session(connection, operation["sid"])
+            checkout = session["checkout"]
+            if checkout and checkout["review_id"] == operation["review_id"]:
+                checkout["state"] = "ANALYSIS_BLOCKED"
+                checkout["analysis_error"] = "MODEL_OUTCOME_UNKNOWN"
+                checkout["results"] = []
+                checkout["snapshot_hash"] = None
+                self._write_review(connection, session)
+                self._save(connection, session, "analysis_startup_unknown")
+
+    def _write_review(self, connection, session):
+        checkout = session["checkout"]
+        connection.execute(
+            "INSERT OR REPLACE INTO reviews VALUES (?, ?, ?, ?)",
+            (
+                checkout["review_id"],
+                session["sid"],
+                checkout["snapshot_hash"] or "BLOCKED",
+                canonical(checkout),
+            ),
+        )
+
+    def _analysis_admission(self, connection):
+        rows = connection.execute(
+            "SELECT status, observation FROM analysis_operations "
+            "WHERE is_fixture = 0"
+        ).fetchall()
+        if len(rows) >= self.analysis_policy.max_attempts or any(
+            row["status"] == "UNKNOWN" for row in rows
+        ):
+            raise AppError(
+                "MODEL_BUDGET_EXCEEDED",
+                "Offline analysis limit or unresolved usage blocks dispatch.",
+                503,
+            )
+        if any(row["status"] in {"RESERVED", "DISPATCHED"} for row in rows):
+            raise AppError(
+                "MODEL_UNAVAILABLE", "Analysis already in flight.", 503
+            )
+
+    def _reserve_analysis(self, connection, session, body, adapter):
         if connection.execute(
-            "SELECT 1 FROM orders WHERE sid = ?",
-            (session["sid"],),
+            "SELECT 1 FROM orders WHERE sid = ?", (session["sid"],)
         ).fetchone():
             raise AppError(
                 "INVALID_STATE",
@@ -414,9 +478,15 @@ class Service:
             {"condition_id": f"c{index + 1}", **choice}
             for index, choice in enumerate(choices)
         ]
+        model = json.loads(canonical(adapter.metadata))
+        fixture = model.get("is_fixture") is True
+        if not fixture:
+            self._analysis_admission(connection)
+        operation_id = str(uuid4())
         checkout = {
             "review_id": str(uuid4()),
-            "state": "REVIEW_REQUIRED",
+            "state": "ANALYSIS_BLOCKED",
+            "analysis_error": "MODEL_PENDING",
             "sku_id": sku,
             "conditions": choices,
             "results": [],
@@ -428,40 +498,251 @@ class Service:
                 "currency": product["currency"],
             },
             "source": product["source"],
-            "model": dict(self.inference.metadata),
+            "model": model,
             "catalog_hash": digest(product),
             "consent": None,
         }
-        try:
-            checkout["results"] = validate_proposal(
-                product["source"],
-                choices,
-                self.inference.propose(product["source"], choices),
+        document = canonical(
+            {"catalog": product, "conditions": choices, "model": model}
+        )
+        connection.execute(
+            "INSERT INTO analysis_operations(operation_id, sid, review_id, "
+            "input_document, input_hash, checkout_hash, reserved_revision, is_fixture, status, "
+            "reserved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?)",
+            (
+                operation_id,
+                session["sid"],
+                checkout["review_id"],
+                document,
+                text_hash(document),
+                digest(checkout),
+                session["revision"] + 1,
+                int(fixture),
+                self.clock().isoformat(),
+            ),
+        )
+        session["checkout"] = checkout
+        self._write_review(connection, session)
+        self._save(connection, session, "analysis_reserved")
+        return dict(
+            connection.execute(
+                "SELECT * FROM analysis_operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        )
+
+    def _analysis_fresh(self, connection, operation, reservation, adapter):
+        immutable = (
+            "operation_id",
+            "sid",
+            "review_id",
+            "input_document",
+            "input_hash",
+            "checkout_hash",
+            "reserved_revision",
+            "is_fixture",
+        )
+        if any(operation[key] != reservation[key] for key in immutable):
+            return False
+        inputs = json.loads(reservation["input_document"])
+        session = self._session(connection, reservation["sid"])
+        checkout = session["checkout"]
+        return (
+            text_hash(reservation["input_document"])
+            == reservation["input_hash"]
+            and session["revision"] == reservation["reserved_revision"]
+            and checkout is not None
+            and digest(checkout) == reservation["checkout_hash"]
+            and checkout["review_id"] == reservation["review_id"]
+            and checkout["state"] == "ANALYSIS_BLOCKED"
+            and checkout["analysis_error"] == "MODEL_PENDING"
+            and checkout["source"] == inputs["catalog"]["source"]
+            and checkout["conditions"] == inputs["conditions"]
+            and checkout["model"] == inputs["model"]
+            and checkout["catalog_hash"] == digest(inputs["catalog"])
+            and digest(product_for(connection, checkout["sku_id"]))
+            == checkout["catalog_hash"]
+            and self.inference is adapter
+            and adapter.metadata == inputs["model"]
+            and not connection.execute(
+                "SELECT 1 FROM orders WHERE sid = ?", (session["sid"],)
+            ).fetchone()
+        )
+
+    def _dispatch_analysis(self, reservation, adapter):
+        operation_id = reservation["operation_id"]
+        with self.store.transaction() as connection:
+            operation = connection.execute(
+                "SELECT * FROM analysis_operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if not operation or operation["status"] != "RESERVED":
+                return
+            if not self._analysis_fresh(
+                connection, operation, reservation, adapter
+            ):
+                self._finish_analysis(
+                    connection,
+                    reservation,
+                    adapter,
+                    "STALE_SNAPSHOT",
+                    None,
+                    "",
+                    "",
+                )
+                return
+            token = str(uuid4())
+            connection.execute(
+                "UPDATE analysis_operations SET status = 'DISPATCHED', "
+                "dispatch_token = ?, dispatched_at = ? WHERE operation_id = ?",
+                (token, self.clock().isoformat(), operation_id),
             )
+        self._checkpoint("analysis_after_dispatch_commit", operation_id)
+        inputs = json.loads(reservation["input_document"])
+        source = inputs["catalog"]["source"]
+        choices = inputs["conditions"]
+        error_code, results, observation = "", None, ""
+        try:
+            # Fresh copies prevent a mutable adapter from rewriting reserved input.
+            argument = json.loads(
+                canonical({"source": source, "conditions": choices})
+            )
+            if reservation["is_fixture"]:
+                proposal = adapter.propose(
+                    argument["source"], argument["conditions"]
+                )
+            else:
+                observed = adapter.observe(
+                    argument["source"], argument["conditions"]
+                )
+                observation = checked_observation(observed, inputs)
+                try:
+                    if (
+                        type(observed.proposal_json) is not str
+                        or len(observed.proposal_json) > 65_536
+                        or len(observed.proposal_json.encode("utf-8")) > 65_536
+                    ):
+                        raise ValueError("Proposal exceeds local wire limit")
+                    proposal = observed.results
+                except (ValueError, TypeError, UnicodeError) as error:
+                    raise AppError(
+                        "INVALID_PROPOSAL", "Invalid model proposal.", 422
+                    ) from error
+            try:
+                results = json.loads(
+                    canonical(validate_proposal(source, choices, proposal))
+                )
+            except (AppError, ValueError, TypeError) as error:
+                raise AppError(
+                    "INVALID_PROPOSAL", "Invalid model proposal.", 422
+                ) from error
         except AppError as error:
+            error_code = (
+                error.code
+                if reservation["is_fixture"]
+                else (
+                    error.code
+                    if error.code
+                    in {
+                        "INVALID_PROPOSAL",
+                        "MODEL_UNAVAILABLE",
+                        "MODEL_TIMEOUT",
+                        "MODEL_REFUSED",
+                        "MODEL_INCOMPLETE",
+                        "MODEL_BUDGET_EXCEEDED",
+                    }
+                    else "MODEL_UNAVAILABLE"
+                )
+            )
+        except Exception:
+            # Untrusted injected adapters cannot leak their exception text.
+            error_code = "MODEL_UNAVAILABLE"
+        self._checkpoint("analysis_before_observation_commit", operation_id)
+        with self.store.transaction() as connection:
+            self._finish_analysis(
+                connection,
+                reservation,
+                adapter,
+                error_code,
+                results,
+                observation,
+                token,
+            )
+
+    def _finish_analysis(
+        self,
+        connection,
+        reservation,
+        adapter,
+        error_code,
+        results,
+        observation,
+        token,
+    ):
+        operation_id = reservation["operation_id"]
+        operation = connection.execute(
+            "SELECT * FROM analysis_operations WHERE operation_id = ?",
+            (operation_id,),
+        ).fetchone()
+        expected_status = "DISPATCHED" if token else "RESERVED"
+        if not operation or operation["status"] != expected_status:
+            return
+        if token and operation["dispatch_token"] != token:
+            return
+        fresh = self._analysis_fresh(
+            connection, operation, reservation, adapter
+        )
+        status = "SUCCEEDED" if not error_code else "BLOCKED"
+        if not reservation["is_fixture"] and token and not observation:
+            status = "UNKNOWN"
+        elif not fresh:
+            status = "STALE"
+            error_code = "STALE_SNAPSHOT"
+        connection.execute(
+            "UPDATE analysis_operations SET status = ?, observation = ?, "
+            "error_code = ?, observed_at = ? WHERE operation_id = ?",
+            (
+                status,
+                observation,
+                error_code,
+                self.clock().isoformat(),
+                operation_id,
+            ),
+        )
+        session = self._session(connection, reservation["sid"])
+        checkout = session["checkout"]
+        # Never downgrade or attach to a newer generation or changed revision.
+        if (
+            not checkout
+            or checkout["review_id"] != reservation["review_id"]
+            or session["revision"] != reservation["reserved_revision"]
+        ):
+            return
+        if not fresh:
+            error_code = "STALE_SNAPSHOT"
+        if error_code:
             checkout["state"] = "ANALYSIS_BLOCKED"
-            checkout["analysis_error"] = error.code
-        if checkout["state"] != "ANALYSIS_BLOCKED":
+            checkout["analysis_error"] = error_code
+            checkout["results"] = []
+            checkout["snapshot_hash"] = None
+            checkout["confirmation_id"] = None
+            checkout["consent"] = None
+        else:
+            inputs = json.loads(reservation["input_document"])
+            checkout.pop("analysis_error", None)
+            checkout["state"] = "REVIEW_REQUIRED"
+            checkout["results"] = results
             checkout["snapshot_hash"] = digest(
                 {
                     "owner": session["sid"],
                     "review_id": checkout["review_id"],
-                    "catalog": product,
-                    "conditions": choices,
-                    "proposal": checkout["results"],
-                    "model": checkout["model"],
+                    "catalog": inputs["catalog"],
+                    "conditions": inputs["conditions"],
+                    "proposal": results,
+                    "model": inputs["model"],
                 }
             )
-        session["checkout"] = checkout
-        connection.execute(
-            "INSERT INTO reviews VALUES (?, ?, ?, ?)",
-            (
-                checkout["review_id"],
-                session["sid"],
-                checkout["snapshot_hash"] or "BLOCKED",
-                canonical(checkout),
-            ),
-        )
+        self._write_review(connection, session)
         self._save(connection, session, "analysis_recorded")
 
     def _confirm(

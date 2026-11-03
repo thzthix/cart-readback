@@ -2,8 +2,9 @@
 
 This is a locally tested wire boundary, **not live application integration**.
 `OfflineResponsesAdapter` is never selected by the server or CLI. The default
-fixture, HTTP API, service, storage, payment, UI and frozen v1 artifacts are
-unchanged. No network transport, credential lookup, live runner, account access,
+fixture and frozen v1 prompt artifacts remain. Issue #15 now adds the service
+reservation/claim/attachment lifecycle for explicitly injected offline tests; see
+[analysis lifecycle](ANALYSIS_DISPATCH.md). The server/CLI do not select it. No network transport, credential lookup, live runner, account access,
 API call, provider acceptance, inference-quality or paid-runtime result is supplied.
 
 ## Scope and use
@@ -20,8 +21,9 @@ There is no automatic upgrade, provider fallback, prompt repair or retry.
 `observe` returns validated results and host-recorded configuration/input digests,
 source revision, requested/returned model IDs, response/request IDs and usage.
 `propose` returns the same validated result array for the existing adapter seam.
-Neither method attaches results to application state. A future caller must perform
-its own current-input/config/generation fence before attachment.
+Neither method alone attaches results to application state. The service now uses
+its durable current-input/config/generation fence before attachment in explicitly
+injected offline tests.
 
 Only explicitly injected transports are usable. Tests use **fabricated envelopes**
 from authored synthetic inputs, not recorded or asserted vendor behavior. There
@@ -105,25 +107,26 @@ Error mapping (sanitized messages, no provider error/header echo):
 For an otherwise validated completed proposal, missing/invalid usage or response
 identity permanently blocks the instance. A missing request ID blocks before body
 processing. Earlier HTTP/refusal/incomplete/proposal failures preserve their
-primary diagnostic and do not pass through usage validation. Their attempted-call
-accounting and unknown-charge stop policy are unimplemented mandatory live gates.
-No synthetic all-unknown success is fabricated. These are adapter codes, not new
-HTTP behavior. The current service already catches adapter errors, but this new
-adapter is not wired into it. No failure creates a snapshot or authorizes payment.
+primary diagnostic and do not pass through usage validation. Their attempted-call slots and unknown-usage stop policy are now durable in the
+offline service lifecycle. Real charge accounting remains an unimplemented live
+gate.
+No synthetic all-unknown success is fabricated. The service catches and sanitizes these adapter codes when explicitly injected
+for offline tests. No failure creates a snapshot or authorizes payment.
 
 ## Mandatory live-enable gates
 
 Before a separately authorized genuine run:
 
-1. Remove analysis network work from SQLite write transactions. Add durable
-   reserve/release/CAS attachment fences for owner, operation/generation, source,
-   conditions and config; explicitly review pending state and restart behavior.
+1. Review the offline analysis reserve/claim/CAS attachment fences, pending state
+   and restart behavior against the actual future transport. Offline tests now
+   cover these local properties; they do not prove vendor cancellation.
 2. Obtain bounded provider/data/call/token/spend authorization and a securely
    approved credential reference. Never infer permission from a key's existence.
 3. Implement and review real input token counting (not characters/4), input cap,
    durable call/spend reservation, attempted-call records including refusals and
-   unknown timeout charges, and stop/reconciliation behavior. None is implemented
-   here. `max_output_tokens` is not an input or dollar cap.
+   unknown timeout charges, and stop/reconciliation behavior. The offline service
+   now supplies durable attempted-call slots, valid observation usage and an
+   unknown-usage breaker, but not real token/spend accounting. `max_output_tokens` is not an input or dollar cap.
 4. Implement/review the real transport and approved cache/data controls. Confirm
    official schema acceptance and actual returned model/usage behavior on a bounded
    synthetic smoke run. `store:false` is not a zero-data-retention guarantee.
@@ -132,8 +135,8 @@ Before a separately authorized genuine run:
 
 Issue #10 is separately owned dispatch infrastructure, not automatic satisfaction
 of analysis/live-enable gates. No price, quality, latency, runtime, payment or
-customer-benefit claim follows from this offline PR. Revert only its new paths to
-roll back; existing runtime/configuration/data remain unchanged.
+customer-benefit claim follows from this offline PR. Rollback of the adapter and the later service lifecycle must preserve unknown
+accounting history; see the lifecycle document.
 
 ## Verification
 
