@@ -1,0 +1,4 @@
+# Optional development-only lint tool. MIT; Python >=3.7.
+# Source reviewed: https://pypi.org/project/ruff/0.14.3/
+# No runtime packages are needed by CartReadback.
+ruff==0.14.3
