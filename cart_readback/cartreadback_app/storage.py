@@ -4,7 +4,7 @@ import json
 import os
 import secrets
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import BinaryIO, Iterator
 
@@ -75,7 +75,8 @@ class Store:
         """Create a local fixture database and seed only on first initialization."""
         self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.connect() as connection:
+        # SQLite's transaction context commits/rolls back but does not close.
+        with closing(self.connect()) as connection, connection:
             connection.executescript(SCHEMA + BUDGET_SCHEMA + PREFLIGHT_SCHEMA)
             columns = {
                 row[1]
