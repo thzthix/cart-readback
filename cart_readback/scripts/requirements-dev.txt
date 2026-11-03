@@ -1,4 +1,18 @@
-# Optional development-only lint tool. MIT; Python >=3.7.
-# Source reviewed: https://pypi.org/project/ruff/0.14.3/
+# Development-only lint and prompt-preflight tools, not app runtime packages.
+# Exact versions include jsonschema's transitive requirements for Python 3.11+.
+# Reviewed version-specific PyPI sources and licenses:
+# https://pypi.org/project/ruff/0.14.3/ (MIT)
+# https://pypi.org/project/jsonschema/4.26.0/ (MIT)
+# https://pypi.org/project/attrs/26.1.0/ (MIT)
+# https://pypi.org/project/jsonschema-specifications/2025.9.1/ (MIT)
+# https://pypi.org/project/referencing/0.37.0/ (MIT)
+# https://pypi.org/project/rpds-py/2026.6.3/ (MIT)
+# https://pypi.org/project/typing-extensions/4.16.0/ (PSF-2.0)
 # No runtime packages are needed by CartReadback.
 ruff==0.14.3
+jsonschema==4.26.0
+attrs==26.1.0
+jsonschema-specifications==2025.9.1
+referencing==0.37.0
+rpds-py==2026.6.3
+typing-extensions==4.16.0

@@ -156,9 +156,10 @@ python prompts/verify_artifacts.py > prompts/PREFLIGHT.json.tmp && \
 (cd prompts && sha256sum -c SHA256SUMS)
 ```
 
-The scorer is dependency-free. Prompt preflight uses the already-available
-**development-only** `jsonschema` 4.26.0; it is not a runtime dependency. If absent,
-stop that check and review a pinned dev-only dependency before installing anything.
+The scorer is dependency-free. Prompt preflight uses **development-only**
+`jsonschema` 4.26.0; it is not a runtime dependency. The reviewed exact dev-tool
+versions, transitive requirements, sources and licenses are declared in
+`cart_readback/scripts/requirements-dev.txt`.
 Regeneration binds actual imported dependencies; it is not model evaluation.
 Exact quotes and canonical-span containment do not establish semantic entailment;
 the local root-array schema is not a tested provider wire request. Candidate B
@@ -166,6 +167,58 @@ is prepared, not a performance winner. See integration PR #8 for exact-head
 results, the versioned tooling/manifest migration and reviewed string-policy/
 report corrections. Dataset, gold and frozen prompt bytes remain unchanged;
 this is not a new quality experiment.
+
+## Manual application-check workflow
+
+[`Offline application checks`](.github/workflows/application-checks.yml) prepares
+one Ubuntu 24.04 job for Python 3.11 and Node 22. It is **manual-only**, with no
+push, pull-request or scheduled trigger. This is automation preparation, not a
+claim that GitHub application CI has run or a required-check rule is enforced.
+GitHub only accepts `workflow_dispatch` for a workflow present on the default
+branch; this draft must be reviewed and separately authorized for merge first.
+
+Before any dispatch or addition of automatic triggers, the owner must verify
+available included compute and a no-charge billing limit, or give specific cost
+authorization. Private-repository standard runners can incur charges after the
+account's shared included compute is exhausted. No run, paid upgrade or spending
+change is authorized by this workflow. See [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+
+For local reproduction, use Python 3.11+ and Node 22+. From the repository root,
+install the exact reviewed development tools in a disposable virtual environment
+and set the workflow's environment before copying its `run` commands:
+
+```sh
+python -m venv /tmp/cartreadback-dev
+. /tmp/cartreadback-dev/bin/activate
+python -m pip install --no-cache-dir --only-binary=:all: -r cart_readback/scripts/requirements-dev.txt
+python -m pip check
+export PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+export NODE_OPTIONS='--test-reporter=tap'
+export RUNNER_TEMP="$(mktemp -d /tmp/cartreadback-checks.XXXXXX)"
+cd cart_readback
+# Run the workflow's run commands here, or use the individual checks above.
+```
+
+The temporary directory holds only local check logs and a synthetic preflight
+receipt; remove that directory after inspecting the results.
+
+The workflow binds official actions to full commits from their repositories:
+[checkout v7.0.1](https://github.com/actions/checkout/commit/3d3c42e5aac5ba805825da76410c181273ba90b1),
+[setup-python v7.0.0](https://github.com/actions/setup-python/commit/5fda3b95a4ea91299a34e894583c3862153e4b97),
+and [setup-node v7.1.0](https://github.com/actions/setup-node/commit/949feb2413d6458794dcd2491c4babbbce0c15c1).
+Only repository-content read permission is requested. Checkout credentials are
+not persisted; package caches, artifact uploads, secrets and deployments are not
+used. One job has a ten-minute timeout and a newer run cancels an older run for
+the same ref. Python/Node patch releases and the hosted runner image can change;
+the run records actual versions and checkout SHA, not an immutable OS image.
+
+UI checks own a real ephemeral loopback server. The workflow explicitly selects
+Node's TAP reporter, rejects skipped or TODO Node tests and requires both UI
+groups plus the independent group to report zero skipped. Prompt preflight
+writes only to a temporary file, compares the
+frozen receipt and checks all existing hashes. It never regenerates gold, corpus
+or prompt bytes. A final tracked-source diff detects mutations. These checks
+remain offline fixture evidence, not native browser, model or PayPal validation.
 
 ## Evidence and remaining gates
 
