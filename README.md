@@ -128,8 +128,9 @@ and actual HTTP checks do not establish native browser/rendering/accessibility.
 No bundler, package manager, remote fonts, images or analytics is used.
 
 Record observed counts/exits against an exact revision rather than treating this
-command list or older local passes as evidence. Actual checks and separate-worker review are recorded against exact revisions
-in the component PRs and final integration PR #8.
+command list or older local passes as evidence. Actual checks and separate-worker
+review are recorded against exact revisions in the component PRs and final
+integration PR #8.
 
 ## Offline evaluation checks
 
@@ -161,9 +162,10 @@ stop that check and review a pinned dev-only dependency before installing anythi
 Regeneration binds actual imported dependencies; it is not model evaluation.
 Exact quotes and canonical-span containment do not establish semantic entailment;
 the local root-array schema is not a tested provider wire request. Candidate B
-is prepared, not a performance winner. See the draft PR for exact-head results,
-including the explicit formatting-only tooling/manifest migration. Dataset, gold
-and prompt bytes remain unchanged; this is not a new quality experiment.
+is prepared, not a performance winner. See integration PR #8 for exact-head
+results, the versioned tooling/manifest migration and reviewed string-policy/
+report corrections. Dataset, gold and frozen prompt bytes remain unchanged;
+this is not a new quality experiment.
 
 ## Evidence and remaining gates
 
