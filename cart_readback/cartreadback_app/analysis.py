@@ -5,7 +5,12 @@ network transport, credentials or live-enable switch is provided by this module.
 """
 
 from dataclasses import dataclass
+from typing import Callable
 
+from cartreadback_app.inference_budget import (
+    OfflineBudgetPolicy,
+    OfflineInputCount,
+)
 from cartreadback_app.responses_adapter import InferenceObservation
 from cartreadback_app.validation import AppError, canonical, digest, string
 
@@ -25,6 +30,27 @@ class AnalysisPolicy:
             raise AppError("MODEL_UNAVAILABLE", "Invalid analysis policy.", 503)
 
 
+@dataclass(frozen=True)
+class OfflineAnalysisBudget:
+    """Explicit fabricated local count/rate seam; no live authorization.
+
+    The counter must be pure, bounded local test code. It runs in the reservation
+    transaction and must not perform I/O, access secrets or call provider APIs.
+    """
+
+    policy: OfflineBudgetPolicy
+    count: Callable[[bytes], OfflineInputCount]
+
+    def __post_init__(self) -> None:
+        """Reject missing policy or counter rather than guessing an allowance."""
+        if type(self.policy) is not OfflineBudgetPolicy or not callable(
+            self.count
+        ):
+            raise AppError(
+                "MODEL_BUDGET_EXCEEDED", "Offline budget unavailable.", 503
+            )
+
+
 def checked_observation(observed: object, inputs: dict) -> str:
     """Bind a strictly typed observation to reserved inputs, never model echoes."""
     if type(observed) is not InferenceObservation:
@@ -38,6 +64,7 @@ def checked_observation(observed: object, inputs: dict) -> str:
     )
     if (
         observed.config_sha256 != model.get("config_sha256")
+        or observed.request_sha256 != inputs.get("budget_request_sha256")
         or observed.source_sha256 != source["sha256"]
         or type(observed.source_revision) is not int
         or observed.source_revision != source["revision"]
@@ -63,6 +90,7 @@ def checked_observation(observed: object, inputs: dict) -> str:
     # the independent service validator; it must never enter this ledger.
     fields = (
         "config_sha256",
+        "request_sha256",
         "source_sha256",
         "source_revision",
         "conditions_sha256",

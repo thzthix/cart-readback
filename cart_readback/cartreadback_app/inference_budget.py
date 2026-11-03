@@ -1,7 +1,8 @@
 """Durable offline budget prerequisite, with no counter, price or live dispatch.
 
 All counts and rates are explicitly injected trusted test data. This module is
-not wired into the application and does not authorize spending or read secrets.
+usable inside the offline service transaction but does not authorize spending
+or read secrets.
 Reserved capacity is never refunded, even after known usage or pre-send failure.
 """
 
@@ -21,7 +22,7 @@ from cartreadback_app.validation import AppError, canonical, digest
 
 _VERSION = "offline-budget-v1"
 _MAX = 2**53 - 1
-_SCHEMA = """
+BUDGET_SCHEMA = """
 CREATE TABLE IF NOT EXISTS budget_identity (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     document TEXT NOT NULL
@@ -166,76 +167,51 @@ class BudgetClaim:
     claim_token: str
 
 
-class OfflineBudgetLedger:
-    """Own one private, exclusive SQLite budget ledger for offline tests.
+def _ensure_policy(
+    connection: sqlite3.Connection, policy: OfflineBudgetPolicy
+) -> None:
+    if type(policy) is not OfflineBudgetPolicy or not connection.in_transaction:
+        raise _error()
+    for statement in BUDGET_SCHEMA.split(";"):
+        if statement.strip():
+            connection.execute(statement)
+    row = connection.execute(
+        "SELECT document FROM budget_identity WHERE singleton = 1"
+    ).fetchone()
+    if row is None:
+        connection.execute(
+            "INSERT INTO budget_identity VALUES (1, ?)", (policy.identity,)
+        )
+    elif row[0] != policy.identity:
+        raise _error()
 
-    Opening recovers any pending reservation as UNKNOWN, never free or retried.
-    Identity and committed history are database-wide, independent of sessions.
-    A caller must retain the same DB and policy; deleting/copying DBs or supplying
-    false counts/rates defeats this trusted seam and is not a recovery workflow.
-    """
 
-    def __init__(self, path: str | Path, policy: OfflineBudgetPolicy) -> None:
-        """Lock before recovery; never open network connections or load prices."""
-        if type(policy) is not OfflineBudgetPolicy:
+def recover_budget(connection: sqlite3.Connection) -> None:
+    """Mark pending capacity UNKNOWN inside its owner's startup transaction."""
+    if not connection.in_transaction:
+        raise _error()
+    connection.execute(
+        "UPDATE budget_operations SET status = 'UNKNOWN' "
+        "WHERE status IN ('RESERVED', 'DISPATCHED')"
+    )
+
+
+def policy_from_identity(document: str) -> OfflineBudgetPolicy:
+    """Reconstruct only an exact supported, nonsecret reserved policy document."""
+    try:
+        values = json.loads(document)
+        if values.pop("version") != _VERSION or values.pop("currency") != "USD":
             raise _error()
-        self._path = Path(path).resolve()
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._policy = policy
-        self._mutex = threading.Lock()
-        self._closed = False
-        self._lease = self._path.with_suffix(
-            self._path.suffix + ".budget-lock"
-        ).open("a+b")
-        try:
-            # This offline prerequisite currently supports POSIX ownership only.
-            import fcntl
+        policy = OfflineBudgetPolicy(**values)
+        if policy.identity != document:
+            raise _error()
+        return policy
+    except (ValueError, TypeError, AttributeError, KeyError) as error:
+        raise _error() from error
 
-            fcntl.flock(self._lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            with self._transaction() as connection:
-                for statement in _SCHEMA.split(";"):
-                    if statement.strip():
-                        connection.execute(statement)
-                row = connection.execute(
-                    "SELECT document FROM budget_identity WHERE singleton = 1"
-                ).fetchone()
-                if row is None:
-                    connection.execute(
-                        "INSERT INTO budget_identity VALUES (1, ?)",
-                        (policy.identity,),
-                    )
-                elif row[0] != policy.identity:
-                    raise _error()
-                connection.execute(
-                    "UPDATE budget_operations SET status = 'UNKNOWN' "
-                    "WHERE status IN ('RESERVED', 'DISPATCHED')"
-                )
-        except BaseException:
-            self._lease.close()
-            raise
 
-    @contextmanager
-    def _transaction(self):
-        with self._mutex:
-            if self._closed:
-                raise _error()
-            connection = sqlite3.connect(self._path, isolation_level=None)
-            connection.row_factory = sqlite3.Row
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                yield connection
-                connection.commit()
-            except BaseException:
-                connection.rollback()
-                raise
-            finally:
-                connection.close()
-
-    def close(self) -> None:
-        """Release this owner; a replacement recovers unresolved work as UNKNOWN."""
-        with self._mutex:
-            self._closed = True
-            self._lease.close()
+class _BudgetOperations:
+    """Share operations across standalone and owner-managed transactions."""
 
     def reserve(self, request: bytes, count: OfflineInputCount) -> str:
         """Commit worst-case capacity for exactly one explicitly counted payload."""
@@ -352,6 +328,8 @@ class OfflineBudgetLedger:
                         "input_tokens": input_tokens,
                         "output_tokens": output_tokens,
                         "total_tokens": total_tokens,
+                        "cost_is_synthetic": True,
+                        "is_real_charge": False,
                         "actual_micro_usd": self._policy.cost(
                             input_tokens, output_tokens
                         ),
@@ -390,3 +368,103 @@ class OfflineBudgetLedger:
                 "UPDATE budget_operations SET status = 'UNKNOWN' WHERE operation_id = ?",
                 (claim.operation_id,),
             )
+
+    def abandon_reservation(
+        self, operation_id: str, request_sha256: str
+    ) -> None:
+        """Keep an undispatched stale reservation as UNKNOWN, never release it."""
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM budget_operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if (
+                row is None
+                or row["status"] != "RESERVED"
+                or row["request_sha256"] != request_sha256
+            ):
+                raise _error()
+            connection.execute(
+                "UPDATE budget_operations SET status = 'UNKNOWN' WHERE operation_id = ?",
+                (operation_id,),
+            )
+
+
+class OfflineBudgetLedger(_BudgetOperations):
+    """Own one private, exclusive SQLite budget ledger for offline tests.
+
+    Opening recovers any pending reservation as UNKNOWN, never free or retried.
+    Identity and committed history are database-wide, independent of sessions.
+    A caller must retain the same DB and policy; deleting/copying DBs or supplying
+    false counts/rates defeats this trusted seam and is not a recovery workflow.
+    """
+
+    def __init__(self, path: str | Path, policy: OfflineBudgetPolicy) -> None:
+        """Lock before recovery; never open network connections or load prices."""
+        if type(policy) is not OfflineBudgetPolicy:
+            raise _error()
+        self._path = Path(path).resolve()
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._policy = policy
+        self._mutex = threading.Lock()
+        self._closed = False
+        self._lease = self._path.with_suffix(
+            self._path.suffix + ".budget-lock"
+        ).open("a+b")
+        try:
+            # This offline prerequisite currently supports POSIX ownership only.
+            import fcntl
+
+            fcntl.flock(self._lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self._transaction() as connection:
+                _ensure_policy(connection, policy)
+                recover_budget(connection)
+        except BaseException:
+            self._lease.close()
+            raise
+
+    @contextmanager
+    def _transaction(self):
+        with self._mutex:
+            if self._closed:
+                raise _error()
+            connection = sqlite3.connect(self._path, isolation_level=None)
+            connection.row_factory = sqlite3.Row
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                yield connection
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
+
+    def close(self) -> None:
+        """Release this owner; a replacement recovers unresolved work as UNKNOWN."""
+        with self._mutex:
+            self._closed = True
+            self._lease.close()
+
+
+class TransactionBudgetLedger(_BudgetOperations):
+    """Budget operations sharing an existing owner's exact SQLite transaction.
+
+    This does not acquire a lease, commit, roll back or recover. The service owns
+    those responsibilities. Settlement errors must be caught inside the outer
+    transaction if the caller wants an UNKNOWN update to commit before raising.
+    """
+
+    def __init__(
+        self, connection: sqlite3.Connection, policy: OfflineBudgetPolicy
+    ) -> None:
+        """Bind an already-open owner transaction and persisted policy identity."""
+        _ensure_policy(connection, policy)
+        self._connection = connection
+        self._policy = policy
+
+    @contextmanager
+    def _transaction(self):
+        if not self._connection.in_transaction:
+            raise _error()
+        yield self._connection

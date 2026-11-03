@@ -1,5 +1,11 @@
 # Offline inference budget prerequisite, issue #23
 
+Current follow-up: [issue #27](ATOMIC_ANALYSIS_BUDGET.md) reuses these operations
+inside the application SQLite transaction for explicit offline injection only.
+The standalone behavior and original not-wired scope below describe #23; they
+are not a claim that the subsequent optional integration is absent. The default
+fixture runtime and genuine-inference gates remain unchanged.
+
 Base: `99e77f89cb9c7407ac1438596fdf400e358de26f`. This adds a standalone,
 POSIX-only durable budget component and fences requested/returned tier in the
 existing offline Responses adapter. It does **not** wire the budget ledger into
