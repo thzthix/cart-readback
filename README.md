@@ -272,6 +272,13 @@ frozen receipt and checks all existing hashes. It never regenerates gold, corpus
 or prompt bytes. A final tracked-source diff detects mutations. These checks
 remain offline fixture evidence, not native browser, model or PayPal validation.
 
+## Genuine provider runtime design
+
+[Issue #33 architecture and gates](docs/GENUINE_PROVIDER_RUNTIME.md) explains
+why a concrete factory alone cannot enable genuine inference, the unresolved
+count-payload contract, and the required identity/accounting/authorization work.
+This is documentation only. No live factory, key, call or readiness pass is added.
+
 ## Evidence and remaining gates
 
 This is an **import of pre-existing local fixture work**. The issue-first GitHub
