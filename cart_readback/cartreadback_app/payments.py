@@ -1,41 +1,52 @@
-"""A local fake payment provider, never a genuine PayPal response."""
+"""Offline payment seam with independently committed synthetic provider state."""
 
 import json
 import sqlite3
-from typing import Protocol
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator, Protocol
 
 from cartreadback_app.validation import AppError, canonical, digest
 
 
 class ProviderAmbiguity(Exception):
-    """A synthetic timeout whose money outcome must be reconciled, not retried."""
+    """A provider outcome that must be reconciled, never automatically replayed."""
+
+
+@dataclass(frozen=True)
+class PaymentRequest:
+    """Exact immutable request bytes, separate from local authorization facts."""
+
+    method: str
+    path: str
+    body: str
 
 
 class PaymentAdapter(Protocol):
-    """Normalized provider seam, not a claim about PayPal's raw API fields."""
+    """Transport-neutral seam: no application connection crosses this boundary.
+
+    prepare is pure and cannot do I/O. dispatch sends the exact persisted body
+    once, using operation_id as the provider request UUID. get is read-only.
+    A future real transport needs its own host, normalization and timeout review.
+    """
 
     mode: str
     merchant_id: str
+    version: str
 
-    def create(
-        self, connection: sqlite3.Connection, request_id: str, expected: dict
-    ) -> dict:
-        """Create a provider order with a durable operation identifier."""
+    def prepare(
+        self, kind: str, expected: dict, provider_order_id: str | None
+    ) -> PaymentRequest:
+        """Build the exact authoritative wire-equivalent request, without I/O."""
         ...
 
-    def get(
-        self, connection: sqlite3.Connection, provider_order_id: str
-    ) -> dict:
-        """Get the existing order; never creates or captures money."""
+    def dispatch(self, operation_id: str, request: PaymentRequest) -> dict:
+        """Send one previously claimed request, without automatic retries."""
         ...
 
-    def capture(
-        self,
-        connection: sqlite3.Connection,
-        provider_order_id: str,
-        request_id: str,
-    ) -> dict:
-        """Capture the existing order with the original operation identifier."""
+    def get(self, provider_order_id: str) -> dict:
+        """Observe the same existing order without monetary side effects."""
         ...
 
 
@@ -44,10 +55,18 @@ class DisabledPayPalSandboxAdapter:
 
     mode = "disabled"
     merchant_id = "unconfigured"
+    version = "disabled-v1"
 
     def __getattr__(self, name: str):
         """Fail instead of silently substituting a fixture or live endpoint."""
-        if name in {"create", "get", "capture", "approve", "find"}:
+        if name in {
+            "prepare",
+            "dispatch",
+            "create",
+            "get",
+            "capture",
+            "approve",
+        }:
 
             def unavailable(*_args, **_kwargs):
                 raise AppError(
@@ -61,15 +80,15 @@ class DisabledPayPalSandboxAdapter:
 
 
 class FixturePaymentAdapter:
-    """SQLite-backed fake provider with test-only, validated fault injection.
+    """Independent SQLite fake provider, never genuine PayPal evidence.
 
-    Provider writes share the fixture DB transaction. A real remote provider
-    cannot share that transaction and needs independently reviewed recovery.
-    No HTTP field can select a fault or a real adapter.
+    Each side effect commits in a separate database before returning. Application
+    rollback cannot undo a synthetic payment. No HTTP input selects faults.
     """
 
     mode = "fixture"
     merchant_id = "synthetic-merchant-only"
+    version = "fixture-wire-v1"
     FAULTS = {
         None,
         "create_timeout_after_success",
@@ -79,18 +98,85 @@ class FixturePaymentAdapter:
     }
 
     def __init__(self, fault: str | None = None):
-        """Allow only an explicit fixture fault, never arbitrary scenario data."""
+        """Allow only explicit fixture faults; bind persistence at service setup."""
         if type(fault) not in (str, type(None)) or fault not in self.FAULTS:
             raise AppError("INVALID_FIXTURE_FAULT", "Unknown fixture fault.")
         self.fault = fault
+        self.path = None
 
-    def create(
-        self, connection: sqlite3.Connection, request_id: str, expected: dict
-    ) -> dict:
-        """Persist exactly one synthetic provider order per request identifier."""
-        existing = self.find(connection, request_id)
-        if existing:
-            return existing
+    def bind(self, path: Path, legacy_rows: list) -> None:
+        """Bind a fixture-only store and import existing fake orders once."""
+        if self.path is not None and self.path != path:
+            raise AppError(
+                "INVALID_STATE", "Fixture store is already bound.", 409
+            )
+        self.path = path
+        with self.connect() as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS fixture_provider_orders ("
+                "provider_order_id TEXT PRIMARY KEY, request_id TEXT UNIQUE NOT NULL, "
+                "document TEXT NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS fixture_dispatches ("
+                "receipt_id INTEGER PRIMARY KEY, operation_id TEXT NOT NULL, method TEXT NOT NULL, "
+                "path TEXT NOT NULL, body TEXT NOT NULL)"
+            )
+            connection.executemany(
+                "INSERT OR IGNORE INTO fixture_provider_orders VALUES (?, ?, ?)",
+                legacy_rows,
+            )
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        """Open and close the independent fake provider transaction."""
+        if self.path is None:
+            raise AppError("INVALID_STATE", "Fixture store is not bound.", 409)
+        connection = sqlite3.connect(self.path, timeout=5)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
+    def prepare(
+        self, kind: str, expected: dict, provider_order_id: str | None
+    ) -> PaymentRequest:
+        """Freeze fixture wire bytes; capture sends exactly an empty object."""
+        if kind == "orders":
+            return PaymentRequest(
+                "POST", "/fixture/orders", canonical(expected)
+            )
+        return PaymentRequest(
+            "POST",
+            f"/fixture/orders/{provider_order_id}/capture",
+            canonical({}),
+        )
+
+    def dispatch(self, operation_id: str, request: PaymentRequest) -> dict:
+        """Dispatch the exact stored fixture request without retry."""
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO fixture_dispatches(operation_id, method, path, body) VALUES (?, ?, ?, ?)",
+                (operation_id, request.method, request.path, request.body),
+            )
+        if request.method != "POST":
+            raise AppError("INVALID_STATE", "Unsupported fixture method.", 409)
+        if request.path == "/fixture/orders":
+            return self.create(operation_id, json.loads(request.body))
+        prefix, suffix = "/fixture/orders/", "/capture"
+        if (
+            not request.path.startswith(prefix)
+            or not request.path.endswith(suffix)
+            or request.body != canonical({})
+        ):
+            raise AppError("INVALID_STATE", "Unsupported fixture request.", 409)
+        return self.capture(
+            request.path[len(prefix) : -len(suffix)], operation_id
+        )
+
+    def create(self, request_id: str, expected: dict) -> dict:
+        """Commit one synthetic order before returning or raising ambiguity."""
         order_id = "FAKE-" + digest(request_id)[:24]
         document = {
             **expected,
@@ -98,32 +184,28 @@ class FixturePaymentAdapter:
             "status": "CREATED",
             "captures": [],
         }
-        connection.execute(
-            "INSERT INTO fixture_provider_orders VALUES (?, ?, ?)",
-            (order_id, request_id, canonical(document)),
-        )
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT document FROM fixture_provider_orders WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row:
+                return json.loads(row[0])
+            connection.execute(
+                "INSERT INTO fixture_provider_orders VALUES (?, ?, ?)",
+                (order_id, request_id, canonical(document)),
+            )
         if self.fault == "create_timeout_after_success":
             raise ProviderAmbiguity("Synthetic create timeout")
         return document
 
-    def find(
-        self, connection: sqlite3.Connection, request_id: str
-    ) -> dict | None:
-        """Fixture-only reconciliation by the original persisted request ID."""
-        row = connection.execute(
-            "SELECT document FROM fixture_provider_orders WHERE request_id = ?",
-            (request_id,),
-        ).fetchone()
-        return json.loads(row[0]) if row else None
-
-    def get(
-        self, connection: sqlite3.Connection, provider_order_id: str
-    ) -> dict:
-        """Read an existing fake order without any side effect."""
-        row = connection.execute(
-            "SELECT document FROM fixture_provider_orders WHERE provider_order_id = ?",
-            (provider_order_id,),
-        ).fetchone()
+    def get(self, provider_order_id: str) -> dict:
+        """Read an existing fake order with no application connection."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT document FROM fixture_provider_orders WHERE provider_order_id = ?",
+                (provider_order_id,),
+            ).fetchone()
         if not row:
             raise AppError(
                 "PROVIDER_NOT_FOUND", "Provider order unavailable.", 409
@@ -136,27 +218,21 @@ class FixturePaymentAdapter:
             (canonical(document), document["provider_order_id"]),
         )
 
-    def approve(
-        self, connection: sqlite3.Connection, provider_order_id: str
-    ) -> dict:
-        """Explicit fake approval action; not a PayPal redirect or buyer login."""
-        document = self.get(connection, provider_order_id)
+    def approve(self, provider_order_id: str) -> dict:
+        """Explicitly commit fake approval; not a PayPal buyer login."""
+        document = self.get(provider_order_id)
         if document["status"] != "CREATED":
             raise AppError(
                 "INVALID_STATE", "Order is not awaiting approval.", 409
             )
         document["status"] = "APPROVED"
-        self._save(connection, document)
+        with self.connect() as connection:
+            self._save(connection, document)
         return document
 
-    def capture(
-        self,
-        connection: sqlite3.Connection,
-        provider_order_id: str,
-        request_id: str,
-    ) -> dict:
-        """Simulate one capture, optionally persisting an ambiguous result."""
-        document = self.get(connection, provider_order_id)
+    def capture(self, provider_order_id: str, request_id: str) -> dict:
+        """Commit a fake capture independently of application observation."""
+        document = self.get(provider_order_id)
         if document["status"] != "APPROVED":
             raise AppError(
                 "INVALID_STATE", "Provider order is not approved.", 409
@@ -167,22 +243,20 @@ class FixturePaymentAdapter:
             )
         if self.fault == "capture_pending":
             document["status"] = "PENDING"
+        else:
+            document["status"] = "COMPLETED"
+            document["captures"] = [
+                {
+                    "capture_id": "FAKE-CAP-" + digest(request_id)[:20],
+                    "status": "COMPLETED",
+                    "amount_minor": document["amount_minor"],
+                    "currency": document["currency"],
+                }
+            ]
+        with self.connect() as connection:
             self._save(connection, document)
-            raise ProviderAmbiguity("Synthetic pending capture")
-        document["status"] = "COMPLETED"
-        document["captures"] = [
-            {
-                "capture_id": "FAKE-CAP-" + digest(request_id)[:20],
-                "status": "COMPLETED",
-                "amount_minor": document["amount_minor"],
-                "currency": document["currency"],
-            }
-        ]
-        self._save(connection, document)
-        if self.fault == "capture_timeout_after_success":
-            raise ProviderAmbiguity(
-                "Synthetic capture timeout after completion"
-            )
+        if self.fault in {"capture_pending", "capture_timeout_after_success"}:
+            raise ProviderAmbiguity("Synthetic uncertain capture")
         return document
 
 
