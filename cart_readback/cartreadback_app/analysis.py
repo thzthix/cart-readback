@@ -42,6 +42,9 @@ def checked_observation(observed: object, inputs: dict) -> str:
         or type(observed.source_revision) is not int
         or observed.source_revision != source["revision"]
         or observed.conditions_sha256 != digest(inputs["conditions"])
+        or observed.service_tier_requested != model.get("service_tier")
+        or observed.service_tier_returned != observed.service_tier_requested
+        or observed.service_tier_requested != "default"
         or observed.model_requested != model.get("model_version")
         or observed.model_returned not in model.get("expected_model_ids", [])
         or any(
@@ -65,6 +68,8 @@ def checked_observation(observed: object, inputs: dict) -> str:
         "conditions_sha256",
         "model_requested",
         "model_returned",
+        "service_tier_requested",
+        "service_tier_returned",
         "response_id",
         "request_id",
         "input_tokens",

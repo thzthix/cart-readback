@@ -459,6 +459,8 @@ Workflow(service).analyze()
             ("config_sha256", "forged"),
             ("source_revision", True),
             ("total_tokens", 0),
+            ("service_tier_requested", "auto"),
+            ("service_tier_returned", "priority"),
             ("request_id", ""),
         ]:
             with self.subTest(field=field):

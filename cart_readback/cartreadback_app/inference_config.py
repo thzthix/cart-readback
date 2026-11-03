@@ -11,7 +11,7 @@ from cartreadback_app.validation import AppError, digest
 
 ENDPOINT = "https://api.openai.com/v1/responses"
 MODEL = "gpt-6-luna"
-ADAPTER_VERSION = "responses-offline-wire-v1"
+ADAPTER_VERSION = "responses-offline-wire-v2-tier"
 MANIFEST_SHA256 = (
     "5960e0e6e078e4defc5b00ad7afb73bc6dcd0a202811b6b11e9fa8e09ad4832b"
 )
@@ -41,6 +41,7 @@ class InferenceConfig:
     overall_timeout_seconds: float = 20.0
     connect_timeout_seconds: float = 3.0
     read_timeout_seconds: float = 12.0
+    service_tier: str = "default"
     execution_mode: str = "offline-injected-only"
 
     def __post_init__(self) -> None:
@@ -50,6 +51,7 @@ class InferenceConfig:
             or self.model != MODEL
             or type(self.expected_model_ids) is not tuple
             or self.expected_model_ids != (MODEL,)
+            or self.service_tier != "default"
             or self.execution_mode != "offline-injected-only"
         ):
             raise _unavailable()
