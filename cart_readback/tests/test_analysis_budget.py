@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
@@ -37,7 +38,7 @@ class IntegratedBudgetTests(unittest.TestCase):
         self.flow = Workflow(self.service)
 
     def rows(self, table):
-        with self.store.connect() as connection:
+        with closing(self.store.connect()) as connection, connection:
             return [
                 dict(row)
                 for row in connection.execute(f"SELECT * FROM {table}")

@@ -9,6 +9,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from copy import deepcopy
 from pathlib import Path
 from unittest import mock
@@ -69,7 +70,7 @@ class WaitingFixture(FixtureInferenceAdapter):
 
 class AuthoredTransport:
     def __init__(self, store, failure=None, wait=False):
-        with store.connect() as connection:
+        with closing(store.connect()) as connection, connection:
             product = json.loads(
                 connection.execute(
                     "SELECT document FROM catalog WHERE sku = 'KB-UK-C2C'"
@@ -123,7 +124,7 @@ class AnalysisDispatchTests(unittest.TestCase):
         self.flow = Workflow(self.service)
 
     def operations(self):
-        with self.store.connect() as connection:
+        with closing(self.store.connect()) as connection, connection:
             return [
                 dict(row)
                 for row in connection.execute(
@@ -434,7 +435,7 @@ Workflow(service).analyze()
                 )
                 self.store = Store(path)
                 self.service = Service(self.store)
-                with self.store.connect() as connection:
+                with closing(self.store.connect()) as connection, connection:
                     sid = connection.execute(
                         "SELECT sid FROM sessions"
                     ).fetchone()[0]
@@ -445,7 +446,7 @@ Workflow(service).analyze()
                 )
                 self.assertIsNone(current["checkout"]["snapshot_hash"])
                 self.assertEqual("UNKNOWN", self.operations()[0]["status"])
-                with self.store.connect() as connection:
+                with closing(self.store.connect()) as connection, connection:
                     budget = connection.execute(
                         "SELECT * FROM budget_operations"
                     ).fetchone()
@@ -552,7 +553,7 @@ Workflow(service).analyze()
                 self.assertNotIn("proposal_json", accounting)
                 self.assertNotIn(marker, canonical(self.flow.result))
                 self.assertIsNone(self.flow.checkout["snapshot_hash"])
-                with self.store.connect() as connection:
+                with closing(self.store.connect()) as connection, connection:
                     for table in (
                         "analysis_operations",
                         "reviews",
