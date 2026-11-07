@@ -107,6 +107,8 @@ class GeminiResultViewer(ThreadingHTTPServer):
         self._viewer_token = None
         self._launched = False
         self._stopped = False
+        self._http_sockets: set[socket.socket] = set()
+        self._http_threads: set[threading.Thread] = set()
         # Hash only the shipped first script. There is no unsafe-inline policy.
         html = (self.ui_root / "viewer.html").read_text(encoding="utf-8")
         scripts = re.findall(r"<script>(.*?)</script>", html, re.DOTALL)
@@ -139,12 +141,11 @@ class GeminiResultViewer(ThreadingHTTPServer):
                 self._launch_token = None
             raise _denied() from None
 
-    def redeem(self, capability: str, cookie: str | None) -> str:
+    def redeem(self, capability: str) -> str:
         """Atomically consume one bounded launch and mint a view-only cookie."""
         with self._lock:
             if (
                 self._stopped
-                or cookie is not None
                 or not self._launch_token
                 or self._clock() >= self._launch_deadline
                 or not secrets.compare_digest(capability, self._launch_token)
@@ -188,12 +189,76 @@ class GeminiResultViewer(ThreadingHTTPServer):
             "viewer": dict(self._descriptor),
         }
 
+    def process_request(
+        self, request: socket.socket, client_address: tuple[str, int]
+    ) -> None:
+        """Atomically register each accepted socket and started handler worker.
+
+        Registration/start shares the revocation lock, so shutdown either owns
+        the socket/worker or this method rejects and closes the new connection.
+        Failed starts are removed before any close can attempt to join them.
+        """
+        try:
+            with self._lock:
+                if self._stopped:
+                    self.shutdown_request(request)
+                    return
+                # Reap only workers whose actual thread exit is observable.
+                self._http_threads = {
+                    worker for worker in self._http_threads if worker.is_alive()
+                }
+                worker = threading.Thread(
+                    target=self._serve_request,
+                    args=(request, client_address),
+                    daemon=False,
+                )
+                self._http_sockets.add(request)
+                self._http_threads.add(worker)
+                try:
+                    worker.start()
+                except BaseException:
+                    self._http_sockets.discard(request)
+                    self._http_threads.discard(worker)
+                    raise
+        except BaseException:
+            self.shutdown_request(request)
+            raise
+
+    def _serve_request(
+        self, request: socket.socket, client_address: tuple[str, int]
+    ) -> None:
+        try:
+            self.finish_request(request, client_address)
+        except BaseException:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+            with self._lock:
+                self._http_sockets.discard(request)
+                # Retain the worker until actual exit can be observed/reaped,
+                # so close never mistakes a finalizing handler for a dead one.
+
     def server_close(self) -> None:
-        """Revoke memory-only capabilities and join every bounded HTTP handler."""
+        """Revoke access, interrupt active HTTP I/O and join all handler workers.
+
+        Socket idle timeout alone cannot bound a trickling request. Active
+        shutdown closes both directions regardless of incoming client progress.
+        The host must call this outside the HTTP handler workers.
+        """
         with self._lock:
             self._stopped = True
             self._launch_token = self._viewer_token = None
+            requests = tuple(self._http_sockets)
+            workers = tuple(self._http_threads)
         super().server_close()
+        for request in requests:
+            try:
+                request.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            request.close()
+        for worker in workers:
+            worker.join()
 
     def handle_error(
         self, request: socket.socket, client_address: tuple[str, int]
@@ -337,7 +402,11 @@ class ViewerHandler(Handler):
             is None
         ):
             raise _denied()
-        cookie = self.server.redeem(body["launch_capability"], self._cookie())
+        # Cookies are not port-scoped. A well-formed prior viewer cookie is
+        # inert here: the fresh one-use launch is the sole new grant authority.
+        # Still reject malformed/duplicate cookie framing before consuming it.
+        self._cookie()
+        cookie = self.server.redeem(body["launch_capability"])
         self._json(
             200,
             {"viewer": VERSION, "redeemed": True},

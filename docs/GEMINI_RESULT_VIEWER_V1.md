@@ -30,6 +30,13 @@ launch, existing-key setup or Google call during development.
 The bound server starts serving before the injected opener is called, so a
 synchronous opener may immediately fetch the page. Shutdown stops and joins the
 server worker and all request handlers before releasing Service ownership.
+Thread construction/start is inside the cleanup region; a failed start closes
+its bound socket without joining an unstarted thread. Viewer-only accepted
+sockets and handler threads are registered atomically against shutdown. Close
+revokes access, actively shuts down both socket directions and joins actual
+handler exits. The inherited five-second socket timeout is only an idle timeout;
+it is not claimed to bound a trickled request's total duration. Active shutdown,
+not client inactivity, prevents a trickling client from delaying host exit.
 The original Service/store/owner/runtime stays alive from that one analyze through
 viewer shutdown. No runtime is reconstructed after CLI closure: the approval is
 bound to its pre-execution revision. Opener failure, construction failure,
@@ -56,8 +63,13 @@ The browser sends only the ephemeral launch capability in a bounded JSON POST to
 `/gemini-viewer/api/redeem`. Exact Host, Origin and browser-supplied
 Sec-Fetch-Site=same-origin are mandatory. Content type, single bounded
 Content-Length, no Transfer-Encoding, exact JSON fields, duplicate keys and
-cookies are checked before an atomic consume. A race has one winner; duplicate,
-expired, incorrect or interrupted redemption never retries or renews access.
+cookie framing is checked before an atomic consume. A well-formed old viewer
+cookie from another port/lifetime does not authenticate a read and cannot block
+a fresh valid launch grant: redemption replaces only the viewer-specific cookie.
+The fresh one-use launch capability is the sole new-grant authority. Malformed or
+duplicate cookies remain rejected before consumption. A race has one winner;
+duplicate, expired, incorrect or interrupted redemption never retries or renews
+access. Without a fresh grant, old/wrong/expired cookies still cannot read data.
 
 Redemption mints an independent random **viewer-only** capability, not the Service
 owner. Cookie: `cr_viewer`, HttpOnly, SameSite=Strict,
@@ -112,6 +124,9 @@ Run backend discovery, `node --test ui/viewer.test.mjs`, and
 Tests use synthetic host records/credentials and fabricated transport only. The
 loopback suite exercises redemption races, malformed requests, denial before
 Service/owner creation, privacy projection, expiry and unchanged single dispatch.
+Lifecycle regressions include failed serving/handler thread starts, actively
+trickled bodies during shutdown, actual worker joins and standard CookieJar
+continuity across closed/new loopback ports.
 The Node/HTTP check consumes the actual server envelope and renders a fake DOM;
 it is not native browser evidence. No real key, Google/OpenAI call, billing/quota,
 model quality, PayPal, hosted Actions, deployment or contest claim is established.

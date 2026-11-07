@@ -495,9 +495,10 @@ def view(
                 # Never retain/log exception text from a private host lifetime.
                 failures.append(True)
 
-        serving = threading.Thread(target=serve)
-        serving.start()
+        serving = None
         try:
+            serving = threading.Thread(target=serve)
+            serving.start()
             server.launch(opener)
             while serving.is_alive():
                 serving.join(0.1)
@@ -506,9 +507,13 @@ def view(
         except KeyboardInterrupt:
             pass
         finally:
-            server.shutdown()
-            serving.join()
-            server.server_close()
+            try:
+                # A failed Thread constructor/start owns no joinable worker.
+                if serving is not None and serving.ident is not None:
+                    server.shutdown()
+                    serving.join()
+            finally:
+                server.server_close()
 
 
 def main(argv=None):

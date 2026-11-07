@@ -3,12 +3,16 @@
 import contextlib
 import copy
 import http.client
+import http.cookiejar
 import io
 import json
 import socket
 import tempfile
 import threading
+import time
 import unittest
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -212,7 +216,7 @@ class ViewerTests(unittest.TestCase):
                 )
         self.assertEqual(self.wire["calls"], 1)
 
-    def test_redemption_headers_shape_wrong_cookie_and_single_use(self):
+    def test_redemption_headers_shape_cookie_framing_and_single_use(self):
         body = {"launch_capability": self.capability}
         cases = [
             (body, {"Origin": "http://evil.invalid"}, None),
@@ -221,7 +225,6 @@ class ViewerTests(unittest.TestCase):
             (body, {"Sec-Fetch-Site": "none"}, None),
             ({**body, "owner": self.owner}, {}, None),
             ({"launch_capability": "x" * 43}, {}, None),
-            (body, {}, "cr_viewer=" + "x" * 43),
             (
                 '{"launch_capability":"'
                 + self.capability
@@ -271,7 +274,10 @@ class ViewerTests(unittest.TestCase):
         def attempt(_):
             barrier.wait(5)
             return self.request(
-                "POST", API + "/redeem", {"launch_capability": self.capability}
+                "POST",
+                API + "/redeem",
+                {"launch_capability": self.capability},
+                cookie="cr_viewer=" + "x" * 43,
             )
 
         with ThreadPoolExecutor(max_workers=8) as pool:
@@ -485,6 +491,236 @@ class ViewerTests(unittest.TestCase):
             self.assertIsNone(server._launch_token)
         finally:
             server.server_close()
+
+    def test_bound_server_thread_start_failure_closes_socket_and_service(self):
+        import test_gemini_runner as runner_fixtures
+
+        runner = runner_fixtures.runner
+        created = []
+
+        @contextlib.contextmanager
+        def opened(*_args):
+            try:
+                yield (
+                    self.service,
+                    self.owner,
+                    {"catalog": self.product, "conditions": CHOICES},
+                )
+            finally:
+                self.service.close()
+
+        def construct(*args):
+            server = GeminiResultViewer(*args)
+            created.append(server)
+            return server
+
+        with (
+            patch.object(runner, "_approved_service", opened),
+            patch.object(runner, "_analyze") as analyze,
+            patch(
+                "cartreadback_app.gemini_viewer.GeminiResultViewer",
+                side_effect=construct,
+            ),
+            patch.object(
+                threading.Thread,
+                "start",
+                side_effect=RuntimeError("synthetic start failure"),
+            ),
+        ):
+            with self.assertRaises(RuntimeError):
+                runner.view(
+                    self.store.path,
+                    "unused-synthetic-owner",
+                    {},
+                    3,
+                    lambda _: self.fail("No opener"),
+                )
+        self.assertTrue(created[0]._stopped)
+        self.assertEqual(created[0].socket.fileno(), -1)
+        self.assertFalse(created[0]._http_threads)
+        self.assertTrue(self.service._closed)
+        analyze.assert_called_once()
+        self.assertEqual(self.wire["calls"], 1)
+
+    def test_trickled_body_is_actively_closed_and_worker_joined_on_shutdown(
+        self,
+    ):
+        client = socket.create_connection(
+            ("127.0.0.1", self.server.server_port), timeout=3
+        )
+        client.sendall(
+            (
+                "POST "
+                + API
+                + "/redeem HTTP/1.1\r\nHost: "
+                + self.server.allowed_host
+                + "\r\nOrigin: "
+                + self.server.origin
+                + "\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"
+            ).encode()
+        )
+        stop = threading.Event()
+        attempted = threading.Event()
+
+        def trickle():
+            while not stop.wait(0.1):
+                try:
+                    client.sendall(b" ")
+                    attempted.set()
+                except OSError:
+                    break
+
+        sender = threading.Thread(target=trickle)
+        sender.start()
+        closed = threading.Event()
+        errors = []
+
+        def close():
+            try:
+                self.server.server_close()
+            except BaseException:
+                errors.append(True)
+            finally:
+                closed.set()
+
+        try:
+            self.assertTrue(attempted.wait(2))
+            with self.server._lock:
+                workers = tuple(self.server._http_threads)
+                self.assertTrue(self.server._http_sockets)
+            self.server.shutdown()
+            self.thread.join(2)
+            closer = threading.Thread(target=close)
+            started = time.monotonic()
+            closer.start()
+            self.assertTrue(
+                closed.wait(2), "Active client progress must not delay shutdown"
+            )
+            closer.join(2)
+            self.assertFalse(closer.is_alive())
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertFalse(errors)
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            self.assertFalse(self.server._http_sockets)
+            self.assertEqual(self.wire["calls"], 1)
+        finally:
+            stop.set()
+            client.close()
+            sender.join(2)
+
+    def test_cookiejar_prior_port_cookie_is_replaced_only_by_fresh_launch(self):
+        jar = http.cookiejar.CookieJar()
+        browser = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(jar),
+            urllib.request.ProxyHandler({}),
+        )
+
+        def request(server, path, capability=None):
+            body = (
+                canonical({"launch_capability": capability}).encode()
+                if capability
+                else None
+            )
+            headers = {"Sec-Fetch-Site": "same-origin"}
+            if body:
+                headers |= {
+                    "Content-Type": "application/json",
+                    "Origin": server.origin,
+                }
+            req = urllib.request.Request(
+                server.origin + API + path, data=body, headers=headers
+            )
+            try:
+                with browser.open(req, timeout=3) as response:
+                    return response.status, response.read()
+            except urllib.error.HTTPError as error:
+                return error.code, error.read()
+
+        self.assertEqual(
+            request(self.server, "/redeem", self.capability)[0], 200
+        )
+        old_cookie = next(iter(jar)).value
+        self.stop()
+        other = GeminiResultViewer(
+            ("127.0.0.1", 0),
+            self.service,
+            self.owner,
+            self.product,
+            CHOICES,
+            UI,
+        )
+        serving = threading.Thread(target=other.serve_forever)
+        serving.start()
+        try:
+            launches = []
+            other.launch(launches.append)
+            new_capability = urlsplit(launches[0]).fragment.removeprefix(
+                "launch="
+            )
+            req = urllib.request.Request(other.origin + API + "/redeem")
+            jar.add_cookie_header(req)
+            self.assertEqual(
+                req.get_header("Cookie"), "cr_viewer=" + old_cookie
+            )
+            self.assertEqual(request(other, "/bootstrap")[0], 403)
+            self.assertEqual(request(other, "/redeem", new_capability)[0], 200)
+            self.assertNotEqual(next(iter(jar)).value, old_cookie)
+            self.assertEqual(request(other, "/bootstrap")[0], 200)
+            self.assertEqual(request(other, "/redeem", new_capability)[0], 403)
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", other.server_port, timeout=3
+            )
+            try:
+                connection.request(
+                    "GET",
+                    API + "/bootstrap",
+                    headers={
+                        "Sec-Fetch-Site": "same-origin",
+                        "Cookie": "cr_viewer=" + old_cookie,
+                    },
+                )
+                response = connection.getresponse()
+                self.assertEqual(response.status, 403)
+                response.read()
+            finally:
+                connection.close()
+            self.assertEqual(self.wire["calls"], 1)
+            self.assertEqual(self.handle.calls, 1)
+        finally:
+            other.shutdown()
+            serving.join(2)
+            other.server_close()
+
+    def test_accepted_http_worker_start_failure_closes_socket_without_join(
+        self,
+    ):
+        client = socket.create_connection(
+            ("127.0.0.1", self.server.server_port), timeout=3
+        )
+        try:
+            with patch.object(
+                threading.Thread,
+                "start",
+                side_effect=RuntimeError("synthetic handler-start failure"),
+            ):
+                client.sendall(
+                    (
+                        "GET /viewer HTTP/1.1\r\nHost: "
+                        + self.server.allowed_host
+                        + "\r\n\r\n"
+                    ).encode()
+                )
+                try:
+                    result = client.recv(1)
+                except ConnectionResetError:
+                    result = b""
+                self.assertEqual(result, b"")
+            with self.server._lock:
+                self.assertFalse(self.server._http_sockets)
+                self.assertFalse(self.server._http_threads)
+            self.assertEqual(self.wire["calls"], 1)
+        finally:
+            client.close()
 
     def test_changed_scope_and_nonloopback_rejected(self):
         with self.assertRaises(AppError):
