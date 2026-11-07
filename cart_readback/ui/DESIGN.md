@@ -18,7 +18,7 @@ Inspected 2026-11-02 UTC unless noted. These are source-informed choices, not pr
 | [W3C supported-choice pattern](https://www.w3.org/WAI/WCAG2/supplemental/patterns/o7p03-supported-choice/) | Explain changed conditions, exclusions, and consequences beside a choice. It is supplemental guidance, not a conformance standard. | Per-condition match/conflict/unknown words, exact quotes, separate unchecked acknowledgements, and a clear warning when reviewed information changes. No disability information is collected. |
 | [Baymard included-accessory research](https://baymard.com/research-articles/included-accessories-image) | Its observed participants sometimes inferred included items from imagery and struggled to find inclusion information. | A strong included-cable column precedes the readback. “Not stated” is distinct from explicit exclusion. A pictured cable is never treated as included. This research also supports the non-AI alternative; its historical statistics are not presented as ours. |
 | [GOV.UK check answers](https://design-system.service.gov.uk/patterns/check-answers/) | Review the actual submitted information before a consequential action. | An exact SKU/quantity/USD amount/conditions/source-version summary precedes confirmation. Editing before order creation revokes consent. Order approval and final capture intent remain separate. No GOV.UK styling or component code is reused. |
-| Prior non-generic design research (local archival SessionClose design notes; not imported) | Practitioner critiques favor specific content hierarchy and meaningful states over interchangeable landing-page decoration. | A continuous editorial workspace, small numbered sections, actual table rows and original descriptions. No hero pitch, gradient, card grid, testimonials, decorative AI symbol, invented metric, or stock-photo shopping story. Those critiques are opinion, not controlled evidence. |
+| [Non-generic design research and application map](../../docs/DESIGN_RESEARCH.md) (issue #56 fresh source check; older local notes were not imported) | Practitioner critiques favor specific content hierarchy and meaningful states over interchangeable landing-page decoration. | A continuous editorial workspace, small numbered sections, actual table rows and original descriptions. No hero pitch, gradient, card grid, testimonials, decorative AI symbol, invented metric, or stock-photo shopping story. Those critiques are opinion, not controlled evidence. |
 | Buyer problem research (local archival brainstorm-buyers-10.md), CartReadback section; not imported | A wrong key layout is a plausible concrete mistake, not proven demand for this solution. | UK QWERTY, German QWERTZ, and US QWERTY are distinct typed conditions. ANSI/ISO geometry is not silently converted to a language/keycap layout. |
 
 ## D03 — Visual contract
@@ -64,3 +64,17 @@ Run `python cart_readback/ui/check.py` from the project root (or any directory w
 Contract: `../API_CONTRACT.md` C01–C08, including codepoint spans, per-condition exact acknowledgement sets, server revision, UUID operation keys, stale source and existing-order freeze. The pre-existing implementation was local-only before this import. Issue #5 and its numbered branch cover the import and subsequent review changes, not retroactive review of original work. The dependent draft PR targets server branch `feat/3-fixture-server`, exact base `d2781cf7f603d83b552c9cd84371544357589bdd` (draft PR #4), not merged main. Actual head and review evidence are verified separately. No deployment, model inference, PayPal sandbox call, credential access or payment is established.
 
 Before any externally usable build: inspect actual desktop/320px rendering, keyboard-only order, screen-reader labels/errors/source links, text zoom and long content; independently rerun final revision; then separately authorize/configure genuine model and sandbox adapters. A model/sandbox flag is not implemented functionality. Do not remove fixture labels merely to make a demonstration look complete.
+
+
+## D07 — Separate Gemini viewer visual binding (issue #56)
+
+The ordinary buyer UI above already implemented this design. The separate
+`viewer.html` originally shipped without a stylesheet. It now uses the same
+paper/ink/forest palette, editorial title/source hierarchy and adjacent
+source/results layout with a one-column narrow view. It remains read-only.
+
+One embedded style block is permitted only by its exact server-computed CSP
+SHA-256. There is no external stylesheet or pre-fragment-removal asset request;
+the first bootstrap script is unchanged. The research/application trail and
+blocked rendered-browser attempt are in [the current audit](../../docs/DESIGN_RESEARCH.md).
+Static/HTTP/fake-DOM checks do not establish visual or accessibility quality.

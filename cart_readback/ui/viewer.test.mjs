@@ -137,3 +137,32 @@ test('approved original source and amount are not labelled current catalog facts
   assert.match(text, /Approved original source/); assert.match(text, /Original approved SKU, price and source/);
   assert.doesNotMatch(text, /Current original source/);
 });
+
+
+test('viewer design stays embedded and uses the existing buying-desk tokens', () => {
+  const styles = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)];
+  assert.equal(styles.length, 1);
+  const css = styles[0][1];
+  for (const token of ['--paper:#f8f7f2', '--ink:#242a27', '--green:#274d3a']) assert.ok(css.includes(token));
+  assert.match(css, /minmax\(0,1fr\)/);
+  assert.match(css, /@media\(max-width:800px\)/);
+  assert.match(css, /@media\(max-width:480px\)/);
+  assert.match(css, /overflow-wrap:anywhere/);
+  assert.doesNotMatch(css, /url\s*\(|@import/i);
+  assert.doesNotMatch(html, /<link\b|\ssrc=|<iframe\b|<form\b/i);
+});
+test('source and retained results are neighboring text-only regions, including no result', () => {
+  for (const noCheckout of [false, true]) {
+    const document = dom(); const data = fixture(); if (noCheckout) data.checkout = null;
+    renderViewer(data, document);
+    const content = document.getElementById('viewer-content');
+    const columns = content.children.find(n => n.className === 'review-columns');
+    assert.deepEqual(columns.children.map(n => n.className), ['source-column', 'readback-column']);
+    assert.equal(columns.children[0].children.find(n => n.className === 'source-text').textContent, source.text);
+    assert.ok(content.children[0].textContent === '');
+    const all = flatten(content);
+    assert.equal(all.some(n => ['button', 'input', 'select', 'form', 'a', 'link', 'style', 'script'].includes(n.tag)), false);
+    if (noCheckout) assert.match(all.map(n => n.textContent).join(' '), /No retained review/);
+    else assert.ok(all.some(n => n.className === 'outcome match'));
+  }
+});

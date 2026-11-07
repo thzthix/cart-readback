@@ -56,7 +56,9 @@ The sole CSP-hashed first inline script captures it in a closure and immediately
 calls history.replaceState before importing any module or fetching any asset.
 Malformed paths, query/fragment syntax or history failure cannot trigger a fetch.
 The HTML response uses no-referrer, no-store, same-origin resource policy and a
-restricted CSP without unsafe-inline. There are no remote assets, storage APIs,
+restricted CSP without unsafe-inline. Issue #56 adds one embedded design style
+whose exact SHA-256 is allowed by style-src; it contains no imports or URL assets.
+No stylesheet request can race ahead of launch-fragment removal. There are no remote assets, storage APIs,
 service workers, preloads or analytics.
 
 The browser sends only the ephemeral launch capability in a bounded JSON POST to
@@ -115,7 +117,11 @@ quota, account eligibility, actual zero charge or correctness result. A durable
 claim is not proof that a POST reached Google. Fabricated usage is never a provider
 observation. Known accounting is not semantic truth or an invoice; UNKNOWN stays
 UNKNOWN. Payments remain fixture-only and PayPal remains unconnected. The viewer
-uses the identical-source baseline and quotations, with plain-text rendering.
+uses the identical-source baseline and quotations, with text-only DOM insertion.
+Its paper/ink/forest styling and responsive source/result columns follow
+[the design contract](../cart_readback/ui/DESIGN.md) and
+[research/application map](DESIGN_RESEARCH.md); these are not rendered-browser
+or usability evidence.
 
 ## Offline checks and limits
 
