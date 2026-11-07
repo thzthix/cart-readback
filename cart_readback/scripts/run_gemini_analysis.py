@@ -14,6 +14,8 @@ import stat
 import sys
 import threading
 import time
+from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import asdict, fields
 from pathlib import Path
 
@@ -402,8 +404,9 @@ def _existing_store(db, sid, request):
     return store
 
 
-def run(db, owner_file, record, credential_fd):
-    """Execute exactly one reviewed Service analysis, never confirm or pay."""
+@contextmanager
+def _approved_service(db, owner_file, record, credential_fd):
+    """Keep exact validation, construction and synchronous cleanup shared."""
     request = approved_request(record)
     sid = _owner(owner_file)
     store = _existing_store(db, sid, request)
@@ -416,18 +419,7 @@ def run(db, owner_file, record, credential_fd):
         gemini_analysis=GeminiAnalysisRuntime(installed),
     )
     try:
-        return service.mutate(
-            sid,
-            "analyze",
-            {
-                "expected_revision": request["expected_revision"],
-                "sku_id": request["catalog"]["sku_id"],
-                "conditions": [
-                    {"kind": item["kind"], "value": item["value"]}
-                    for item in request["conditions"]
-                ],
-            },
-        )
+        yield service, sid, request
     finally:
         # A watchdog result is not cancellation. Keep this process/lease alive
         # until the synchronous exchange and observation worker really exit.
@@ -439,6 +431,89 @@ def run(db, owner_file, record, credential_fd):
                 if error.code != "INVALID_STATE":
                     raise
                 time.sleep(0.05)
+
+
+def _analyze(service, sid, request):
+    return service.mutate(
+        sid,
+        "analyze",
+        {
+            "expected_revision": request["expected_revision"],
+            "sku_id": request["catalog"]["sku_id"],
+            "conditions": [
+                {"kind": item["kind"], "value": item["value"]}
+                for item in request["conditions"]
+            ],
+        },
+    )
+
+
+def run(db, owner_file, record, credential_fd):
+    """Execute exactly one reviewed Service analysis, never confirm or pay."""
+    with _approved_service(db, owner_file, record, credential_fd) as opened:
+        service, sid, request = opened
+        return _analyze(service, sid, request)
+
+
+def view(
+    db: str | Path,
+    owner_file: str | Path,
+    record: dict,
+    credential_fd: int,
+    opener: Callable[[str], object],
+    *,
+    port: int = 0,
+) -> None:
+    """Analyze once, then hand a private launch URL to a trusted local opener.
+
+    The caller must separately authorize the provider action and local browser
+    opening. The opener must not log or persist its argument. No URL containing
+    the launch capability is returned or printed. This is not a credential or
+    browser installation API. The exact Service remains owned through shutdown.
+    """
+    from cartreadback_app.gemini_viewer import GeminiResultViewer
+
+    if not callable(opener) or type(port) is not int or not 0 <= port <= 65535:
+        raise _blocked()
+    with _approved_service(db, owner_file, record, credential_fd) as opened:
+        service, sid, request = opened
+        _analyze(service, sid, request)
+        server = GeminiResultViewer(
+            ("127.0.0.1", port),
+            service,
+            sid,
+            request["catalog"],
+            request["conditions"],
+            Path(__file__).resolve().parents[1] / "ui",
+        )
+        failures = []
+
+        def serve():
+            try:
+                server.serve_forever()
+            except BaseException:
+                # Never retain/log exception text from a private host lifetime.
+                failures.append(True)
+
+        serving = None
+        try:
+            serving = threading.Thread(target=serve)
+            serving.start()
+            server.launch(opener)
+            while serving.is_alive():
+                serving.join(0.1)
+            if failures:
+                raise _blocked()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            try:
+                # A failed Thread constructor/start owns no joinable worker.
+                if serving is not None and serving.ident is not None:
+                    server.shutdown()
+                    serving.join()
+            finally:
+                server.server_close()
 
 
 def main(argv=None):
