@@ -22,6 +22,7 @@ export function renderViewer(data, document) {
   retained.append(node('h2', 'Retained review · no action authority'));
   if (c) {
     const state = node('p', `State: ${c.state}. ${c.stale ? 'STALE historical review; not current consent or a usable result.' : 'Read-only review; confirmation and checkout are unavailable.'}`); state.className = 'notice'; retained.append(state);
+    retained.append(node('p', `Approved conditions: ${c.conditions.map(conditionLabel).join(' · ')}`));
     retained.append(node('p', 'Exact quotes establish text identity, not semantic correctness or buyer benefit.'));
     if (c.stale) {
       retained.append(node('h3', 'Historical source for retained quotations'));

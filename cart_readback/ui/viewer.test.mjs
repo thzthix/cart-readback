@@ -166,3 +166,13 @@ test('source and retained results are neighboring text-only regions, including n
     else assert.ok(all.some(n => n.className === 'outcome match'));
   }
 });
+
+
+test('blocked UNKNOWN keeps all approved conditions visible without accepted results', () => {
+  const data = fixture(); data.checkout.state = 'ANALYSIS_BLOCKED'; data.checkout.snapshot_hash = null; data.checkout.results = []; data.checkout.analysis.accounting_state = 'unknown';
+  data.checkout.conditions.push({condition_id: 'c2', kind: 'included_cable', value: 'any cable'});
+  const document = dom(); renderViewer(data, document);
+  const summary = flatten(document.getElementById('viewer-content')).find(n => n.textContent.startsWith('Approved conditions:'));
+  assert.ok(summary); assert.match(summary.textContent, /UK QWERTY/); assert.match(summary.textContent, /any cable/);
+  assert.match(flatten(document.getElementById('viewer-content')).map(n => n.textContent).join(' '), /No accepted proposal/);
+});
