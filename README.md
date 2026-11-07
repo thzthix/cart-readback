@@ -168,15 +168,19 @@ sessionStorage; storage failure blocks operation-key preparation. From
 python ui/check.py
 python ui/context_http_check.py
 node --test review/test_independent_ui.mjs
-python -m compileall -q cartreadback_app tests scripts review ui/check.py
+node --test ui/viewer.test.mjs
+python ui/viewer_http_check.py
+python -m compileall -q cartreadback_app tests scripts review ui
 # With reviewed Ruff 0.14.3 available:
-ruff check cartreadback_app tests scripts review ui/check.py
-ruff format --check cartreadback_app tests scripts review ui/check.py
+ruff check cartreadback_app tests scripts review ui
+ruff format --check cartreadback_app tests scripts review ui
 ```
 
 `python ui/check.py` starts an ephemeral temporary SQLite-backed loopback server
-and runs actual HTTP/client tests. Running `http.test.mjs` alone without its
-origin skips them and is not a pass. Static/token-contrast, pure-core, fake-DOM
+and runs actual HTTP/client tests. It does not select the separate context or
+viewer checks, so all five commands above are required. The context and viewer
+HTTP runners own their loopback servers and fabricate provider exchanges. Running
+HTTP test files alone without their runner inputs can skip them and is not a pass. Static/token-contrast, pure-core, fake-DOM
 and actual HTTP checks do not establish native browser/rendering/accessibility.
 No bundler, package manager, remote fonts, images or analytics is used.
 
@@ -236,9 +240,19 @@ authorization. Private-repository standard runners can incur charges after the
 account's shared included compute is exhausted. No run, paid upgrade or spending
 change is authorized by this workflow. See [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
 
-For local reproduction, use Python 3.11+ and Node 22+. From the repository root,
-install the exact reviewed development tools in a disposable virtual environment
-and set the workflow's environment before copying its `run` commands:
+For local reproduction, use Python 3.11+ and Node 22+. The configured minimum
+lines are not evidence of an actual Python 3.11 / Node 22 pass. The current local
+verification used Python 3.12.14 and Node 24.22.1; hosted checkout/setup and package
+installation were not run. It used already available pinned development tools,
+checked their dependency metadata and ran `pip check`, with nonloopback Python
+socket connections denied. No native-browser, provider or hosted Actions pass is
+claimed. Do not install missing runtimes or dispatch Actions merely to reproduce
+that local evidence.
+
+For a separately authorized development environment, the setup commands are below.
+Installation needs package-index access and is not an offline application check.
+If the exact reviewed tools are already available, verify their versions and
+`python -m pip check` rather than reinstalling them. From the repository root:
 
 ```sh
 python -m venv /tmp/cartreadback-dev
@@ -249,7 +263,11 @@ export PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 export NODE_OPTIONS='--test-reporter=tap'
 export RUNNER_TEMP="$(mktemp -d /tmp/cartreadback-checks.XXXXXX)"
 cd cart_readback
-# Run the workflow's run commands here, or use the individual checks above.
+# Copy each application `run` block from application-checks.yml into its own
+# temporary .sh file, starting with "Compile and check Python style" and ending
+# with "Ensure checks left tracked source unchanged". Run them in order:
+# bash --noprofile --norc -e -o pipefail /path/to/block.sh
+# Keep the UI block's check_node_log function, all five commands and all guards.
 ```
 
 The temporary directory holds only local check logs and a synthetic preflight
@@ -265,11 +283,18 @@ used. One job has a ten-minute timeout and a newer run cancels an older run for
 the same ref. Python/Node patch releases and the hosted runner image can change;
 the run records actual versions and checkout SHA, not an immutable OS image.
 
-UI checks own a real ephemeral loopback server. The workflow explicitly selects
-Node's TAP reporter, rejects skipped or TODO Node tests and requires both UI
-groups plus the independent group to report zero skipped. Prompt preflight
-writes only to a temporary file, compares the
-frozen receipt and checks all existing hashes. It never regenerates gold, corpus
+The local recipe executes compile/style, backend/independent Python, four smoke,
+UI, corpus/scorer, prompt-preflight/hash and tracked-source-diff blocks. Compile
+and Ruff include the entire `ui` directory, not only `ui/check.py`.
+
+UI checks own real ephemeral loopback servers. The workflow explicitly selects
+Node's TAP reporter and checks five separate logs: ordinary UI (2 groups),
+context HTTP (4), independent UI (1), viewer Node (1) and viewer HTTP (5).
+Every group must report a positive test count, `# skipped 0` and `# todo 0`.
+Missing/extra summaries, nonzero or malformed skip/TODO summaries, a failed check
+command or a failed log pipeline fail the step. Do not run only the test commands
+or combine logs and omit their individual guards. Prompt preflight writes only
+to a temporary file, compares the frozen receipt and checks all existing hashes. It never regenerates gold, corpus
 or prompt bytes. A final tracked-source diff detects mutations. These checks
 remain offline fixture evidence, not native browser, model or PayPal validation.
 

@@ -49,9 +49,9 @@ jobs:
           python -m pip check
       - name: Compile and check Python style
         run: |
-          python -m compileall -q cartreadback_app tests scripts review ui/check.py eval prompts
-          ruff check cartreadback_app tests scripts review ui/check.py eval prompts
-          ruff format --check cartreadback_app tests scripts review ui/check.py eval prompts
+          python -m compileall -q cartreadback_app tests scripts review ui eval prompts
+          ruff check cartreadback_app tests scripts review ui eval prompts
+          ruff format --check cartreadback_app tests scripts review ui eval prompts
       - name: Run backend and independent regression suites
         run: |
           python -m unittest discover -s tests -v
@@ -64,12 +64,27 @@ jobs:
           python scripts/smoke_http.py --fault create_timeout_after_success
       - name: Run UI checks with real loopback HTTP and no skips
         run: |
+          set -euo pipefail
+          # Each log must contain every expected nonempty TAP summary group.
+          # Reject missing/extra groups and any nonzero or malformed skip/TODO.
+          check_node_log() {
+            awk -v expected="$2" '
+              /^# tests / { tests++; if ($0 !~ /^# tests [1-9][0-9]*$/) invalid=1 }
+              /^# skipped / { skipped++; if ($0 != "# skipped 0") invalid=1 }
+              /^# todo / { todo++; if ($0 != "# todo 0") invalid=1 }
+              END { exit (invalid || tests != expected || skipped != expected || todo != expected) }
+            ' "$1"
+          }
           python ui/check.py | tee "$RUNNER_TEMP/ui-check.log"
+          check_node_log "$RUNNER_TEMP/ui-check.log" 2
+          python ui/context_http_check.py | tee "$RUNNER_TEMP/context-http.log"
+          check_node_log "$RUNNER_TEMP/context-http.log" 4
           node --test review/test_independent_ui.mjs | tee "$RUNNER_TEMP/independent-ui.log"
-          # check.py owns two Node groups: core/DOM and real HTTP/client.
-          test "$(grep -c '^# skipped 0$' "$RUNNER_TEMP/ui-check.log")" -eq 2
-          test "$(grep -c '^# skipped 0$' "$RUNNER_TEMP/independent-ui.log")" -eq 1
-          ! grep -Eq '^# (skipped|todo) [1-9][0-9]*$' "$RUNNER_TEMP/ui-check.log" "$RUNNER_TEMP/independent-ui.log"
+          check_node_log "$RUNNER_TEMP/independent-ui.log" 1
+          node --test ui/viewer.test.mjs | tee "$RUNNER_TEMP/viewer-node.log"
+          check_node_log "$RUNNER_TEMP/viewer-node.log" 1
+          python ui/viewer_http_check.py | tee "$RUNNER_TEMP/viewer-http.log"
+          check_node_log "$RUNNER_TEMP/viewer-http.log" 5
       - name: Validate corpus and scorer regressions
         run: |
           python eval/score.py validate
