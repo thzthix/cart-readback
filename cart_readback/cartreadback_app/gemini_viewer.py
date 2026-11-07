@@ -109,11 +109,17 @@ class GeminiResultViewer(ThreadingHTTPServer):
         self._stopped = False
         self._http_sockets: set[socket.socket] = set()
         self._http_threads: set[threading.Thread] = set()
-        # Hash only the shipped first script. There is no unsafe-inline policy.
+        # Permit only the shipped inline bootstrap and style, never unsafe-inline.
         html = (self.ui_root / "viewer.html").read_text(encoding="utf-8")
         scripts = re.findall(r"<script>(.*?)</script>", html, re.DOTALL)
         if len(scripts) != 1:
             raise _denied()
+        styles = re.findall(r"<style>(.*?)</style>", html, re.DOTALL)
+        if len(styles) != 1:
+            raise _denied()
+        self._style_hash = base64.b64encode(
+            hashlib.sha256(styles[0].encode()).digest()
+        ).decode("ascii")
         self._script_hash = base64.b64encode(
             hashlib.sha256(scripts[0].encode()).digest()
         ).decode("ascii")
@@ -293,6 +299,7 @@ class ViewerHandler(Handler):
             "Content-Security-Policy": (
                 "default-src 'none'; "
                 f"script-src 'self' 'sha256-{self.server._script_hash}'; "
+                f"style-src 'sha256-{self.server._style_hash}'; "
                 "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
                 "form-action 'none'; object-src 'none'"
             ),

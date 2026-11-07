@@ -18,6 +18,13 @@ original scope, hashes, real review findings and integration changes. Read the
 preparation-era artifacts. Exact-head checks and actual merge state are recorded
 in [evaluation/integration PR #8](https://github.com/thzthix/cart-readback/pull/8).
 
+## Design and research
+
+Start with [DESIGN.md](DESIGN.md) for the active contract,
+[getdesign.md/UX research and implementation map](docs/DESIGN_RESEARCH.md), and
+the separate Gemini viewer treatment. Research-informed code is not a rendered
+visual, accessibility or usability pass; current browser limits are explicit there.
+
 ## Why this exists
 
 ISO keyboard shape does not establish a UK language layout. A pictured or

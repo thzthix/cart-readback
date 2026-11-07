@@ -1,11 +1,14 @@
 """Actual loopback viewer adversaries using fabricated provider and credentials."""
 
+import base64
 import contextlib
 import copy
+import hashlib
 import http.client
 import http.cookiejar
 import io
 import json
+import re
 import socket
 import tempfile
 import threading
@@ -337,6 +340,17 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("'sha256-", headers["Content-Security-Policy"])
         self.assertNotIn("unsafe-inline", headers["Content-Security-Policy"])
+        styles = re.findall(r"<style>(.*?)</style>", raw.decode(), re.DOTALL)
+        self.assertEqual(len(styles), 1)
+        style_hash = base64.b64encode(
+            hashlib.sha256(styles[0].encode()).digest()
+        ).decode("ascii")
+        self.assertIn(
+            f"style-src 'sha256-{style_hash}';",
+            headers["Content-Security-Policy"],
+        )
+        self.assertNotIn("style-src 'self'", headers["Content-Security-Policy"])
+        self.assertNotRegex(styles[0], r"(?i)url\s*\(|@import")
         self.assertNotIn(self.capability, raw.decode())
         with self.assertRaises(AppError):
             self.server.launch(lambda _: None)
