@@ -4,9 +4,10 @@ The owner selected an existing Gemini key. The OpenAI Responses request and
 runtime cannot accept that key: Gemini uses a different endpoint,
 authentication, request schema and response/usage envelope. This change adds a
 concrete Gemini client and HTTPS implementation, without claiming a successful
-provider call. No Service, HTTP or CLI path imports or selects these modules.
-The default app remains fixture-only. There is no key loader, installer or
-supported live runner.
+provider call. The [separate host-only Service bridge](GEMINI_SERVICE.md) now
+selects these modules through durable authorization and a two-stage runner.
+The default app/HTTP/UI remain fixture-only. No actual key setup or provider
+observation has been verified.
 
 ## Implemented contract
 
@@ -85,11 +86,11 @@ transport never replenishes external capacity.
    and any persistent access. Select a concrete synthetic catalog/data scope,
    owner, finite generation attempts, input/output limits and maximum spend.
    A billing-cap notification alone grants none of this authority.
-3. Add and separately review genuine Gemini Service/HTTP/UI composition with a
-   durable shared call/token/spend ledger, identity/freshness fences, timeout and
-   restart UNKNOWN behavior. Do not reuse OpenAI pricing or falsely label a
-   fabricated transport as provider evidence. Keep PayPal and inference authority
-   independent. No payment action is enabled by this client.
+3. Review the host-only [Gemini Service/runner](GEMINI_SERVICE.md) against its
+   exact revision. It adds a distinct durable call/token/spend ledger, freshness
+   guards and timeout/restart UNKNOWN behavior. HTTP/UI Gemini composition remains
+   outside that slice. Fabricated tests do not satisfy external approval or prove
+   provider behavior. PayPal and inference authority remain independent.
 4. With those gates satisfied, run a bounded provider acceptance test, retain
    sanitized actual observations and usage, then test source-backed semantics
    and buyer benefit against the same-source table. These stages have not run.
@@ -121,6 +122,7 @@ MINIMAL thinking without a zero-thinking guarantee. Sources also include:
 - https://ai.google.dev/gemini-api/docs/deprecations
 - https://ai.google.dev/gemini-api/docs/generate-content/thinking
 
-No live API/schema or current price was verified. No vendor SDK/dependency,
-frozen prompt, payment source, database migration, persistent credential or
-runtime default was changed.
+No live API/schema or current price was verified. This client adds no vendor SDK,
+changes no frozen prompt/payment source, and creates no persistent credential.
+The separate Service bridge adds Gemini ledger tables without changing runtime
+defaults.

@@ -302,11 +302,13 @@ class GeminiHTTPTransport:
             # deadline. Closing cannot prove that remote billing was cancelled.
             primary = sys.exc_info()[1]
             interruption = None
+            cleanup_fault = False
             for resource in (response, connection):
                 if resource is not None:
                     try:
                         resource.close()
                     except BaseException as error:
+                        cleanup_fault = True
                         if (
                             not isinstance(error, Exception)
                             and interruption is None
@@ -314,3 +316,5 @@ class GeminiHTTPTransport:
                             interruption = error
             if primary is None and interruption is not None:
                 raise interruption
+            if primary is None and cleanup_fault:
+                raise unavailable() from None

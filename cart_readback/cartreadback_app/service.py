@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -30,6 +30,16 @@ from cartreadback_app.count_preflight import (
     PREFLIGHT_VERSION,
     run_offline_count,
 )
+from cartreadback_app.gemini_capacity import (
+    GeminiFence,
+    GeminiReservation,
+    TransactionGeminiCapacityLedger,
+    gemini_ledger_from_document,
+    initialize_gemini_capacity,
+    recover_gemini_capacity,
+)
+from cartreadback_app.gemini_runtime import GeminiAnalysisRuntime
+from cartreadback_app.genuine_gemini import GenuineGeminiAdapter
 from cartreadback_app.genuine_responses import (
     GenuineExchange,
     GenuineResponsesAdapter,
@@ -72,6 +82,56 @@ NOTICE = "Synthetic catalog, model and payment fixtures. No money moves."
 BASE = {"expected_revision", "snapshot_hash"}
 
 
+@dataclass(frozen=True)
+class _CapacityStrategy:
+    """Closed set of host strategies sharing only the durable lifecycle."""
+
+    name: str
+    prefix: str
+    runtime_field: str
+    adapter_type: type
+    ledger_type: type
+    reservation_type: type
+    fence_type: type
+    restore: object
+
+    @property
+    def table(self):
+        """Return a constant-derived table name, never caller SQL."""
+        return f"{self.prefix}_capacity_operations"
+
+
+_CONTEXT = _CapacityStrategy(
+    "context-capacity-v1",
+    "context",
+    "context_analysis",
+    GenuineResponsesAdapter,
+    TransactionContextCapacityLedger,
+    ContextReservation,
+    ContextFence,
+    context_ledger_from_document,
+)
+_GEMINI = _CapacityStrategy(
+    "gemini-capacity-v1",
+    "gemini",
+    "gemini_analysis",
+    GenuineGeminiAdapter,
+    TransactionGeminiCapacityLedger,
+    GeminiReservation,
+    GeminiFence,
+    gemini_ledger_from_document,
+)
+
+
+def _capacity_strategy(value):
+    for strategy in (_CONTEXT, _GEMINI):
+        if type(value) is strategy.adapter_type or (
+            type(value) is str and value == strategy.name
+        ):
+            return strategy
+    raise blocked()
+
+
 class Service:
     """Authorize every transition independently of model or browser claims."""
 
@@ -84,6 +144,7 @@ class Service:
         analysis_policy: AnalysisPolicy | None = None,
         analysis_budget: OfflineAnalysisBudget | None = None,
         context_analysis: ContextAnalysisRuntime | None = None,
+        gemini_analysis: GeminiAnalysisRuntime | None = None,
     ):
         """Inject offline adapters; HTTP setup never loads credentials."""
         self.store = store
@@ -95,17 +156,30 @@ class Service:
         self.analysis_budget = analysis_budget
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.context_analysis = context_analysis
+        self.gemini_analysis = gemini_analysis
         self.inference = inference or FixtureInferenceAdapter()
         if context_analysis is not None:
             if (
                 type(context_analysis) is not ContextAnalysisRuntime
                 or inference is not None
                 or analysis_budget is not None
+                or gemini_analysis is not None
             ):
                 self.close()
                 raise blocked()
             self.inference = GenuineResponsesAdapter(
                 context_analysis, self._context_wall_now
+            )
+        if gemini_analysis is not None:
+            if (
+                type(gemini_analysis) is not GeminiAnalysisRuntime
+                or inference is not None
+                or analysis_budget is not None
+            ):
+                self.close()
+                raise blocked()
+            self.inference = GenuineGeminiAdapter(
+                gemini_analysis, self._context_wall_now
             )
         try:
             self.payments = payments or FixturePaymentAdapter()
@@ -123,7 +197,9 @@ class Service:
     def payments(self, adapter: PaymentAdapter) -> None:
         if (
             self.context_analysis is not None
-            or type(self.inference) is GenuineResponsesAdapter
+            or self.gemini_analysis is not None
+            or type(self.inference)
+            in (GenuineResponsesAdapter, GenuineGeminiAdapter)
         ) and type(adapter) is not FixturePaymentAdapter:
             raise blocked()
         if isinstance(adapter, FixturePaymentAdapter):
@@ -210,11 +286,20 @@ class Service:
         return session
 
     def _fresh(self, connection: sqlite3.Connection, checkout: dict) -> bool:
-        if (
-            type(self.inference) is GenuineResponsesAdapter
-            and self.context_analysis is not self.inference.runtime
+        if type(self.inference) in (
+            GenuineResponsesAdapter,
+            GenuineGeminiAdapter,
         ):
-            return False
+            strategy = _capacity_strategy(self.inference)
+            if (
+                getattr(self, strategy.runtime_field)
+                is not self.inference.runtime
+            ):
+                return False
+            if strategy is _GEMINI and not self.inference.runtime.available(
+                self._context_wall_now()
+            ):
+                return False
         return checkout["catalog_hash"] == digest(
             product_for(connection, checkout["sku_id"])
         ) and checkout["model"] == self._analysis_metadata(self.inference)
@@ -248,9 +333,9 @@ class Service:
                 }
             )
         )
-        if (
-            checkout["model"].get("execution_mode")
-            == "genuine-context-capacity"
+        if checkout["model"].get("execution_mode") in (
+            "genuine-context-capacity",
+            "genuine-gemini-capacity",
         ):
             keys = {
                 "provider",
@@ -268,7 +353,12 @@ class Service:
                 if key in keys
             }
             public["analysis"] = self._public_context_outcome(
-                connection, checkout["review_id"]
+                connection,
+                checkout["review_id"],
+                _GEMINI
+                if checkout["model"]["execution_mode"]
+                == "genuine-gemini-capacity"
+                else _CONTEXT,
             )
         if not self._fresh(connection, checkout):
             public["stale"] = True
@@ -288,7 +378,11 @@ class Service:
         this build are explicitly injected offline test seams, not genuine calls.
         Unknown adapters remain unsupported and are blocked by the buyer UI.
         """
-        if type(self.inference) is GenuineResponsesAdapter:
+        if type(self.inference) in (
+            GenuineResponsesAdapter,
+            GenuineGeminiAdapter,
+        ):
+            strategy = _capacity_strategy(self.inference)
             installed = self.inference.runtime.installed
             kind = (
                 (
@@ -301,12 +395,13 @@ class Service:
             )
             available = (
                 self.inference.runtime.available(self._context_wall_now())
-                and self.context_analysis is self.inference.runtime
+                and getattr(self, strategy.runtime_field)
+                is self.inference.runtime
                 and type(self.payments) is FixturePaymentAdapter
             )
             return {
                 "analysis": {
-                    "mode": "genuine-context-capacity",
+                    "mode": f"genuine-{strategy.prefix}-capacity",
                     "is_fixture": False,
                     "dispatch_available": available,
                     "execution_kind": kind,
@@ -333,7 +428,10 @@ class Service:
     def runtime_mode(self) -> str:
         """Retain fixture for its exact default, otherwise identify offline mode."""
         providers = self.provider_contract()
-        if providers["analysis"]["mode"] == "genuine-context-capacity":
+        if providers["analysis"]["mode"] in (
+            "genuine-context-capacity",
+            "genuine-gemini-capacity",
+        ):
             return "mixed"
         return (
             "fixture"
@@ -366,7 +464,7 @@ class Service:
                 "notice": (
                     NOTICE
                     if self.runtime_mode() == "fixture"
-                    else "Context analysis is host-configured; availability and observations are reported separately. Checkout is simulated; PayPal is unconnected. API charges may apply to a separately provisioned provider runtime."
+                    else "Analysis is host-configured; availability and observations are reported separately. Checkout is simulated; PayPal is unconnected. API charges may apply to a separately provisioned provider runtime."
                     if self.runtime_mode() == "mixed"
                     else "Synthetic catalog and injected offline adapters. "
                     "No genuine inference, PayPal connection or payment."
@@ -575,8 +673,10 @@ class Service:
 
     def _recover_analysis(self, connection):
         initialize_context_capacity(connection)
+        initialize_gemini_capacity(connection)
         self._migrate_analysis_strategies(connection)
         recover_context_capacity(connection)
+        recover_gemini_capacity(connection)
         preflights = connection.execute(
             "SELECT * FROM analysis_preflights WHERE status IN ('PREPARED', 'COUNTING')"
         ).fetchall()
@@ -625,7 +725,7 @@ class Service:
         )
 
     def _analysis_metadata(self, adapter):
-        if type(adapter) is GenuineResponsesAdapter:
+        if type(adapter) in (GenuineResponsesAdapter, GenuineGeminiAdapter):
             return adapter.metadata
         model = json.loads(canonical(adapter.metadata))
         model["is_fixture"] = (
@@ -919,7 +1019,10 @@ class Service:
         return reservation, error_code
 
     def _analyze(self, sid, body):
-        if type(self.inference) is GenuineResponsesAdapter:
+        if type(self.inference) in (
+            GenuineResponsesAdapter,
+            GenuineGeminiAdapter,
+        ):
             return self._analyze_context(sid, body)
         with self.store.transaction() as connection:
             session = self._session(connection, sid)
@@ -935,10 +1038,13 @@ class Service:
             if fixture:
                 if (
                     connection.execute(
-                        "SELECT 1 FROM analysis_operations WHERE strategy = 'context-capacity-v1' LIMIT 1"
+                        "SELECT 1 FROM analysis_operations WHERE strategy IN ('context-capacity-v1', 'gemini-capacity-v1') LIMIT 1"
                     ).fetchone()
                     or connection.execute(
                         "SELECT 1 FROM context_capacity_operations LIMIT 1"
+                    ).fetchone()
+                    or connection.execute(
+                        "SELECT 1 FROM gemini_capacity_operations LIMIT 1"
                     ).fetchone()
                 ):
                     self._analysis_history_guard(connection)
@@ -1402,6 +1508,13 @@ class Service:
         # Integer storage timestamps never define the transport's precise budget.
         return int(self._context_wall_now())
 
+    def _capacity_now(self, strategy):
+        return (
+            self._context_wall_now()
+            if strategy is _GEMINI
+            else self._context_now()
+        )
+
     def _migrate_analysis_strategies(self, connection):
         for row in connection.execute(
             "SELECT * FROM analysis_operations WHERE strategy = ''"
@@ -1414,6 +1527,10 @@ class Service:
                 "SELECT 1 FROM context_capacity_operations WHERE operation_id = ?",
                 (row["operation_id"],),
             ).fetchone()
+            gemini = connection.execute(
+                "SELECT 1 FROM gemini_capacity_operations WHERE operation_id = ?",
+                (row["operation_id"],),
+            ).fetchone()
             strategy = "unsupported-legacy"
             try:
                 inputs = json.loads(row["input_document"])
@@ -1421,6 +1538,7 @@ class Service:
                     row["is_fixture"] == 1
                     and not budget
                     and not context
+                    and not gemini
                     and inputs["model"]["is_fixture"] is True
                 ):
                     strategy = "fixture"
@@ -1428,6 +1546,7 @@ class Service:
                     row["is_fixture"] == 0
                     and budget
                     and not context
+                    and not gemini
                     and inputs.get("budget_request_sha256")
                     and inputs.get("budget_policy_document")
                 ):
@@ -1443,7 +1562,7 @@ class Service:
         # Pair both directions. A new strategy or current installation cannot
         # discard orphan/unknown history in any of the shared admission ledgers.
         rows = connection.execute(
-            "SELECT a.*, b.operation_id AS budget_id, c.operation_id AS context_id FROM analysis_operations a LEFT JOIN budget_operations b ON b.operation_id = a.operation_id LEFT JOIN context_capacity_operations c ON c.operation_id = a.operation_id"
+            "SELECT a.*, b.operation_id AS budget_id, c.operation_id AS context_id, g.operation_id AS gemini_id FROM analysis_operations a LEFT JOIN budget_operations b ON b.operation_id = a.operation_id LEFT JOIN context_capacity_operations c ON c.operation_id = a.operation_id LEFT JOIN gemini_capacity_operations g ON g.operation_id = a.operation_id"
         ).fetchall()
         for row in rows:
             strategy = row["strategy"]
@@ -1456,18 +1575,28 @@ class Service:
                     row["is_fixture"] == 1
                     and not row["budget_id"]
                     and not row["context_id"]
+                    and not row["gemini_id"]
                 )
             elif strategy == "offline-count-v1":
                 valid = (
                     row["is_fixture"] == 0
                     and row["budget_id"]
                     and not row["context_id"]
+                    and not row["gemini_id"]
                 )
             elif strategy == "context-capacity-v1":
                 valid = (
                     row["is_fixture"] == 0
                     and row["context_id"]
                     and not row["budget_id"]
+                    and not row["gemini_id"]
+                )
+            elif strategy == "gemini-capacity-v1":
+                valid = (
+                    row["is_fixture"] == 0
+                    and row["gemini_id"]
+                    and not row["budget_id"]
+                    and not row["context_id"]
                 )
             else:
                 valid = False
@@ -1499,6 +1628,7 @@ class Service:
         for table, strategy in (
             ("budget_operations", "offline-count-v1"),
             ("context_capacity_operations", "context-capacity-v1"),
+            ("gemini_capacity_operations", "gemini-capacity-v1"),
         ):
             if connection.execute(
                 f"SELECT 1 FROM {table} b LEFT JOIN analysis_operations a ON a.operation_id = b.operation_id WHERE a.operation_id IS NULL OR a.strategy != ? OR b.status != 'KNOWN' OR a.status NOT IN ('SUCCEEDED','BLOCKED','STALE') OR a.observation = '' LIMIT 1",
@@ -1511,10 +1641,10 @@ class Service:
         ).fetchone():
             raise blocked()
 
-    def _public_context_outcome(self, connection, review_id):
+    def _public_context_outcome(self, connection, review_id, strategy=_CONTEXT):
         row = connection.execute(
-            "SELECT a.dispatch_token, a.input_document, c.status, c.observation FROM analysis_operations a LEFT JOIN context_capacity_operations c ON a.operation_id = c.operation_id WHERE a.review_id = ? AND a.strategy = 'context-capacity-v1'",
-            (review_id,),
+            f"SELECT a.dispatch_token, a.input_document, c.status, c.observation FROM analysis_operations a LEFT JOIN {strategy.table} c ON a.operation_id = c.operation_id WHERE a.review_id = ? AND a.strategy = ?",
+            (review_id, strategy.name),
         ).fetchone()
         usage = bool(row and row["observation"])
         kind = "none"
@@ -1528,7 +1658,7 @@ class Service:
                 else "provider-observation"
             )
         return {
-            "strategy": "context-capacity-v1",
+            "strategy": strategy.name,
             "dispatch_state": "attempted"
             if row and row["dispatch_token"]
             else "not-attempted",
@@ -1541,9 +1671,11 @@ class Service:
             "evidence_kind": kind,
         }
 
-    def _context_fence(self, sid, product, choices, generation, runtime_sha):
+    def _context_fence(
+        self, sid, product, choices, generation, runtime_sha, strategy=_CONTEXT
+    ):
         source = product["source"]
-        return ContextFence(
+        return strategy.fence_type(
             runtime_sha,
             text_hash(sid),
             source["sha256"],
@@ -1554,10 +1686,10 @@ class Service:
         )
 
     def _require_context(self, adapter, sid, product, choices):
+        strategy = _capacity_strategy(adapter)
         if (
-            type(adapter) is not GenuineResponsesAdapter
-            or self.inference is not adapter
-            or self.context_analysis is not adapter.runtime
+            self.inference is not adapter
+            or getattr(self, strategy.runtime_field) is not adapter.runtime
             or self.analysis_budget is not None
             or type(self.payments) is not FixturePaymentAdapter
         ):
@@ -1569,6 +1701,7 @@ class Service:
 
     def _analyze_context(self, sid, body):
         adapter = self.inference
+        strategy = _capacity_strategy(adapter)
         with self.store.transaction() as connection:
             session = self._session(connection, sid)
             if body["expected_revision"] != session["revision"]:
@@ -1580,6 +1713,14 @@ class Service:
             )
             installed = self._require_context(adapter, sid, product, choices)
             self._analysis_admission(connection)
+            if (
+                strategy is _GEMINI
+                and connection.execute(
+                    "SELECT 1 FROM analysis_operations WHERE status IN "
+                    "('RESERVED', 'DISPATCHED', 'UNKNOWN') LIMIT 1"
+                ).fetchone()
+            ):
+                raise blocked()
             prepared = adapter.prepare(product["source"], choices)
             fence = self._context_fence(
                 sid,
@@ -1587,12 +1728,13 @@ class Service:
                 choices,
                 session["revision"] + 1,
                 installed.execution_sha256,
+                strategy,
             )
-            ledger = TransactionContextCapacityLedger(
+            ledger = strategy.ledger_type(
                 connection, installed.policy, installed.authorization
             )
             capacity = ledger.reserve(
-                prepared.request, fence, now=self._context_now()
+                prepared.request, fence, now=self._capacity_now(strategy)
             )
             checkout = self._new_analysis_checkout(product, choices, model)
             document = canonical(
@@ -1600,14 +1742,14 @@ class Service:
                     "catalog": product,
                     "conditions": choices,
                     "model": model,
-                    "context_ledger_document": ledger.identity,
-                    "context_reservation": asdict(capacity),
-                    "context_fence": asdict(fence),
-                    "context_request_sha256": prepared.request_sha256,
+                    f"{strategy.prefix}_ledger_document": ledger.identity,
+                    f"{strategy.prefix}_reservation": asdict(capacity),
+                    f"{strategy.prefix}_fence": asdict(fence),
+                    f"{strategy.prefix}_request_sha256": prepared.request_sha256,
                 }
             )
             connection.execute(
-                "INSERT INTO analysis_operations(operation_id, sid, review_id, input_document, input_hash, checkout_hash, reserved_revision, is_fixture, status, reserved_at, strategy) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'RESERVED', ?, 'context-capacity-v1')",
+                "INSERT INTO analysis_operations(operation_id, sid, review_id, input_document, input_hash, checkout_hash, reserved_revision, is_fixture, status, reserved_at, strategy) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'RESERVED', ?, ?)",
                 (
                     capacity.operation_id,
                     sid,
@@ -1617,6 +1759,7 @@ class Service:
                     digest(checkout),
                     session["revision"] + 1,
                     self.clock().isoformat(),
+                    strategy.name,
                 ),
             )
             session["checkout"] = checkout
@@ -1636,15 +1779,18 @@ class Service:
             return self._result(connection, self._session(connection, sid))
 
     def _context_binding(self, connection, reservation):
+        strategy = _capacity_strategy(reservation["strategy"])
         inputs = json.loads(reservation["input_document"])
-        ledger = context_ledger_from_document(
-            connection, inputs["context_ledger_document"]
+        ledger = strategy.restore(
+            connection, inputs[f"{strategy.prefix}_ledger_document"]
         )
         return (
             inputs,
             ledger,
-            ContextReservation(**inputs["context_reservation"]),
-            ContextFence(**inputs["context_fence"]),
+            strategy.reservation_type(
+                **inputs[f"{strategy.prefix}_reservation"]
+            ),
+            strategy.fence_type(**inputs[f"{strategy.prefix}_fence"]),
         )
 
     def _context_fresh(self, connection, row, reservation, adapter, prepared):
@@ -1658,9 +1804,12 @@ class Service:
                 inputs["catalog"],
                 inputs["conditions"],
             )
+            strategy = _capacity_strategy(adapter)
             return (
-                prepared.runtime_sha256 == installed.execution_sha256
-                and prepared.request_sha256 == inputs["context_request_sha256"]
+                reservation["strategy"] == strategy.name
+                and prepared.runtime_sha256 == installed.execution_sha256
+                and prepared.request_sha256
+                == inputs[f"{strategy.prefix}_request_sha256"]
                 and adapter.prepare(
                     inputs["catalog"]["source"], inputs["conditions"]
                 )
@@ -1715,7 +1864,44 @@ class Service:
         )
         self._block_context_checkout(connection, reservation, error_code)
 
+    def _guard_gemini(self, reservation, adapter, prepared, claim, deadline):
+        # This short transaction has committed and closed before the transport
+        # opens a connection, borrows a key, posts, or performs its next read.
+        valid = False
+        with self.store.transaction() as connection:
+            current = connection.execute(
+                "SELECT * FROM analysis_operations WHERE operation_id = ?",
+                (reservation["operation_id"],),
+            ).fetchone()
+            if (
+                current
+                and current["status"] == "DISPATCHED"
+                and current["dispatch_token"] == claim.claim_token
+            ):
+                try:
+                    deadline.remaining()
+                    _, ledger, _, fence = self._context_binding(
+                        connection, reservation
+                    )
+                    valid = self._context_fresh(
+                        connection, current, reservation, adapter, prepared
+                    ) and ledger.validate_claim(
+                        claim,
+                        prepared.request,
+                        fence,
+                        now=self._context_wall_now(),
+                    )
+                except Exception:
+                    valid = False
+                if not valid:
+                    self._mark_context_unknown(
+                        connection, reservation, claim, "MODEL_OUTCOME_UNKNOWN"
+                    )
+        if not valid:
+            raise blocked()
+
     def _dispatch_context(self, reservation, adapter, prepared):
+        strategy = _capacity_strategy(reservation["strategy"])
         operation_id = reservation["operation_id"]
         with self.store.transaction() as connection:
             row = connection.execute(
@@ -1735,7 +1921,10 @@ class Service:
                 )
                 return
             claim = ledger.claim(
-                capacity, prepared.request, fence, now=self._context_now()
+                capacity,
+                prepared.request,
+                fence,
+                now=self._capacity_now(strategy),
             )
             if claim is None:
                 self._mark_context_unknown(
@@ -1784,7 +1973,18 @@ class Service:
                         )
                         return
                 try:
-                    exchange = adapter.exchange(prepared, claim, deadline)
+                    if strategy is _GEMINI:
+
+                        def guard(**_wire):
+                            self._guard_gemini(
+                                reservation, adapter, prepared, claim, deadline
+                            )
+
+                        exchange = adapter.exchange(
+                            prepared, claim, deadline, claim_guard=guard
+                        )
+                    else:
+                        exchange = adapter.exchange(prepared, claim, deadline)
                 except Exception:
                     exchange = None
                 self._checkpoint(
@@ -1858,6 +2058,7 @@ class Service:
         late=False,
         deadline_at=None,
     ):
+        strategy = _capacity_strategy(reservation["strategy"])
         row = connection.execute(
             "SELECT * FROM analysis_operations WHERE operation_id = ?",
             (reservation["operation_id"],),
@@ -1896,16 +2097,9 @@ class Service:
         )
         if exchange.evidence_kind != expected_kind:
             return
-        # Always use original policy even when the current installation changed.
-        from cartreadback_app.context_capacity import ContextCapacityPolicy
-
-        raw_policy = json.loads(inputs["context_ledger_document"])["policy"]
-        policy = ContextCapacityPolicy(
-            raw_policy["valid_from"],
-            raw_policy["expires_at"],
-            raw_policy["reference_profile"],
-            raw_policy["evidence_revision"],
-        )
+        # Always classify against the original immutable policy, even after
+        # current host replacement or timeout.
+        policy = ledger.policy
         protocol_fault, error_code, results = adapter.classify(
             exchange, policy, prepared
         )
@@ -1922,12 +2116,12 @@ class Service:
                 runtime_sha256=exchange.runtime_sha256,
                 request_id=exchange.request_id,
                 current_fence=fence,
-                now=self._context_now(),
+                now=self._capacity_now(strategy),
             )
         except AppError:
             # Invalid/duplicate identifiers cannot settle or overwrite accounting.
             existing = connection.execute(
-                "SELECT observation FROM context_capacity_operations WHERE operation_id = ?",
+                f"SELECT observation FROM {strategy.table} WHERE operation_id = ?",
                 (reservation["operation_id"],),
             ).fetchone()
             if existing and existing[0]:
@@ -1935,7 +2129,7 @@ class Service:
             ledger.mark_unknown(capacity)
             accounting_state = "UNKNOWN"
         accounting = connection.execute(
-            "SELECT observation FROM context_capacity_operations WHERE operation_id = ?",
+            f"SELECT observation FROM {strategy.table} WHERE operation_id = ?",
             (reservation["operation_id"],),
         ).fetchone()[0]
         if accounting_state != "KNOWN":

@@ -303,6 +303,28 @@ estimates remain unselected reference math, not actual billing. Secure key setup
 external binding/approval, real network/provider behavior and buyer benefit are
 still unverified. No genuine inference or payment was performed by this change.
 
+## Gemini host-only one-shot bridge
+
+[Issue #48's Gemini Service and runner](docs/GEMINI_SERVICE.md) compose the actual
+Gemini client/HTTPS transport with a distinct durable capacity ledger. This is a
+host-only opt-in route, not a default server, HTTP or buyer UI selector. The
+ordinary fixture CLI, UI and PayPal paths are unchanged.
+
+The runner has separate offline `prepare` and explicitly approved `run` phases.
+Run requires the same existing database/owner, a reviewed nonsecret host record
+with project/model/eligibility/adopted positive pricing and exact data/spend
+scope, and a pre-opened private credential pipe. It does not discover ambient
+keys or create credentials. The key is borrowed only after durable reservation
+and claim. A local record identifies externally established facts and approval;
+it does not verify them or supply approval by itself.
+
+Every call permanently reserves 1,048,576 input tokens and 2,048 output tokens
+including thoughts. Failed, uncertain, stale or restarted operations remain
+UNKNOWN with no retry, refund or automatic renewal. Tests use only fabricated
+wires and synthetic keys; they do not establish real account eligibility,
+pricing, TLS/provider acceptance, paid usage, semantic quality or buyer benefit.
+No actual Gemini credential setup or provider call has been performed.
+
 ## Evidence and remaining gates
 
 This is an **import of pre-existing local fixture work**. The issue-first GitHub
