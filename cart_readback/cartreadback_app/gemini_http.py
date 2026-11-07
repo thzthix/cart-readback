@@ -9,14 +9,14 @@ request hash, approved data, credential binding and wall-clock authorization.
 import http.client
 import re
 import ssl
+import sys
 import threading
 
 from cartreadback_app.gemini_client import (
-    ENDPOINT,
+    ENDPOINT_PATHS,
     HOST,
     MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES,
-    PATH,
     unavailable,
 )
 from cartreadback_app.responses_adapter import Deadline
@@ -78,7 +78,7 @@ def _expected_length(response):
         transfer.lower() != "chunked" or length is not None
     ):
         raise unavailable()
-    if type(response) is _StrictHTTPResponse and response.chunked != (
+    if isinstance(response, _StrictHTTPResponse) and response.chunked != (
         transfer is not None
     ):
         raise unavailable()
@@ -90,6 +90,52 @@ def _expected_length(response):
     ):
         raise unavailable()
     return int(length)
+
+
+class _DeadlineReader:
+    """Refresh the host guard and remaining timeout before every bounded recv."""
+
+    def __init__(self, reader, before_read):
+        self._reader = reader
+        self._before_read = before_read
+        self._pending = bytearray()
+
+    def __getattr__(self, name):
+        return getattr(self._reader, name)
+
+    def read1(self, amount):
+        self._before_read()
+        if self._pending:
+            chunk = bytes(self._pending[:amount])
+            del self._pending[:amount]
+            return chunk
+        return self._reader.read1(amount)
+
+    def read(self, amount):
+        raw = bytearray()
+        while len(raw) < amount:
+            chunk = self.read1(min(amount - len(raw), 8192))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        return bytes(raw)
+
+    def readline(self, limit=-1):
+        # Shared strict HTTP parsing always supplies a bounded line size.
+        if type(limit) is not int or not 0 < limit <= 4356:
+            raise unavailable()
+        raw = bytearray()
+        while len(raw) < limit:
+            chunk = self.read1(limit - len(raw))
+            if not chunk:
+                break
+            newline = chunk.find(b"\n")
+            if newline >= 0:
+                raw.extend(chunk[: newline + 1])
+                self._pending[:0] = chunk[newline + 1 :]
+                break
+            raw.extend(chunk)
+        return bytes(raw)
 
 
 def unselected_gemini_connection(host, port, *, timeout, context):
@@ -124,7 +170,7 @@ class GeminiHTTPTransport:
         """Consume one bounded verified-TLS response without releasing I/O early."""
         if (
             type(endpoint) is not str
-            or endpoint != ENDPOINT
+            or endpoint not in ENDPOINT_PATHS
             or type(body) is not bytes
             or not 0 < len(body) <= MAX_REQUEST_BYTES
         ):
@@ -139,7 +185,11 @@ class GeminiHTTPTransport:
         def check():
             deadline.remaining()
             # No secret or network effect may occur before the host rechecks.
-            self._guard(endpoint=endpoint, body=body, deadline=deadline)
+            if (
+                self._guard(endpoint=endpoint, body=body, deadline=deadline)
+                is not None
+            ):
+                raise unavailable()
             deadline.remaining()
 
         def read_timeout():
@@ -150,14 +200,26 @@ class GeminiHTTPTransport:
 
         try:
             check()
-            context = ssl.create_default_context()
+            # create_default_context honors SSLKEYLOGFILE. Do not let an ambient
+            # variable enable session-secret logging or even create that file.
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+            context.keylog_filename = None
             context.minimum_version = ssl.TLSVersion.TLSv1_2
             context.set_alpn_protocols(["http/1.1"])
             connection = self._factory(
                 HOST, 443, timeout=deadline.connect_timeout(), context=context
             )
             connection.set_debuglevel(0)
-            connection.response_class = _StrictHTTPResponse
+
+            class GuardedResponse(_StrictHTTPResponse):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.fp._reader = _DeadlineReader(
+                        self.fp._reader, read_timeout
+                    )
+
+            connection.response_class = GuardedResponse
             connection.auto_open = 0
             check()
             connection.connect()
@@ -180,7 +242,7 @@ class GeminiHTTPTransport:
                 read_timeout()
                 connection.request(
                     "POST",
-                    PATH,
+                    ENDPOINT_PATHS[endpoint],
                     body=body,
                     headers=headers,
                     encode_chunked=False,
@@ -193,7 +255,7 @@ class GeminiHTTPTransport:
             check()
             if (
                 isinstance(response, http.client.HTTPResponse)
-                and type(response) is not _StrictHTTPResponse
+                and type(response) is not GuardedResponse
             ):
                 raise unavailable()
             if (
@@ -207,10 +269,7 @@ class GeminiHTTPTransport:
             raw = bytearray()
             while True:
                 check()
-                if (
-                    type(response) is _StrictHTTPResponse
-                    and response.isclosed()
-                ):
+                if type(response) is GuardedResponse and response.isclosed():
                     break
                 read_timeout()
                 amount = min(8192, MAX_RESPONSE_BYTES - len(raw) + 1)
@@ -241,9 +300,17 @@ class GeminiHTTPTransport:
         finally:
             # Keep connection lifetime synchronous, including cleanup after a
             # deadline. Closing cannot prove that remote billing was cancelled.
+            primary = sys.exc_info()[1]
+            interruption = None
             for resource in (response, connection):
                 if resource is not None:
                     try:
                         resource.close()
-                    except Exception:
-                        pass
+                    except BaseException as error:
+                        if (
+                            not isinstance(error, Exception)
+                            and interruption is None
+                        ):
+                            interruption = error
+            if primary is None and interruption is not None:
+                raise interruption

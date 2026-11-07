@@ -5,9 +5,12 @@ token and cost admission, approved data, and securely provisioned credentials.
 The synchronous exchange has no hidden worker or automatic retry.
 """
 
+import base64
+import binascii
 import json
 import re
 from dataclasses import asdict, dataclass
+from types import MappingProxyType
 
 from cartreadback_app.inference_config import load_bundle
 from cartreadback_app.provider_json import PARSER_VERSION, strict_provider_json
@@ -20,8 +23,15 @@ from cartreadback_app.validation import AppError, canonical, digest, text_hash
 
 HOST = "generativelanguage.googleapis.com"
 MODEL = "gemini-2.5-flash-lite"
+CURRENT_MODEL = "gemini-3.5-flash-lite"
 PATH = f"/v1beta/models/{MODEL}:generateContent"
 ENDPOINT = f"https://{HOST}{PATH}"
+ENDPOINT_PATHS = MappingProxyType(
+    {
+        f"https://{HOST}/v1beta/models/{model}:generateContent": f"/v1beta/models/{model}:generateContent"
+        for model in (MODEL, CURRENT_MODEL)
+    }
+)
 MAX_REQUEST_BYTES = 65_536
 MAX_RESPONSE_BYTES = 131_072
 MAX_OUTPUT_TOKENS = 2048
@@ -51,20 +61,23 @@ def unavailable(code="MODEL_UNAVAILABLE") -> AppError:
 class GeminiConfig:
     """Explicit expected provider model version, not a verified account record.
 
-    The supported request is deliberately limited to the 2.5 Flash-Lite text
-    contract. Availability and project pricing must be reverified before use.
+    Only explicit 2.5/3.5 Flash-Lite text contracts are supported. Availability,
+    legacy project eligibility and pricing must be reverified before use.
     An alias echo is not proof of a pinned model checkpoint or billed tier.
     """
 
     expected_model_version: str
     response_language: str = "en"
+    model: str = MODEL
 
     def __post_init__(self):
         """Require exact nonsecret response identity and supported language."""
         if (
-            type(self.expected_model_version) is not str
+            type(self.model) is not str
+            or self.model not in (MODEL, CURRENT_MODEL)
+            or type(self.expected_model_version) is not str
             or re.fullmatch(
-                r"gemini-2\.5-flash-lite(?:-[a-z0-9.-]{1,64})?",
+                re.escape(self.model) + r"(?:-[a-z0-9.-]{1,64})?",
                 self.expected_model_version,
             )
             is None
@@ -98,6 +111,8 @@ class GeminiObservation:
     model_returned: str
     response_id: str
     input_tokens: int
+    candidate_tokens: int
+    thought_tokens: int
     output_tokens: int
     total_tokens: int
 
@@ -107,7 +122,7 @@ class GeminiObservation:
         return json.loads(self.proposal_json)
 
 
-def _usage(envelope):
+def _usage(envelope, config):
     usage = envelope.get("usageMetadata")
     if type(usage) is not dict:
         raise unavailable("MODEL_BUDGET_EXCEEDED")
@@ -119,29 +134,38 @@ def _usage(envelope):
             "totalTokenCount",
         )
     ]
+    thoughts = usage.get("thoughtsTokenCount", 0)
     if (
         any(type(value) is not int or value < 0 for value in counts)
+        or type(thoughts) is not int
+        or thoughts < 0
+        or (config.model == MODEL and thoughts != 0)
         or counts[0] > 1_048_576
-        or counts[1] > MAX_OUTPUT_TOKENS
-        or counts[0] + counts[1] != counts[2]
+        or counts[1] + thoughts > MAX_OUTPUT_TOKENS
+        or counts[0] + counts[1] + thoughts != counts[2]
     ):
         raise unavailable("MODEL_BUDGET_EXCEEDED")
     # Zero-valued proto counters may be omitted. This text-only contract does
-    # not support thinking, tool tokens, cached input or unrecognized billing.
+    # supports thoughts only for 3.5; tools, cache and unknown billing fail.
     for key, value in usage.items():
         if key.endswith("TokenCount") and key not in {
             "promptTokenCount",
             "candidatesTokenCount",
             "totalTokenCount",
+            "thoughtsTokenCount",
         }:
             if type(value) is not int or value != 0:
                 raise unavailable("MODEL_BUDGET_EXCEEDED")
     for key, expected in (
         ("promptTokensDetails", counts[0]),
         ("candidatesTokensDetails", counts[1]),
+        ("cacheTokensDetails", 0),
+        ("toolUsePromptTokensDetails", 0),
     ):
         if key in usage:
             details = usage[key]
+            if details == [] and expected == 0:
+                continue
             if (
                 type(details) is not list
                 or len(details) != 1
@@ -152,7 +176,15 @@ def _usage(envelope):
                 or details[0]["tokenCount"] != expected
             ):
                 raise unavailable("MODEL_BUDGET_EXCEEDED")
-    return tuple(counts)
+    for key in usage:
+        if key.endswith("TokensDetails") and key not in {
+            "promptTokensDetails",
+            "candidatesTokensDetails",
+            "cacheTokensDetails",
+            "toolUsePromptTokensDetails",
+        }:
+            raise unavailable("MODEL_BUDGET_EXCEEDED")
+    return counts[0], counts[1], thoughts, counts[1] + thoughts, counts[2]
 
 
 class GeminiClient:
@@ -167,23 +199,34 @@ class GeminiClient:
         """Load verified shared evidence assets without I/O or credentials."""
         if type(config) is not GeminiConfig:
             raise unavailable()
-        self.config = config
-        self.bundle = load_bundle()
+        config.__post_init__()
+        self._config = config
+        self._bundle = load_bundle()
         self.transport = transport
         self._metadata = {
             "provider": "google-gemini-generate-content",
-            "model_version": MODEL,
+            "model_version": config.model,
             "adapter_version": "gemini-generation-client-v1",
             "parser_version": PARSER_VERSION,
             "prompt_bundle_sha256": digest(
                 json.loads(self.bundle.manifest_json)
             ),
-            "endpoint": ENDPOINT,
+            "endpoint": f"https://{HOST}/v1beta/models/{config.model}:generateContent",
             "execution_mode": "client-unselected",
             "is_fixture": False,
             **asdict(config),
         }
         self._metadata["config_sha256"] = digest(self._metadata)
+
+    @property
+    def config(self):
+        """Expose the immutable selected configuration without a setter."""
+        return self._config
+
+    @property
+    def bundle(self):
+        """Expose the verified immutable prompt bundle without a setter."""
+        return self._bundle
 
     @property
     def metadata(self):
@@ -219,7 +262,11 @@ class GeminiClient:
                     "responseJsonSchema": json.loads(
                         self.bundle.wire_schema_json
                     ),
-                    "thinkingConfig": {"thinkingBudget": 0},
+                    "thinkingConfig": (
+                        {"thinkingBudget": 0}
+                        if self.config.model == MODEL
+                        else {"thinkingLevel": "MINIMAL"}
+                    ),
                 },
             }
         ).encode("utf-8")
@@ -250,7 +297,9 @@ class GeminiClient:
             envelope = strict_provider_json(
                 raw, max_bytes=MAX_RESPONSE_BYTES, max_depth=32
             )
-            usage = _usage(envelope)
+            if envelope.get("error") is not None:
+                raise unavailable()
+            usage = _usage(envelope, self.config)
             if (
                 envelope.get("modelVersion")
                 != self.config.expected_model_version
@@ -300,10 +349,27 @@ class GeminiClient:
                 type(parts) is not list
                 or len(parts) != 1
                 or type(parts[0]) is not dict
-                or set(parts[0]) != {"text"}
+                or not {"text"}
+                <= set(parts[0])
+                <= {"text", "thought", "thoughtSignature"}
                 or type(parts[0]["text"]) is not str
+                or parts[0].get("thought", False) is not False
             ):
                 raise unavailable("INVALID_PROPOSAL")
+            if "thoughtSignature" in parts[0]:
+                signature = parts[0]["thoughtSignature"]
+                if (
+                    type(signature) is not str
+                    or not 1 <= len(signature) <= 65_536
+                ):
+                    raise unavailable("INVALID_PROPOSAL")
+                try:
+                    if not base64.b64decode(signature, validate=True):
+                        raise unavailable("INVALID_PROPOSAL")
+                except (ValueError, binascii.Error):
+                    raise unavailable("INVALID_PROPOSAL") from None
+                # Single-turn, no-tools contract: signatures are opaque provider
+                # continuation data, not authority. Never persist or replay them.
             wire = strict_provider_json(
                 parts[0]["text"].encode("utf-8"), max_bytes=65_536, max_depth=8
             )
@@ -314,7 +380,7 @@ class GeminiClient:
                 canonical(results),
                 prepared.request_sha256,
                 prepared.config_sha256,
-                MODEL,
+                self.config.model,
                 envelope["modelVersion"],
                 response_id,
                 *usage,
@@ -334,7 +400,7 @@ class GeminiClient:
         try:
             deadline.remaining()
             raw = self.transport.send(
-                ENDPOINT, prepared.body, deadline=deadline
+                self._metadata["endpoint"], prepared.body, deadline=deadline
             )
             deadline.remaining()
             result = self.parse(prepared, raw)

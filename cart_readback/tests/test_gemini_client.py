@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 from cartreadback_app.gemini_client import (
+    CURRENT_MODEL,
     ENDPOINT,
     MAX_OUTPUT_TOKENS,
     MODEL,
@@ -122,6 +123,96 @@ class GeminiClientTests(unittest.TestCase):
         observation.results.clear()
         self.assertEqual(self.results, observation.results)
         self.assertEqual(MODEL, observation.model_returned)
+
+    def test_current_lite_contract_includes_thoughts_in_output(self):
+        current = GeminiClient(GeminiConfig(CURRENT_MODEL, model=CURRENT_MODEL))
+        prepared = current.prepare(self.source, self.conditions)
+        body = json.loads(prepared.body)
+        self.assertEqual(
+            {"thinkingLevel": "MINIMAL"},
+            body["generationConfig"]["thinkingConfig"],
+        )
+        value = envelope(self.results)
+        value["modelVersion"] = CURRENT_MODEL
+        value["usageMetadata"].update(thoughtsTokenCount=7, totalTokenCount=127)
+        observation = current.parse(prepared, encoded(value))
+        self.assertEqual(
+            (20, 7, 27, 127),
+            (
+                observation.candidate_tokens,
+                observation.thought_tokens,
+                observation.output_tokens,
+                observation.total_tokens,
+            ),
+        )
+        self.assertEqual(CURRENT_MODEL, observation.model_requested)
+        self.assertIn(CURRENT_MODEL, current.metadata["endpoint"])
+        value["usageMetadata"]["totalTokenCount"] = 120
+        self.assert_error(
+            lambda: current.parse(prepared, encoded(value)),
+            "MODEL_BUDGET_EXCEEDED",
+        )
+        value["usageMetadata"].update(
+            thoughtsTokenCount=2048, totalTokenCount=2168
+        )
+        self.assert_error(
+            lambda: current.parse(prepared, encoded(value)),
+            "MODEL_BUDGET_EXCEEDED",
+        )
+        self.assert_error(lambda: GeminiConfig(CURRENT_MODEL))
+
+    def test_read_only_config_prevents_identity_drift(self):
+        with self.assertRaises(AttributeError):
+            self.client.config = GeminiConfig(MODEL + "-different")
+        with self.assertRaises(AttributeError):
+            self.client.bundle = None
+        self.assertEqual(self.results, self.parse().results)
+
+    def test_final_text_signature_is_validated_and_discarded(self):
+        current = GeminiClient(GeminiConfig(CURRENT_MODEL, model=CURRENT_MODEL))
+        prepared = current.prepare(self.source, self.conditions)
+        value = envelope(self.results)
+        value["modelVersion"] = CURRENT_MODEL
+        part = value["candidates"][0]["content"]["parts"][0]
+        signature = "c3ludGhldGljLXNpZ25hdHVyZQ=="
+        part.update(thoughtSignature=signature, thought=False)
+        observation = current.parse(prepared, encoded(value))
+        self.assertEqual(self.results, observation.results)
+        self.assertNotIn(signature, repr(observation))
+        self.assertNotIn(signature, prepared.body.decode())
+        for bad in (None, True, "not base64", "", "a" * 65_537):
+            part["thoughtSignature"] = bad
+            self.assert_error(
+                lambda: current.parse(prepared, encoded(value)),
+                "INVALID_PROPOSAL",
+            )
+        part["thoughtSignature"] = signature
+        part["thought"] = True
+        self.assert_error(
+            lambda: current.parse(prepared, encoded(value)), "INVALID_PROPOSAL"
+        )
+
+    def test_contradictory_error_is_not_success(self):
+        self.value["error"] = {"message": "SECRET"}
+        self.assert_error(self.parse, "MODEL_UNAVAILABLE")
+
+    def test_cache_tool_details_cannot_contradict_zero_counters(self):
+        for key in (
+            "cacheTokensDetails",
+            "toolUsePromptTokensDetails",
+            "unrecognizedTokensDetails",
+        ):
+            for details in (
+                "SECRET",
+                [{"modality": "IMAGE", "tokenCount": 100}],
+                [{"modality": "TEXT", "tokenCount": 50}],
+            ):
+                with self.subTest(key=key, details=details):
+                    value = envelope(self.results)
+                    value["usageMetadata"][key] = details
+                    self.assert_error(
+                        lambda: self.parse(value), "MODEL_BUDGET_EXCEEDED"
+                    )
 
     def test_wrong_config_and_forged_request_block_before_transport(self):
         for changed in (

@@ -2,13 +2,16 @@
 
 import http.client
 import io
+import os
 import socket
 import ssl
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from cartreadback_app.gemini_client import ENDPOINT, HOST, PATH
+from cartreadback_app.gemini_client import CURRENT_MODEL, ENDPOINT, HOST, PATH
 from cartreadback_app.gemini_http import GeminiHTTPTransport
 from cartreadback_app.responses_adapter import Deadline
 from cartreadback_app.validation import AppError
@@ -145,6 +148,103 @@ class GeminiHTTPTests(unittest.TestCase):
         self.assert_error(lambda: self.send(transport))
         self.assertEqual([], self.factories)
         self.assertEqual(0, self.borrows)
+
+    def test_false_guard_is_not_authorization(self):
+        transport = self.make()
+        transport._guard = lambda **_kwargs: False
+        self.assert_error(lambda: self.send(transport))
+        self.assertEqual([], self.factories)
+        self.assertEqual(0, self.borrows)
+
+    def test_current_model_endpoint_is_allowlisted_without_fallback(self):
+        endpoint = (
+            f"https://{HOST}/v1beta/models/{CURRENT_MODEL}:generateContent"
+        )
+        transport = self.make()
+        transport._guard = lambda **_kwargs: None
+        self.assertEqual(b"{}", self.send(transport, endpoint=endpoint))
+        request = next(item for item in self.events if item[0] == "request")
+        self.assertEqual(
+            f"/v1beta/models/{CURRENT_MODEL}:generateContent", request[2]
+        )
+        self.assert_error(lambda: self.send(transport, endpoint=ENDPOINT))
+
+    def test_ambient_keylog_is_not_enabled_or_created(self):
+        with tempfile.TemporaryDirectory() as directory:
+            keylog = Path(directory) / "not-a-secret-test.log"
+            with mock.patch.dict(os.environ, {"SSLKEYLOGFILE": str(keylog)}):
+                transport = self.make()
+                self.assertEqual(b"{}", self.send(transport))
+            self.assertIsNone(self.factories[0][3].keylog_filename)
+            self.assertFalse(keylog.exists())
+
+    def test_cleanup_interruption_still_closes_connection(self):
+        transport = self.make()
+        self.response.close = mock.Mock(
+            side_effect=KeyboardInterrupt("synthetic")
+        )
+        with self.assertRaises(KeyboardInterrupt):
+            self.send(transport)
+        self.assertEqual(1, self.connection.closed)
+
+    def test_header_drip_cannot_outlive_absolute_deadline(self):
+        now = [0.0]
+        read_times = []
+        wire = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
+
+        class Drip(io.RawIOBase):
+            position = 0
+            timeout = 1
+
+            def readable(self):
+                return True
+
+            def readinto(self, target):
+                if self.position == len(wire):
+                    return 0
+                read_times.append(now[0])
+                if self.timeout < 0.01:
+                    now[0] += self.timeout
+                    raise TimeoutError("synthetic timeout")
+                now[0] += 0.01
+                target[0] = wire[self.position]
+                self.position += 1
+                return 1
+
+        drip = Drip()
+
+        class Socket:
+            def makefile(self, *_args, **_kwargs):
+                return io.BufferedReader(drip)
+
+            def settimeout(self, value):
+                drip.timeout = value
+
+        sock = Socket()
+        transport = self.make()
+        self.connection.sock = sock
+
+        def read_response():
+            response = self.connection.response_class(sock, method="POST")
+            try:
+                response.begin()
+                return response
+            except BaseException:
+                response.close()
+                raise
+
+        self.connection.getresponse = read_response
+        with mock.patch(
+            "cartreadback_app.responses_adapter.time.monotonic",
+            side_effect=lambda: now[0],
+        ):
+            self.assert_error(
+                lambda: self.send(transport, limit=Deadline(0.05, 1, 1)),
+                "MODEL_TIMEOUT",
+            )
+        self.assertTrue(read_times)
+        self.assertTrue(all(value < 0.05 for value in read_times))
+        self.assertEqual(1, self.connection.closed)
 
     def test_authorization_expiry_after_borrow_prevents_post(self):
         def fail(_calls):
