@@ -46,9 +46,11 @@ def policy(**kwargs):
         input_rate_micro_usd_per_million=300_000,
         output_rate_micro_usd_per_million=2_500_000,
         project="fabricated-project",
-        tier="fabricated-tier",
+        tier="paid",
         eligibility_record_sha256="1" * 64,
         pricing_record_sha256="2" * 64,
+        admission_mode="paid",
+        host_decision_record_sha256="7" * 64,
     )
     return GeminiCapacityPolicy(**(values | kwargs))
 
@@ -66,6 +68,7 @@ def authorization(p, database_id, **kwargs):
         max_total_input_tokens=2 * MAX_INPUT_TOKENS,
         max_total_output_tokens=2 * OUTPUT_TOKENS,
         max_micro_usd=1_000_000,
+        admission_mode=p.admission_mode,
     )
     return HostGeminiAuthorization(**(values | kwargs))
 

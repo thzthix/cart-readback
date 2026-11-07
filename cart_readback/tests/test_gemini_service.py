@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cartreadback_app.gemini_capacity import (
+    FREE_MODE,
     MAX_INPUT_TOKENS,
     OUTPUT_TOKENS,
     GeminiCapacityPolicy,
@@ -74,7 +75,9 @@ def assert_claimed(store):
         assert row[2] == row[3] and row[2]
 
 
-def fabricate(store, owners, timeout=20.0, model=MODEL, max_calls=2):
+def fabricate(
+    store, owners, timeout=20.0, model=MODEL, max_calls=2, *, free=False
+):
     with store.transaction() as connection:
         database_id = initialize_gemini_database(connection)
         product = product_for(connection, "KB-UK-C2C")
@@ -93,12 +96,14 @@ def fabricate(store, owners, timeout=20.0, model=MODEL, max_calls=2):
         model,
         model,
         MAX_INPUT_TOKENS,
-        300_000,
-        2_500_000,
+        0 if free else 300_000,
+        0 if free else 2_500_000,
         binding.project,
-        "test-tier",
+        "free" if free else "paid",
         "3" * 64,
         "2" * 64,
+        FREE_MODE if free else "paid",
+        "4" * 64,
     )
     body = envelope(
         FixtureInferenceAdapter().propose(product["source"], CHOICES)
@@ -143,9 +148,13 @@ def fabricate(store, owners, timeout=20.0, model=MODEL, max_calls=2):
     transport = FabricatedTransportBinding(factory)
     auth = HostGeminiAuthorization(
         database_id,
-        host_provenance("1" * 64, "2" * 64, "fabricated-offline"),
+        host_provenance(
+            "1" * 64, "2" * 64, "fabricated-offline", policy=policy
+        ),
         digest(dataclasses.asdict(scope)),
-        execution_identity(binding, config, timeout, transport=transport),
+        execution_identity(
+            binding, config, timeout, transport=transport, policy=policy
+        ),
         text_hash(policy.identity),
         NOW - 5,
         NOW + 80,
@@ -153,6 +162,7 @@ def fabricate(store, owners, timeout=20.0, model=MODEL, max_calls=2):
         max_calls * MAX_INPUT_TOKENS,
         max_calls * OUTPUT_TOKENS,
         max_calls * policy.estimate(MAX_INPUT_TOKENS, OUTPUT_TOKENS),
+        policy.admission_mode,
     )
     handle = FabricatedHandle(binding, store, state)
     installed = InstalledGeminiContext(

@@ -43,10 +43,15 @@ def installed(**changes):
     auth = authorization(
         adopted,
         "a" * 64,
-        runtime_sha256=execution_identity(binding, config, transport=transport),
+        runtime_sha256=execution_identity(
+            binding, config, transport=transport, policy=adopted
+        ),
         data_scope_sha256=digest(asdict(scope)),
         provenance_sha256=host_provenance(
-            "b" * 64, adopted.pricing_record_sha256, "fabricated-offline"
+            "b" * 64,
+            adopted.pricing_record_sha256,
+            "fabricated-offline",
+            policy=adopted,
         ),
     )
     values = dict(

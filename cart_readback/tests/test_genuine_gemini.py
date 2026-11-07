@@ -173,18 +173,24 @@ class GenuineGeminiAdapterTests(unittest.TestCase):
             1,
             1,
             binding.project,
-            "synthetic_tier",
+            "paid",
             "a" * 64,
             "b" * 64,
+            "paid",
+            "f" * 64,
         )
         scope = ApprovedDataScope(
             ("c" * 64,), (digest(self.conditions),), (text_hash("owner"),)
         )
         auth = HostGeminiAuthorization(
             "d" * 64,
-            host_provenance("e" * 64, "b" * 64, "fabricated-offline"),
+            host_provenance(
+                "e" * 64, "b" * 64, "fabricated-offline", policy=policy
+            ),
             digest(dataclasses.asdict(scope)),
-            execution_identity(binding, config, transport=transport),
+            execution_identity(
+                binding, config, transport=transport, policy=policy
+            ),
             text_hash(policy.identity),
             90,
             200,
@@ -192,6 +198,7 @@ class GenuineGeminiAdapterTests(unittest.TestCase):
             1048576,
             2048,
             10,
+            "paid",
         )
         self.handle = mock.Mock()
         self.handle.binding = binding

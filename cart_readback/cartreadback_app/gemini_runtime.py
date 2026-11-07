@@ -188,11 +188,17 @@ def _transport_metadata(transport):
     return transport.metadata
 
 
-def execution_identity(binding, config, timeout_seconds=20.0, *, transport):
-    """Bind execution first, independently of policy and approval identities."""
+def execution_identity(
+    binding, config, timeout_seconds=20.0, *, transport, policy
+):
+    """Bind execution and exact external policy before approval identity."""
     if (
         type(binding) is not CredentialBinding
         or type(config) is not GeminiConfig
+        or type(policy) is not GeminiCapacityPolicy
+        or policy.project != binding.project
+        or policy.model != config.model
+        or policy.expected_model_version != config.expected_model_version
     ):
         raise blocked()
     if (
@@ -202,9 +208,11 @@ def execution_identity(binding, config, timeout_seconds=20.0, *, transport):
     ):
         raise blocked()
     config.__post_init__()
+    policy.__post_init__()
     return digest(
         {
             "version": ADAPTER_VERSION,
+            "capacity_policy_sha256": text_hash(policy.identity),
             "observed_runtime": {
                 "python_implementation": sys.implementation.name,
                 "python_version_info": tuple(sys.version_info),
@@ -222,9 +230,16 @@ def execution_identity(binding, config, timeout_seconds=20.0, *, transport):
 
 
 def host_provenance(
-    binding_record_sha256, pricing_adoption_record_sha256, evidence_kind
+    binding_record_sha256,
+    pricing_adoption_record_sha256,
+    evidence_kind,
+    *,
+    policy,
 ):
     """Identify external records without claiming this digest proves them."""
+    if type(policy) is not GeminiCapacityPolicy:
+        raise blocked()
+    policy.__post_init__()
     _sha(binding_record_sha256)
     _sha(pricing_adoption_record_sha256)
     if type(evidence_kind) is not str or evidence_kind not in (
@@ -234,6 +249,7 @@ def host_provenance(
         raise blocked()
     return digest(
         {
+            "capacity_policy_sha256": text_hash(policy.identity),
             "binding_record": binding_record_sha256,
             "pricing_adoption_record": pricing_adoption_record_sha256,
             "evidence_kind": evidence_kind,
@@ -272,7 +288,8 @@ class InstalledGeminiContext:
         if _transport_metadata(self.transport)["kind"] != self.evidence_kind:
             raise blocked()
         if (
-            self.authorization.runtime_sha256 != self.execution_sha256
+            self.authorization.admission_mode != self.policy.admission_mode
+            or self.authorization.runtime_sha256 != self.execution_sha256
             or self.authorization.data_scope_sha256
             != digest(asdict(self.scope))
             or self.authorization.policy_sha256
@@ -282,6 +299,7 @@ class InstalledGeminiContext:
                 self.binding_record_sha256,
                 self.pricing_adoption_record_sha256,
                 self.evidence_kind,
+                policy=self.policy,
             )
             or self.authorization.valid_from < self.policy.valid_from
             or self.authorization.expires_at > self.policy.expires_at
@@ -306,6 +324,7 @@ class InstalledGeminiContext:
             self.config,
             self.timeout_seconds,
             transport=self.transport,
+            policy=self.policy,
         )
 
     def _check_handle(self):
