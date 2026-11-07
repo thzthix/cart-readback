@@ -290,10 +290,13 @@ and Ruff include the entire `ui` directory, not only `ui/check.py`.
 UI checks own real ephemeral loopback servers. The workflow explicitly selects
 Node's TAP reporter and checks five separate logs: ordinary UI (2 groups),
 context HTTP (4), independent UI (1), viewer Node (1) and viewer HTTP (5).
-Every group must report a positive test count, `# skipped 0` and `# todo 0`.
-Missing/extra summaries, nonzero or malformed skip/TODO summaries, a failed check
-command or a failed log pipeline fail the step. Do not run only the test commands
-or combine logs and omit their individual guards. Prompt preflight writes only
+Each group must complete `# tests N` (positive N), `# skipped 0`, then `# todo 0`
+in that order before the next group starts. Normal TAP suites/pass/fail/duration
+lines may appear between them. Missing, duplicate, reordered or extra named
+summaries fail, including malformed spacing, tabs or bare summary keys. A later
+group cannot supply an earlier group's missing summary. A failed check command
+or log pipeline also fails the step. Do not run only the test commands or combine
+logs and omit their individual guards. Prompt preflight writes only
 to a temporary file, compares the frozen receipt and checks all existing hashes. It never regenerates gold, corpus
 or prompt bytes. A final tracked-source diff detects mutations. These checks
 remain offline fixture evidence, not native browser, model or PayPal validation.

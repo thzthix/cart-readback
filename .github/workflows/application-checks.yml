@@ -65,14 +65,23 @@ jobs:
       - name: Run UI checks with real loopback HTTP and no skips
         run: |
           set -euo pipefail
-          # Each log must contain every expected nonempty TAP summary group.
-          # Reject missing/extra groups and any nonzero or malformed skip/TODO.
+          # Complete each tests -> skipped -> todo group before the next one.
+          # Other TAP lines may intervene; malformed named summaries fail closed.
           check_node_log() {
             awk -v expected="$2" '
-              /^# tests / { tests++; if ($0 !~ /^# tests [1-9][0-9]*$/) invalid=1 }
-              /^# skipped / { skipped++; if ($0 != "# skipped 0") invalid=1 }
-              /^# todo / { todo++; if ($0 != "# todo 0") invalid=1 }
-              END { exit (invalid || tests != expected || skipped != expected || todo != expected) }
+              /^[[:space:]]*#[[:space:]]*(tests|skipped|todo)([^[:alnum:]_]|$)/ {
+                if ($0 ~ /^# tests [1-9][0-9]*$/ && phase == 0) {
+                  phase=1
+                } else if ($0 == "# skipped 0" && phase == 1) {
+                  phase=2
+                } else if ($0 == "# todo 0" && phase == 2) {
+                  phase=0
+                  groups++
+                } else {
+                  invalid=1
+                }
+              }
+              END { exit (invalid || phase != 0 || groups != expected) }
             ' "$1"
           }
           python ui/check.py | tee "$RUNNER_TEMP/ui-check.log"
