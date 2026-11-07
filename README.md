@@ -371,3 +371,11 @@ unresolved facts are summarized truthfully. AI roles label responsibilities, not
 separate humans or GitHub accounts. Same-account worker evidence is not an
 independent-account approval. Material AI assistance belongs in PR descriptions,
 without AI-authorship/coauthor commit trailers or fabricated contributor history.
+
+## Approved Gemini result viewer
+
+[Issue #52's host-result-viewer addendum](docs/GEMINI_RESULT_VIEWER_V1.md) defines
+a separate opt-in, review-only loopback viewer for the original single approved
+Gemini analysis, held in the same Service lifetime. It does not enable ordinary
+UI-driven inference or checkout. Its local opener and provider action retain
+separate authorization; all development checks use fabricated wires only.

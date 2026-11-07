@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script>
+(() => {
+  let capability = null;
+  const hash = location.hash;
+  const valid = location.pathname === '/viewer' && location.search === ''
+    && (hash === '' || /^#launch=[A-Za-z0-9_-]{43}$/.test(hash));
+  if (valid && hash) capability = hash.slice(8);
+  try { history.replaceState(null, '', '/viewer'); } catch { capability = null; return; }
+  if (!valid) { capability = null; return; }
+  import('/viewer.mjs').then(module => {
+    const captured = capability; capability = null; return module.start(captured);
+  }).catch(() => { capability = null; });
+})();
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>CartReadback · Gemini result review</title>
+</head>
+<body>
+<header><p>CartReadback · host-prepared Gemini result</p></header>
+<main>
+<h1>Review the retained result.</h1>
+<p>This is a read-only viewer for one prepared synthetic SKU. No selection, analysis, confirmation, payment, retry or allowance-renewal controls are provided. Browser reload only reads retained state.</p>
+<p id="viewer-status" role="status" aria-live="polite">Review not loaded. Invalid or unavailable launch access is blocked without retry. No action is available.</p>
+<div id="viewer-content"></div>
+</main>
+</body>
+</html>
