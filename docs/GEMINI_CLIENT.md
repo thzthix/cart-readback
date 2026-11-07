@@ -12,10 +12,10 @@ supported live runner.
 
 `GeminiClient` prepares canonical UTF-8 text-only requests using the exact
 verified v2 evidence system/user prompt and schema. Two exact endpoints are
-allowlisted, one for the explicitly selected model: -
-`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent`
--
-`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent`
+allowlisted, one for the explicitly selected model:
+
+- `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent`
+- `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent`
 
 One candidate, 2,048 maximum output tokens and JSON schema are explicit. Legacy
 2.5 uses `thinkingBudget: 0`. Current 3.5 uses `thinkingLevel: MINIMAL`, which
@@ -102,22 +102,24 @@ proves local request/parser/transport behavior, not Google schema acceptance,
 TLS reachability, quota, account mapping, billing, model quality or user
 benefit.
 
-Official references consulted November 7, 2026: -
-https://ai.google.dev/api/generate-content -
-https://googleapis.github.io/js-genai/release_docs/interfaces/types.Part.html -
-https://ai.google.dev/gemini-api/docs/structured-output -
-https://ai.google.dev/gemini-api/docs/thinking -
-https://ai.google.dev/gemini-api/docs/pricing
+Official references consulted November 7, 2026:
+
+- https://ai.google.dev/api/generate-content
+- https://googleapis.github.io/js-genai/release_docs/interfaces/types.Part.html
+- https://ai.google.dev/gemini-api/docs/structured-output
+- https://ai.google.dev/gemini-api/docs/thinking
+- https://ai.google.dev/gemini-api/docs/pricing
 
 The web reader returned unsupported-content-type errors for direct
 documentation fetches; indexed official API excerpts confirmed generateContent,
 responseJsonSchema, modelVersion, responseId and thought-inclusive total
 tokens. Current indexed 3.5 model/thinking pages support structured outputs and
-MINIMAL thinking without a zero-thinking guarantee. Sources also include: -
-https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite -
-https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite -
-https://ai.google.dev/gemini-api/docs/deprecations -
-https://ai.google.dev/gemini-api/docs/generate-content/thinking
+MINIMAL thinking without a zero-thinking guarantee. Sources also include:
+
+- https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite
+- https://ai.google.dev/gemini-api/docs/models/gemini-2.5-flash-lite
+- https://ai.google.dev/gemini-api/docs/deprecations
+- https://ai.google.dev/gemini-api/docs/generate-content/thinking
 
 No live API/schema or current price was verified. No vendor SDK/dependency,
 frozen prompt, payment source, database migration, persistent credential or
