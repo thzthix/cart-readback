@@ -1985,7 +1985,11 @@ class Service:
                         )
                     else:
                         exchange = adapter.exchange(prepared, claim, deadline)
-                except Exception:
+                except BaseException:
+                    # This dedicated worker owns interruption as uncertainty,
+                    # not cancellation. The synchronous exchange has exited its
+                    # cleanup before this catch; never leak provider exceptions
+                    # through threading.excepthook or leave a claim pending.
                     exchange = None
                 self._checkpoint(
                     "analysis_before_observation_commit", operation_id
@@ -2012,8 +2016,8 @@ class Service:
                             claim,
                             "MODEL_OUTCOME_UNKNOWN",
                         )
-            except Exception:
-                # Preserve ambiguity if the observation transaction rolls back.
+            except BaseException:
+                # Fence even non-Exception worker interruptions after rollback.
                 # Never print arbitrary exception text from trusted test seams.
                 try:
                     with self.store.transaction() as connection:
@@ -2023,7 +2027,7 @@ class Service:
                             claim,
                             "MODEL_OUTCOME_UNKNOWN",
                         )
-                except Exception:
+                except BaseException:
                     pass  # Startup recovery owns a failed persistence boundary.
             finally:
                 with self._activity_lock:
