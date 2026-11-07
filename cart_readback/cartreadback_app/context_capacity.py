@@ -556,6 +556,11 @@ class TransactionContextCapacityLedger:
         """Return the private immutable record for original-policy observation."""
         return self._identity
 
+    @property
+    def policy(self) -> ContextCapacityPolicy:
+        """Return the original immutable policy for independent classification."""
+        return self._policy
+
     def _transaction(self) -> sqlite3.Connection:
         connection = self._connection
         if not connection.in_transaction:

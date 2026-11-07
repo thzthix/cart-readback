@@ -304,3 +304,45 @@ blanket “No money moves” for a provider-capable analysis path; inference may
 API charges after a separately approved external installation. No deployment,
 secure provisioning, real billing, model quality or native-browser evidence is
 asserted by this contract.
+
+
+## C13 — Host-only Gemini analysis, no HTTP activation
+
+Issue #48 adds `Service(..., gemini_analysis=GeminiAnalysisRuntime(...))` and the
+explicit `scripts/run_gemini_analysis.py prepare|run` host entry point. It does
+not change C03 request fields, the fixture CLI, LocalServer, or buyer UI support.
+Do not serve this strategy through the existing OpenAI-specific mixed-mode UI.
+No HTTP request can install approval, choose a provider, load a key or set prices.
+
+The host Service uses aggregate `mixed` with analysis mode
+`genuine-gemini-capacity` and exact fixture payment mode. The C12 execution kinds,
+dispatch availability/network capability distinction, and historical accounting
+rules apply. Public `analysis.strategy` is `gemini-capacity-v1`. Public model keys
+are the C12 whitelist, with provider `google-gemini-generate-content`, one exact
+configured Gemini model, and adapter `genuine-gemini-generation-v1`. Private
+project, credential, host approval, runtime and ledger identifiers are excluded.
+Fabricated bindings always produce fabricated-offline, never provider evidence.
+
+The separate Gemini ledger reserves the full supported 1,048,576 input tokens
+and 2,048 output tokens (including thoughts) at positive externally adopted
+project rates before each attempt. Reservations never refund or renew. The same
+transaction owns pending checkout and analysis operation. The single durable
+claim precedes connection construction and credential borrowing; every I/O step
+rechecks the original claim, exact request/owner/catalog/conditions/runtime and
+precise expiry without holding the DB transaction during I/O. Unknown, orphaned
+or unresolved history blocks strategy/owner replacement in both directions.
+
+Independent valid accounting may survive refusal or invalid proposals. Wrong
+model or contradictory usage cannot establish a successful known-contract
+result. Matching late usage belongs only to the original UNKNOWN operation and
+cannot restore snapshot or consent. Watchdog timeout does not cancel remote
+work: Service ownership remains held until synchronous cleanup/observation exit.
+
+The run phase refuses missing/replaced/copied databases and requires the exact
+existing owner and reviewed nonsecret approval record. An inherited private pipe
+provides a single bounded lazy credential borrow after claim; no key is accepted
+in arguments, ambient environment, repository or approval JSON. Local host
+records are trusted evidence references, not external verification or a boolean
+approval shortcut. Full workflow and limitations: [Gemini host runner](../docs/GEMINI_SERVICE.md).
+No actual credential setup, live Gemini request, real billing, PayPal operation,
+HTTP/UI Gemini support, deployment or buyer-benefit validation is asserted.

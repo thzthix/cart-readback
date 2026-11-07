@@ -187,6 +187,80 @@ def _usage(envelope, config):
     return counts[0], counts[1], thoughts, counts[1] + thoughts, counts[2]
 
 
+@dataclass(frozen=True)
+class GeminiAccounting:
+    """Bounded independent usage, with no proposal text or continuation data."""
+
+    response_id_sha256: str
+    model: str
+    input_tokens: int
+    candidate_tokens: int
+    thought_tokens: int
+    output_tokens: int
+    total_tokens: int
+    accounting_contract: str
+    response_status: str = "completed"
+    usage_finality: str = "terminal-model-usage"
+
+
+def classify_gemini_usage(raw: bytes, config: GeminiConfig) -> GeminiAccounting:
+    """Validate usage independently of refused, incomplete or invalid prose.
+
+    Exact model and coherent counters are required. Explicit non-text/tool/cache
+    activity retains supported counters but makes the accounting contract UNKNOWN.
+    HTTP framing and deadline faults are separately owned by the transport host.
+    """
+    if type(config) is not GeminiConfig:
+        raise unavailable()
+    config.__post_init__()
+    envelope = strict_provider_json(
+        raw, max_bytes=MAX_RESPONSE_BYTES, max_depth=32
+    )
+    response_id = envelope.get("responseId")
+    if (
+        envelope.get("modelVersion") != config.expected_model_version
+        or envelope.get("error") is not None
+        or type(response_id) is not str
+        or re.fullmatch(r"[A-Za-z0-9_-]{1,256}", response_id) is None
+    ):
+        raise unavailable("MODEL_BUDGET_EXCEEDED")
+    usage = _usage(envelope, config)
+    conflict = False
+    for key in ("toolUse", "toolUsage", "tools", "cachedContent"):
+        if key in envelope and envelope[key] not in (None, [], {}):
+            conflict = True
+    candidates = envelope.get("candidates")
+    if type(candidates) is list:
+        for candidate in candidates:
+            if type(candidate) is not dict:
+                continue
+            if any(
+                key in candidate
+                for key in ("groundingMetadata", "urlContextMetadata")
+            ):
+                conflict = True
+            content = candidate.get("content")
+            if type(content) is not dict:
+                continue
+            parts = content.get("parts")
+            if type(parts) is list:
+                for part in parts:
+                    if type(part) is dict and set(part) - {
+                        "text",
+                        "thought",
+                        "thoughtSignature",
+                    }:
+                        conflict = True
+    return GeminiAccounting(
+        text_hash(response_id),
+        config.model,
+        *usage,
+        "unsupported-provider-activity"
+        if conflict
+        else "no-explicit-profile-conflict",
+    )
+
+
 class GeminiClient:
     """Prepare/parse Gemini requests, with explicit synchronous transport only.
 

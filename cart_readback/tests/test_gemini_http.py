@@ -96,6 +96,19 @@ class GeminiHTTPTests(unittest.TestCase):
         self.assertNotIn(KEY, str(caught.exception))
         self.assertIsNone(caught.exception.__cause__)
 
+    def test_cleanup_exception_prevents_known_success(self):
+        for resource in ("response", "connection"):
+            with self.subTest(resource=resource):
+                transport = self.make()
+                target = getattr(self, resource)
+                target.close = mock.Mock(side_effect=OSError("SECRET cleanup"))
+                self.assert_error(lambda: self.send(transport))
+                target.close.assert_called_once()
+                other = (
+                    self.connection if resource == "response" else self.response
+                )
+                self.assertEqual(1, other.closed)
+
     def test_fixed_tls_header_key_and_single_attempt(self):
         transport = self.make()
         self.assertEqual(b"{}", self.send(transport))
