@@ -312,14 +312,25 @@ ordinary fixture CLI, UI and PayPal paths are unchanged.
 
 The runner has separate offline `prepare` and explicitly approved `run` phases.
 Run requires the same existing database/owner, a reviewed nonsecret host record
-with project/model/eligibility/adopted positive pricing and exact data/spend
-scope, and a pre-opened private credential pipe. It does not discover ambient
+with project/model/eligibility, external decision, explicit admission mode and
+exact data/spend scope, and a pre-opened private credential pipe. It does not discover ambient
 keys or create credentials. The key is borrowed only after durable reservation
 and claim. A local record identifies externally established facts and approval;
 it does not verify them or supply approval by itself.
 
+Issue #50 distinguishes positive-rate `paid` admission from explicit
+`externally-verified-free-tier` admission. Free mode requires externally
+established Free-tier/no-paid-project-billing facts, zero/zero adopted rates and
+exactly zero authorized USD; positive call/token bounds remain mandatory. Public
+pricing and local record hashes do not verify account facts or supply consent.
+Mode, exact project/model, eligibility/pricing/host-decision records and window
+are bound into policy, runtime and immutable allowance identity. Legacy v1
+approval/policy records fail closed without migration or allowance renewal.
+
 Every call permanently reserves 1,048,576 input tokens and 2,048 output tokens
-including thoughts. Failed, uncertain, stale or restarted operations remain
+including thoughts, plus one call and the mode-specific adopted spend. This is
+conservative local accounting, not an actual 1M-token request, quota proof or
+invoice. Free mode reserves zero USD while consuming full call/token capacity. Failed, uncertain, stale or restarted operations remain
 UNKNOWN with no retry, refund or automatic renewal. Tests use only fabricated
 wires and synthetic keys; they do not establish real account eligibility,
 pricing, TLS/provider acceptance, paid usage, semantic quality or buyer benefit.

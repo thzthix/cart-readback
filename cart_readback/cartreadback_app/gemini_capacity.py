@@ -30,7 +30,9 @@ from cartreadback_app.validation import (
     text_hash,
 )
 
-VERSION = "gemini-capacity-v1"
+VERSION = "gemini-capacity-v2"
+PAID_MODE = "paid"
+FREE_MODE = "externally-verified-free-tier"
 MAX_INPUT_TOKENS = 1_048_576
 OUTPUT_TOKENS = 2048
 MAX_INTEGER = 2**53 - 1
@@ -68,6 +70,11 @@ def _int(value: object, maximum: int = MAX_INTEGER, minimum: int = 0) -> int:
     if type(value) is not int or not minimum <= value <= maximum:
         raise _error()
     return value
+
+
+def _mode(value: object) -> None:
+    if type(value) is not str or value not in (PAID_MODE, FREE_MODE):
+        raise _error()
 
 
 def _time(value: object) -> float:
@@ -115,14 +122,22 @@ class GeminiCapacityPolicy:
     tier: str
     eligibility_record_sha256: str
     pricing_record_sha256: str
+    admission_mode: str
+    host_decision_record_sha256: str
 
     def __post_init__(self) -> None:
-        """Require explicit, bounded, positive adoption and eligibility records."""
+        """Require explicit paid rates or externally established free-tier facts."""
         _window(self.valid_from, self.expires_at)
         GeminiConfig(self.expected_model_version, model=self.model)
         _int(self.max_input_tokens, MAX_INPUT_TOKENS, MAX_INPUT_TOKENS)
+        _mode(self.admission_mode)
         for rate in self.rates:
-            _int(rate, minimum=1)
+            _int(rate, minimum=0 if self.admission_mode == FREE_MODE else 1)
+        if self.admission_mode == FREE_MODE:
+            if self.tier != "free" or self.rates != (0, 0):
+                raise _error()
+        elif self.tier != "paid":
+            raise _error()
         for value in (self.project, self.tier):
             if (
                 type(value) is not str
@@ -131,6 +146,7 @@ class GeminiCapacityPolicy:
                 raise _error()
         _sha(self.eligibility_record_sha256)
         _sha(self.pricing_record_sha256)
+        _sha(self.host_decision_record_sha256)
 
     @property
     def rates(self) -> tuple[int, int]:
@@ -144,6 +160,8 @@ class GeminiCapacityPolicy:
         """Round both components upward, without asserting a provider invoice."""
         _int(input_tokens, self.max_input_tokens)
         _int(output_tokens, OUTPUT_TOKENS)
+        if self.admission_mode == FREE_MODE:
+            return 0
         return _int(
             sum(
                 charge_micro_usd(tokens, rate)
@@ -189,6 +207,7 @@ class HostGeminiAuthorization:
     max_total_input_tokens: int
     max_total_output_tokens: int
     max_micro_usd: int
+    admission_mode: str
 
     def __post_init__(self) -> None:
         """Reject unbounded allowances and mutable or malformed references."""
@@ -205,9 +224,13 @@ class HostGeminiAuthorization:
         for value in (
             self.max_total_input_tokens,
             self.max_total_output_tokens,
-            self.max_micro_usd,
         ):
             _int(value, minimum=1)
+        _mode(self.admission_mode)
+        if self.admission_mode == FREE_MODE:
+            _int(self.max_micro_usd, maximum=0)
+        else:
+            _int(self.max_micro_usd, minimum=1)
 
 
 @dataclass(frozen=True)
@@ -447,6 +470,7 @@ class TransactionGeminiCapacityLedger:
             not connection.in_transaction
             or type(policy) is not GeminiCapacityPolicy
             or type(authorization) is not HostGeminiAuthorization
+            or authorization.admission_mode != policy.admission_mode
             or authorization.policy_sha256 != text_hash(policy.identity)
             or authorization.valid_from < policy.valid_from
             or authorization.expires_at > policy.expires_at

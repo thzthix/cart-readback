@@ -1,6 +1,6 @@
 # Opt-in Gemini host analysis
 
-Issue #48 adds a **host-only, one-shot analysis path**, using the shipped Gemini
+Issues #48/#50 provide a **host-only, one-shot analysis path**, using the shipped Gemini
 client and fixed Google HTTPS connection. The ordinary fixture CLI, HTTP API and
 buyer UI remain unchanged. This path must not be passed to `LocalServer`: the
 current buyer UI accepts only its separately documented provider identities.
@@ -13,6 +13,11 @@ key, eligibility, model quality, actual price, real response or invoice. All tes
 credentials and wire responses are fabricated. No real key, TLS connection,
 provider call, deployment or PayPal experiment was used to develop this slice.
 
+Issue #50's explicit free/paid contract below supersedes only the original C13
+positive-only admission requirement. The frozen prompt preflight still binds that API
+contract's original bytes; no prompt/corpus/gold/scorer artifacts are changed.
+The HTTP/API selection remains disabled.
+
 ## Approval boundary
 
 A trusted host must independently establish and review:
@@ -23,9 +28,24 @@ A trusted host must independently establish and review:
 - Google project, tier, credential version and host revision, with nonsecret
   binding/eligibility record references. Record hashes identify records; this
   program does not authenticate their authors or verify their factual contents.
-- Adopted **positive integer micro-USD per million tokens** for uncached input
-  and all output, including thoughts. Do not copy OpenAI rates, assume a free
-  tier, or treat a historical spending cap as this authorization.
+- An explicit admission mode, project billing tier and adopted integer micro-USD
+  per million tokens for uncached input and all output, including thoughts.
+  `paid` requires tier `paid`, two strictly positive rates and strictly positive
+  authorized spend. `externally-verified-free-tier` requires tier `free`, exact
+  integer zero/zero rates and exact integer `max_micro_usd=0`. Mixed rates, bools,
+  negative values and mode/tier/allowance mismatches fail closed. No paid fallback
+  exists. Do not copy OpenAI rates or infer free eligibility from an old key.
+- A `host_decision_record_sha256` identifying the externally reviewed decision
+  for this exact project/model/version, eligibility/pricing records and window.
+  In free mode that record must establish current Free-tier eligibility, no paid
+  project billing/fallback, Standard free input and thought-inclusive output,
+  and sufficient model/context/call/token quota. The permission to disclose the
+  exact data and execute within those bounds must also exist outside this code.
+  A record hash is not an authenticated Google fact, consent or no-charge guarantee.
+  In paid mode the decision must instead cover the adopted paid rates and spend.
+  Public Google pricing alone does not establish account-specific eligibility.
+  API keys inherit project billing; a paid spending cap can overshoot due to
+  reporting delays and is not a strict zero-cost mechanism.
 - The full 1,048,576-token model input ceiling used in this conservative slice.
   The client cap is not evidence that the particular account supports it. A
   lower externally established ceiling requires another reviewed admission
@@ -60,14 +80,17 @@ The host supplies a nonsecret `host-plan.json` object with exactly these fields:
 - `policy`: `valid_from`, `expires_at` (integer UTC epoch seconds), `model`,
   `expected_model_version`, `max_input_tokens` (1048576),
   `input_rate_micro_usd_per_million`, `output_rate_micro_usd_per_million`,
-  `project`, `tier`, `eligibility_record_sha256`, `pricing_record_sha256`.
+  `project`, `tier` (exact `free` or `paid`), `eligibility_record_sha256`,
+  `pricing_record_sha256`, `admission_mode`, `host_decision_record_sha256`.
 - `binding_record_sha256` and `pricing_adoption_record_sha256`: lowercase
   64-hex references to the independently established host records. The latter
   must equal `policy.pricing_record_sha256`.
 - `installation_revision`: a bounded ASCII nonsecret host installation revision.
 - `timeout_seconds`: positive, at most 20 seconds.
 - `limits`: `valid_from`, `expires_at`, `max_calls` (1–64),
-  `max_total_input_tokens`, `max_total_output_tokens`, `max_micro_usd`. The
+  `max_total_input_tokens`, `max_total_output_tokens`, `max_micro_usd`,
+  `admission_mode` (must equal the policy mode). Call/input/output limits stay
+  strictly positive in both modes; only free-mode spend is exactly zero. The
   authorization window must fit wholly inside the policy window. For one call,
   allowances must cover 1048576 input and 2048 output tokens and the upward-rounded
   full reservation at the adopted rates.
@@ -108,7 +131,10 @@ request and prints its SHA-256. The request includes the database's persistent
 identity, a hash binding its resolved path/device/inode, owner hash, catalog,
 ordered condition IDs, current session revision, exact generation-request hash
 and execution identity. The latter binds the Python/OpenSSL runtime and reviewed
-provider mechanics, prompt/configuration and credential binding. Code changes
+provider mechanics, prompt/configuration, credential binding and the complete
+policy hash, including admission mode, project/model/version, both external
+eligibility/pricing references, host decision, rates, context and time window.
+Provenance and the DB-bound allowance bind that same policy. Code changes
 between prepare and run require a newly reviewed request, never silent rebinding.
 
 ### 2. Review externally, then run explicitly
@@ -118,7 +144,7 @@ and grants the bounded action. It supplies a separate private approved record:
 
 ```json
 {
-  "schema": "gemini-approved-host-record-v1",
+  "schema": "gemini-approved-host-record-v2",
   "approval_reference": "EXTERNALLY_ESTABLISHED_RECORD_ID",
   "request_sha256": "EXACT_64_HEX_DIGEST_PRINTED_BY_PREPARE",
   "request": "THE_COMPLETE_UNCHANGED_REQUEST_OBJECT_NOT_A_STRING"
@@ -167,6 +193,17 @@ restore old backups or manipulate SQLite history to renew an allowance. A fully
 privileged host rollback of the original file is not cryptographically prevented.
 The supported host is trusted and must preserve its database/history.
 
+Issue #50 versions the private policy identity as `gemini-capacity-v2` and both
+request/approval schemas as `gemini-host-approval-request-v2` /
+`gemini-approved-host-record-v2`. Explicit mode, tier and external-decision fields
+are mandatory, including for paid hosts. Old v1 approvals/policy documents fail
+closed; they are not inferred to be paid or free and are not automatically
+migrated. Existing database identities and operation rows are never replaced.
+A new record, mode, evidence or window cannot renew an old allowance or clear
+UNKNOWN. Retain the original database/history; unsupported legacy recovery is
+blocked pending separately reviewed handling, not permission to create a fresh
+database, restore an older backup or replace approval/history to bypass it.
+
 The runner selects only the shipped provider connection. Its output is the
 Service's safe public envelope; private project, credential, approval, ledger,
 runtime identity and owner token are not included. It does not print provider
@@ -178,7 +215,11 @@ Service lease. Forcefully stopping it is not proof of remote cancellation.
 ## Lifecycle and public evidence
 
 Each operation permanently consumes a full 1048576 input-token reservation and
-2048 output tokens, including thinking, plus one call and upward-rounded spend.
+2048 output tokens, including thinking, plus one call. Paid spend is upward-rounded
+at the adopted positive rates; explicit free mode reserves exactly zero USD.
+Zero spend never removes the finite call/token limits. The full context is
+**conservative local accounting**, not a 1M-token request, quota proof or invoice.
+Only the bounded prepared source/conditions request is sent.
 A smaller known usage result never credits capacity back. This intentionally
 restrictive first slice does not call a count endpoint or invent a local token
 estimate. 3.5 MINIMAL thinking is not zero thinking; thought usage is included.
@@ -230,3 +271,22 @@ pipe deadlines, oversize rejection and rejection of regular files. The separate
 Gemini Service/client/HTTP/ledger suites exercise fabricated wire responses,
 reservation/claim fencing, accounting, cleanup and crash recovery. Full integrated
 fixture regressions remain required for the final changed tree.
+
+
+## Free-tier references and remaining gate
+
+Google publishes free Standard rates for the allowed Flash-Lite models. Those
+public pages do not verify the actual key/project/tier, exact returned version,
+quota/context support or owner approval, all of which remain UNKNOWN here.
+No account/billing setting was inspected or changed. Relevant official sources:
+
+- https://ai.google.dev/gemini-api/docs/pricing
+- https://ai.google.dev/gemini-api/docs/billing
+- https://ai.google.dev/gemini-api/docs/rate-limits
+- https://ai.google.dev/gemini-api/terms
+
+`test_gemini_zero_spend.py` uses only synthetic records and responses. It reruns
+the Service lifecycle regressions in free mode, including subprocess crashes,
+and exercises the real runner/Service with a synthetic pipe and replaced wire.
+Zero reservation/accounting coexists with permanently consumed call/input/output
+capacity. This is local admission evidence, not actual free-tier execution.

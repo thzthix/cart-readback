@@ -45,9 +45,11 @@ def plan():
             "input_rate_micro_usd_per_million": 1000000,
             "output_rate_micro_usd_per_million": 1000000,
             "project": "synthetic_project",
-            "tier": "fabricated",
+            "tier": "paid",
             "eligibility_record_sha256": "a" * 64,
             "pricing_record_sha256": "b" * 64,
+            "admission_mode": "paid",
+            "host_decision_record_sha256": "d" * 64,
         },
         "binding_record_sha256": "c" * 64,
         "pricing_adoption_record_sha256": "b" * 64,
@@ -60,6 +62,7 @@ def plan():
             "max_total_input_tokens": 1048576,
             "max_total_output_tokens": 2048,
             "max_micro_usd": 1050624,
+            "admission_mode": "paid",
         },
     }
 

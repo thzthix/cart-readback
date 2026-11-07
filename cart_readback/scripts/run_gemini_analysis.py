@@ -53,8 +53,8 @@ from cartreadback_app.validation import (  # noqa: E402
     token,
 )
 
-REQUEST_SCHEMA = "gemini-host-approval-request-v1"
-APPROVAL_SCHEMA = "gemini-approved-host-record-v1"
+REQUEST_SCHEMA = "gemini-host-approval-request-v2"
+APPROVAL_SCHEMA = "gemini-approved-host-record-v2"
 PLAN_FIELDS = {
     "binding",
     "config",
@@ -204,6 +204,7 @@ def _plan(value):
             "max_total_input_tokens",
             "max_total_output_tokens",
             "max_micro_usd",
+            "admission_mode",
         },
     )
     return binding, config, policy, transport
@@ -221,7 +222,11 @@ def _installation(request, handle=None):
         (request["owner_sha256"],),
     )
     identity = execution_identity(
-        binding, config, plan["timeout_seconds"], transport=transport
+        binding,
+        config,
+        plan["timeout_seconds"],
+        transport=transport,
+        policy=policy,
     )
     if identity != request["runtime_sha256"]:
         raise _blocked()
@@ -236,6 +241,7 @@ def _installation(request, handle=None):
             plan["binding_record_sha256"],
             plan["pricing_adoption_record_sha256"],
             "provider",
+            policy=policy,
         ),
         data_scope_sha256=digest(asdict(scope)),
         runtime_sha256=identity,
@@ -267,7 +273,7 @@ def _database_file_identity(path):
 
 def prepare(db, owner_file, host_plan, sku, choices):
     """Prepare exact nonsecret disclosure; never grant approval or read a key."""
-    binding, config, _policy, transport = _plan(host_plan)
+    binding, config, policy, transport = _plan(host_plan)
     selected = conditions(choices)
     ordered = [
         {"condition_id": f"c{index}", **choice}
@@ -307,6 +313,7 @@ def prepare(db, owner_file, host_plan, sku, choices):
                 config,
                 host_plan["timeout_seconds"],
                 transport=transport,
+                policy=policy,
             ),
             "generation_request_sha256": GeminiClient(config)
             .prepare(product["source"], ordered)
