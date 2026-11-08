@@ -87,7 +87,10 @@ For broader checks, follow the exact commands and limitations in
 Backend tests use Python; UI check scripts additionally require Node.js 22+
 with global Fetch, structuredClone and crypto.randomUUID. Optional development
 lint uses Ruff 0.14.3; prompt preflight requires jsonschema 4.26.0 and the reviewed
-development requirements. These are not runtime dependencies. Do not install
+development requirements. The linked aggregate recipe also requires Bash, Git,
+awk, tee, cmp and sha256sum. Verify these tools before running it; sha256sum is
+not assumed to be available on macOS. Missing prerequisites are a blocker, not
+permission to install tools automatically. These are not runtime dependencies. Do not install
 missing tools or dispatch hosted Actions just to present an unchecked pass.
 The aggregate includes all five UI runners and their separate log guards;
 individual tests, skipped HTTP tests or old results do not certify the full tree.
@@ -125,7 +128,8 @@ public judging access or submission. Under the
 [official contest rules](https://paypalaihackathon.devpost.com/rules), the eventual
 entry needs genuine AI and central PayPal sandbox integration, a public
 open-source repository, English content or translation, and a hosted demo **or**
-complete runnable instructions. Judging access must remain available through
+complete runnable instructions. Free, unrestricted judging access must remain
+available through
 December 15, 2026 at 16:00 UTC. A video under three minutes is a recommendation,
 not a hard rule asserted here.
 
@@ -140,4 +144,6 @@ Do not infer authority for any of them from a documentation PR or a merge.
 Commands were checked against README, the fixture entry point and smoke source
 at main `e48c2b5d0a7ebe32cad56aed80e5fbd68c89215f`.
 No application, browser, provider or aggregate checks were executed for this
-documentation change. See the linked PR's fixed-head review for later evidence.
+documentation change. See [PR #61](https://github.com/thzthix/cart-readback/pull/61)
+for the current review state and any later fixed-head evidence; this note does
+not assert that review of the latest revision is complete.
