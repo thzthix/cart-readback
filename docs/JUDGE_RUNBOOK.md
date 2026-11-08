@@ -11,6 +11,10 @@ Use a writable checkout, Python 3.11+ available as `python`, and a current brows
 with JavaScript modules, Fetch, AbortController, Web Crypto and sessionStorage.
 The runtime uses the Python standard library: no package install, UI build,
 Node.js, API key or account setup is needed for this demonstration.
+Check `python --version` first. If it is missing or older than 3.11, choose an
+already installed Python 3.11+ interpreter, verify its version, and substitute
+that command for every `python` below (and in linked checks). Do not assume the
+system `python3` is recent enough. Stop if no suitable interpreter is available.
 
 ```sh
 cd cart_readback
