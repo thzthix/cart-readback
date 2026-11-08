@@ -589,6 +589,8 @@ class TransactionGeminiCapacityLedger:
         request_sha = _request_hash(request, fence, self._policy)
         auth = self._authorization
         connection = self._transaction()
+        if self._prefix == "gemini":
+            reject_active_corpus(connection)
         if fence.runtime_sha256 != auth.runtime_sha256 or not self._fresh(now):
             raise _error()
         rows = connection.execute(
@@ -597,8 +599,6 @@ class TransactionGeminiCapacityLedger:
         cost = self._policy.estimate(
             self._policy.max_input_tokens, OUTPUT_TOKENS
         )
-        if self._prefix == "gemini":
-            reject_active_corpus(connection)
         # All reservations use the same immutable policy; KNOWN never refunds.
         prior_calls, prior_input, prior_output, prior_cost = (
             self._prior_totals()

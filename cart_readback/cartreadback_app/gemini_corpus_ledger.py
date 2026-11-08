@@ -8,7 +8,9 @@ from pathlib import Path
 from cartreadback_app.analysis_history import legacy_analysis_history_guard
 from cartreadback_app.context_capacity import initialize_context_capacity
 from cartreadback_app.gemini_capacity import (
+    MAX_INPUT_TOKENS,
     MAX_INTEGER,
+    OUTPUT_TOKENS,
     GeminiReservation,
     TransactionGeminiCapacityLedger,
     gemini_database_identity,
@@ -16,8 +18,15 @@ from cartreadback_app.gemini_capacity import (
     initialize_gemini_database,
 )
 from cartreadback_app.gemini_corpus import blocked
+from cartreadback_app.responses_adapter import _validate_results
 from cartreadback_app.storage import Store
-from cartreadback_app.validation import canonical, digest, integer, text_hash
+from cartreadback_app.validation import (
+    canonical,
+    digest,
+    integer,
+    object_fields,
+    text_hash,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS gemini_corpus_identity (
@@ -27,7 +36,8 @@ CREATE TABLE IF NOT EXISTS gemini_corpus_identity (
 );
 CREATE TABLE IF NOT EXISTS gemini_corpus_requests (
     ordinal INTEGER PRIMARY KEY, mapping TEXT NOT NULL,
-    operation_id TEXT UNIQUE, result TEXT NOT NULL DEFAULT ''
+    operation_id TEXT UNIQUE, result TEXT NOT NULL DEFAULT '',
+    result_sha256 TEXT NOT NULL DEFAULT ''
 );
 """
 _HISTORY_TABLES = (
@@ -164,6 +174,72 @@ class CorpusCapacityLedger(TransactionGeminiCapacityLedger):
 
     _prefix = "gemini_corpus"
 
+    def _approved_tuple(self, fence, request_sha256, operation_id):
+        row = self._connection.execute(
+            "SELECT document FROM gemini_corpus_identity WHERE singleton=1"
+        ).fetchone()
+        if row is None:
+            raise blocked()
+        request = json.loads(row[0])["request"]
+        legacy_analysis_history_guard(self._connection)
+        if history_snapshot(self._connection) != request["baseline_sha256"]:
+            raise blocked()
+        ordinal = fence.generation - 1
+        integer(ordinal, "ordinal", 0, len(request["mapping"]) - 1)
+        item = request["mapping"][ordinal]
+        stored = self._connection.execute(
+            "SELECT mapping,operation_id FROM gemini_corpus_requests WHERE ordinal=?",
+            (ordinal,),
+        ).fetchone()
+        if (
+            stored is None
+            or stored[0] != canonical(item)
+            or stored[1] != operation_id
+            or fence.runtime_sha256 != request["runtime_sha256"]
+            or fence.owner_sha256 != request["owner_sha256"]
+            or fence.source_sha256 != item["source_sha256"]
+            or fence.source_identity_sha256 != item["source_identity_sha256"]
+            or fence.source_revision != item["source_revision"]
+            or fence.conditions_sha256 != item["conditions_sha256"]
+            or request_sha256 != item["request_sha256"]
+        ):
+            raise blocked()
+
+    def reserve(self, request, fence, *, now):
+        """Enforce exact corpus membership even below the executable wrapper."""
+        self._approved_tuple(fence, text_hash(request.decode("utf-8")), None)
+        if self._connection.execute(
+            "SELECT 1 FROM gemini_corpus_requests r LEFT JOIN gemini_corpus_capacity_operations c ON c.operation_id=r.operation_id WHERE r.ordinal<? AND (r.operation_id IS NULL OR c.status!='KNOWN' OR r.result='') LIMIT 1",
+            (fence.generation - 1,),
+        ).fetchone():
+            raise blocked()
+        return super().reserve(request, fence, now=now)
+
+    def claim(self, reservation, request, current_fence, *, now):
+        """Require the persisted ordered mapping before claiming once."""
+        self._approved_tuple(
+            current_fence, reservation.request_sha256, reservation.operation_id
+        )
+        return super().claim(reservation, request, current_fence, now=now)
+
+    def validate_claim(self, claim, request, current_fence, *, now):
+        """Revalidate exact finite membership at each network/secret guard."""
+        self._approved_tuple(
+            current_fence,
+            claim.reservation.request_sha256,
+            claim.reservation.operation_id,
+        )
+        return super().validate_claim(claim, request, current_fence, now=now)
+
+    def observe(self, claim, envelope, **kwargs):
+        """Reject a tuple-swapped observation, preserving the original claim."""
+        self._approved_tuple(
+            kwargs["current_fence"],
+            kwargs["request_sha256"],
+            claim.reservation.operation_id,
+        )
+        return super().observe(claim, envelope, **kwargs)
+
     def _prior_totals(self):
         return prior_totals(self._connection)
 
@@ -193,10 +269,12 @@ def activate(connection, record, runtime, now):
         totals = prior_totals(connection)
         auth = runtime.authorization
         # The new total includes all old permanent reservations, not a renewal.
+        count = len(runtime.request["mapping"])
         if (
-            totals[0] >= auth.max_calls
-            or totals[1] >= auth.max_total_input_tokens
-            or totals[2] >= auth.max_total_output_tokens
+            totals[0] + count > auth.max_calls
+            or totals[1] + count * MAX_INPUT_TOKENS
+            > auth.max_total_input_tokens
+            or totals[2] + count * OUTPUT_TOKENS > auth.max_total_output_tokens
         ):
             raise blocked()
         connection.execute(
@@ -239,7 +317,7 @@ def ledger_for(connection, runtime, now, *, fresh=True):
 def paired_rows(connection, runtime):
     """Validate both directions and the exact operation/result prefix."""
     rows = connection.execute(
-        "SELECT r.*,c.reservation,c.status,c.observation,c.fence_sha256 FROM gemini_corpus_requests r LEFT JOIN gemini_corpus_capacity_operations c ON c.operation_id=r.operation_id ORDER BY r.ordinal"
+        "SELECT r.*,c.reservation,c.status,c.observation,c.fence_sha256,c.response_id_sha256,c.request_id_sha256 FROM gemini_corpus_requests r LEFT JOIN gemini_corpus_capacity_operations c ON c.operation_id=r.operation_id ORDER BY r.ordinal"
     ).fetchall()
     mapping = runtime.request["mapping"]
     if (
@@ -256,7 +334,11 @@ def paired_rows(connection, runtime):
         ):
             raise blocked()
         if row["operation_id"] is None:
-            if row["result"] or row["status"] is not None:
+            if (
+                row["result"]
+                or row["result_sha256"]
+                or row["status"] is not None
+            ):
                 raise blocked()
             stopped = True
             continue
@@ -270,6 +352,9 @@ def paired_rows(connection, runtime):
         reservation = GeminiReservation(**json.loads(row["reservation"]))
         if (
             reservation.operation_id != row["operation_id"]
+            or reservation.input_tokens != MAX_INPUT_TOKENS
+            or reservation.output_tokens != OUTPUT_TOKENS
+            or reservation.reserved_micro_usd != 0
             or reservation.request_sha256 != mapping[index]["request_sha256"]
             or reservation.fence_sha256 != digest(runtime.fence(index).__dict__)
             or row["fence_sha256"] != reservation.fence_sha256
@@ -287,8 +372,77 @@ def paired_rows(connection, runtime):
             not row["result"] or not row["observation"]
         ):
             raise blocked()
+        if row["observation"]:
+            accounting = json.loads(row["observation"])
+            if (
+                accounting.get("request_sha256") != reservation.request_sha256
+                or accounting.get("runtime_sha256")
+                != runtime.authorization.runtime_sha256
+                or accounting.get("response_id_sha256")
+                != row["response_id_sha256"]
+                or accounting.get("request_id_sha256")
+                != row["request_id_sha256"]
+                or accounting.get("model") != runtime.config.model
+                or accounting.get("estimated_micro_usd_at_adopted_rates") != 0
+                or (
+                    row["status"] == "KNOWN"
+                    and accounting.get("accounting_contract")
+                    != "no-explicit-profile-conflict"
+                )
+            ):
+                raise blocked()
+            integer(
+                accounting["input_tokens"], "input_tokens", 0, MAX_INPUT_TOKENS
+            )
+            integer(
+                accounting["output_tokens"], "output_tokens", 0, OUTPUT_TOKENS
+            )
+            if (
+                accounting["total_tokens"]
+                != accounting["input_tokens"] + accounting["output_tokens"]
+            ):
+                raise blocked()
         if row["result"]:
             result = json.loads(row["result"])
+            object_fields(
+                result,
+                {
+                    "ordinal",
+                    "case_id",
+                    "condition_ids",
+                    "request_sha256",
+                    "operation_id",
+                    "accounting_state",
+                    "outcome",
+                    "error_code",
+                    "results",
+                },
+            )
+            if (
+                text_hash(row["result"]) != row["result_sha256"]
+                or result["condition_ids"] != mapping[index]["condition_ids"]
+            ):
+                raise blocked()
+            if result["outcome"] == "predicted":
+                case, _ = runtime.exact_case(index)
+                if (
+                    result["error_code"]
+                    or _validate_results(
+                        case["source"],
+                        case["conditions"],
+                        {"results": result["results"]},
+                    )
+                    != result["results"]
+                ):
+                    raise blocked()
+            elif result["results"] is not None or result["error_code"] not in {
+                "MODEL_OUTCOME_UNKNOWN",
+                "MODEL_REFUSED",
+                "MODEL_INCOMPLETE",
+                "MODEL_UNAVAILABLE",
+                "INVALID_PROPOSAL",
+            }:
+                raise blocked()
             if (
                 result["ordinal"] != index
                 or result["case_id"] != mapping[index]["case_id"]
@@ -335,8 +489,8 @@ def attach_result(
     """Attach exactly once in the same transaction as the accounting observation."""
     value = result_value(runtime, ordinal, operation_id, state, code, results)
     changed = connection.execute(
-        "UPDATE gemini_corpus_requests SET result=? WHERE ordinal=? AND operation_id=? AND result=''",
-        (canonical(value), ordinal, operation_id),
+        "UPDATE gemini_corpus_requests SET result=?,result_sha256=? WHERE ordinal=? AND operation_id=? AND result=''",
+        (canonical(value), digest(value), ordinal, operation_id),
     ).rowcount
     if changed != 1:
         raise blocked()

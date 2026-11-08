@@ -1051,7 +1051,7 @@ class Service:
                         "SELECT 1 FROM gemini_capacity_operations LIMIT 1"
                     ).fetchone()
                 ):
-                    self._analysis_history_guard(connection)
+                    legacy_analysis_history_guard(connection)
                 reservation = self._reserve_analysis(
                     connection, session, body, adapter
                 )

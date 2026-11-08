@@ -349,6 +349,13 @@ class CorpusRuntime:
         request = self.request
         plan_parts(request["plan"], self.transport)
         auth = self.authorization
+        handle = self.credential_handle
+        if handle is not None and (
+            getattr(handle, "binding", None) != self.binding
+            or getattr(handle, "ordinal", None) != self.ordinal
+            or getattr(handle, "grant_sha256", None) != self.record_sha256
+        ):
+            raise blocked()
         if (
             request["runtime_sha256"] != self.execution_sha256
             or request["evidence_kind"] != self.evidence_kind

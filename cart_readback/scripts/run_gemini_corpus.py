@@ -43,6 +43,7 @@ from cartreadback_app.gemini_corpus_ledger import (  # noqa: E402
     read_frozen,
     recover,
 )
+from cartreadback_app.genuine_responses import GenuineExchange  # noqa: E402
 from cartreadback_app.validation import (  # noqa: E402
     canonical,
     digest,
@@ -201,9 +202,19 @@ def _execute(store, runtime, ordinal, pipes, clock):
         exchange = adapter.exchange(
             prepared, claim, deadline, claim_guard=guard
         )
+        if (
+            type(exchange) is not GenuineExchange
+            or exchange.operation_id != reservation.operation_id
+            or exchange.claim_token != claim.claim_token
+            or exchange.request_sha256 != prepared.request_sha256
+            or exchange.runtime_sha256 != prepared.runtime_sha256
+            or exchange.evidence_kind != selected.evidence_kind
+        ):
+            raise blocked()
         fault, code, results = adapter.classify(
             exchange, selected.policy, prepared
         )
+        deadline.remaining()
         with store.transaction() as connection:
             ledger = ledger_for(connection, selected, clock())
             paired_rows(connection, selected)
@@ -248,12 +259,33 @@ def run(
     db, owner, raw, record, descriptors, *, transport=None, clock=time.time
 ):
     """Execute a sequential known prefix once; freeze before exporting/scoring."""
-    record = owned_json(canonical(record).encode())
-    runtime = _runtime(record, raw, owner, transport)
-    store = ExistingCorpusStore(db, runtime.request["database_file_sha256"])
-    lease = store.acquire_service()
-    pipes = None
+    pipes = lease = None
     try:
+        record = owned_json(canonical(record).encode())
+        runtime = _runtime(record, raw, owner, transport)
+        store = ExistingCorpusStore(db, runtime.request["database_file_sha256"])
+        lease = store.acquire_service()
+        # Recovery commits independently of fresh admission. Expiry/code drift
+        # cannot roll a crashed claim back into a sendable request.
+        with store.transaction() as connection:
+            if connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='gemini_corpus_identity'"
+            ).fetchone():
+                existing = connection.execute(
+                    "SELECT document,frozen FROM gemini_corpus_identity WHERE singleton=1"
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        text_hash(existing["document"]) != runtime.record_sha256
+                        or existing["frozen"]
+                    ):
+                        raise blocked()
+                    recover(connection, runtime)
+                    rows = paired_rows(connection, runtime)
+                    if any(row["status"] == "UNKNOWN" for row in rows) or all(
+                        row["status"] == "KNOWN" for row in rows
+                    ):
+                        return freeze(connection, runtime)
         with store.transaction() as connection:
             activate(connection, record, runtime, clock())
             # Frozen runs are never executable, even after an export failure.
@@ -287,7 +319,8 @@ def run(
                         os.close(descriptor)
                     except OSError:
                         pass
-        lease.close()
+        if lease is not None:
+            lease.close()
 
 
 def main(argv=None):
