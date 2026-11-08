@@ -134,7 +134,11 @@ An already activated run with a wholly TIMELY known prefix and an untouched
 suffix can become terminal when its original authority expires. The runner
 appends a separate `EXPIRED` run invalidation, binding the original grant/runtime,
 mapping, expiry/observation time, unchanged receipt hashes and exact undispatched
-ordinals. This is not a LATE/UNCONFIRMED operation receipt: the timely receipts,
+ordinals. Recovery and terminal invalidation commit before a separate freeze
+transaction, with the same process lease held across both. A freeze/export failure
+or process crash cannot roll back EXPIRED and reopen the suffix if the wall clock
+later moves back into the original window. The same boundary preserves recovered
+UNKNOWN claims. This is not a LATE/UNCONFIRMED operation receipt: the timely receipts,
 candidates, reservations and authority remain unchanged. Both the original run
 and credential-free restart can freeze the distinct audit-only contract. No new
 reservation, provider request, renewal or complete-evaluation claim is made.

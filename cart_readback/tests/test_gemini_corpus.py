@@ -2190,3 +2190,192 @@ class CorpusTests(unittest.TestCase):
                     )
                 with self.assertRaises(AppError):
                     read_frozen(self.db, audit_only=True)
+
+    def test_v6_expiry_survives_freeze_failure_and_clock_rollback(self):
+        from cartreadback_app.gemini_corpus_ledger import CorpusCapacityLedger
+
+        now = [NOW]
+        record = self.approval()
+        runtime = self.runtime(record)
+
+        def fail_freeze(*args):
+            with self.assertRaises(AppError):
+                self.store.acquire_service()
+            raise RuntimeError("invented freeze failure")
+
+        with (
+            self.commit_return_patch(
+                lambda: now.__setitem__(0, NOW + 1000), phase="seal"
+            ),
+            patch.object(runner, "freeze", fail_freeze),
+        ):
+            with self.assertRaises(RuntimeError):
+                runner.run(
+                    self.db,
+                    self.owner,
+                    self.raw,
+                    record,
+                    self.descriptors(),
+                    transport=self.transport,
+                    clock=lambda: now[0],
+                )
+        with self.store.transaction() as connection:
+            self.assertEqual(
+                1,
+                connection.execute(
+                    "SELECT count(*) FROM gemini_corpus_invalidation"
+                ).fetchone()[0],
+            )
+            self.assertEqual(
+                "",
+                connection.execute(
+                    "SELECT frozen FROM gemini_corpus_identity"
+                ).fetchone()[0],
+            )
+            ledger = CorpusCapacityLedger(
+                connection, runtime.policy, runtime.authorization
+            )
+            _, prepared = runtime.exact_case(1)
+            with self.assertRaises(AppError):
+                ledger.reserve(prepared.body, runtime.fence(1), now=NOW)
+        self.assert_audit_only(self.execute(record, descriptors={}), "EXPIRED")
+        self.assertEqual(1, len(self.calls))
+
+    def test_v6_process_exit_after_terminal_commit_recovers_without_dispatch(
+        self,
+    ):
+        record = self.approval()
+
+        def child():
+            now = [NOW]
+            with (
+                self.commit_return_patch(
+                    lambda: now.__setitem__(0, NOW + 1000), phase="seal"
+                ),
+                patch.object(
+                    runner, "freeze", side_effect=lambda *args: os._exit(61)
+                ),
+            ):
+                runner.run(
+                    self.db,
+                    self.owner,
+                    self.raw,
+                    record,
+                    self.descriptors(),
+                    transport=self.transport,
+                    clock=lambda: now[0],
+                )
+
+        self.child_exit(child, 61)
+        with self.store.transaction() as connection:
+            self.assertEqual(
+                1,
+                connection.execute(
+                    "SELECT count(*) FROM gemini_corpus_invalidation"
+                ).fetchone()[0],
+            )
+            self.assertEqual(
+                "",
+                connection.execute(
+                    "SELECT frozen FROM gemini_corpus_identity"
+                ).fetchone()[0],
+            )
+        value = self.assert_audit_only(
+            self.execute(record, descriptors={}), "EXPIRED"
+        )
+        self.assertEqual(
+            ["KNOWN", "NOT_RUN"],
+            [row["accounting_state"] for row in value["audit_operations"]],
+        )
+        self.assertEqual([], self.calls)
+
+    def test_v6_zero_call_activated_expiry_survives_failed_startup_freeze(self):
+        from cartreadback_app.gemini_corpus_ledger import CorpusCapacityLedger
+
+        record = self.approval()
+        runtime = self.runtime(record)
+        with self.store.transaction() as connection:
+            activate(connection, record, runtime, NOW)
+
+        def fail_freeze(*args):
+            with self.assertRaises(AppError):
+                self.store.acquire_service()
+            raise RuntimeError("invented startup freeze failure")
+
+        with patch.object(runner, "freeze", fail_freeze):
+            with self.assertRaises(RuntimeError):
+                runner.run(
+                    self.db,
+                    self.owner,
+                    self.raw,
+                    record,
+                    {},
+                    transport=self.transport,
+                    clock=lambda: NOW + 1000,
+                )
+        with self.store.transaction() as connection:
+            self.assertEqual(
+                1,
+                connection.execute(
+                    "SELECT count(*) FROM gemini_corpus_invalidation"
+                ).fetchone()[0],
+            )
+            self.assertEqual(
+                0,
+                connection.execute(
+                    "SELECT count(*) FROM gemini_corpus_capacity_operations"
+                ).fetchone()[0],
+            )
+            ledger = CorpusCapacityLedger(
+                connection, runtime.policy, runtime.authorization
+            )
+            _, prepared = runtime.exact_case(0)
+            with self.assertRaises(AppError):
+                ledger.reserve(prepared.body, runtime.fence(0), now=NOW)
+        value = self.assert_audit_only(
+            self.execute(record, descriptors={}), "EXPIRED"
+        )
+        self.assertEqual(0, value["invalidation"]["completed_prefix_length"])
+        self.assertEqual([], value["completion_receipts"])
+        self.assertEqual(
+            ["NOT_RUN", "NOT_RUN"],
+            [row["accounting_state"] for row in value["audit_operations"]],
+        )
+        self.assertEqual([], self.calls)
+
+    def test_v6_unknown_recovery_commits_before_freeze_failure(self):
+        record = self.approval()
+        self.reserve(record, claim=True)
+        with patch.object(
+            runner,
+            "freeze",
+            side_effect=RuntimeError("invented recovery freeze failure"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.execute(record, descriptors={})
+        with self.store.transaction() as connection:
+            self.assertEqual(
+                "UNKNOWN",
+                connection.execute(
+                    "SELECT status FROM gemini_corpus_capacity_operations"
+                ).fetchone()[0],
+            )
+            self.assertEqual(
+                "unknown",
+                json.loads(
+                    connection.execute(
+                        "SELECT result FROM gemini_corpus_requests WHERE ordinal=0"
+                    ).fetchone()[0]
+                )["outcome"],
+            )
+            self.assertEqual(
+                "",
+                connection.execute(
+                    "SELECT frozen FROM gemini_corpus_identity"
+                ).fetchone()[0],
+            )
+        value = json.loads(self.execute(record, descriptors={}))
+        self.assertEqual(
+            ["unknown", "not_run"], [row["outcome"] for row in value["cases"]]
+        )
+        self.assertEqual([], self.calls)

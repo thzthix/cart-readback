@@ -306,8 +306,9 @@ def run(
         runtime = _runtime(record, raw, owner, transport)
         store = ExistingCorpusStore(db, runtime.request["database_file_sha256"])
         lease = store.acquire_service()
-        # Recovery commits independently of fresh admission. Expiry/code drift
-        # cannot roll a crashed claim back into a sendable request.
+        # Recovery and terminal facts commit before freeze or fresh admission.
+        # A failed freeze cannot restore a pending claim or expired suffix.
+        terminal = False
         with store.transaction() as connection:
             if connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE name='gemini_corpus_identity'"
@@ -324,12 +325,14 @@ def run(
                     recover(connection, runtime)
                     expire_incomplete(connection, runtime, clock())
                     rows = paired_rows(connection, runtime)
-                    if (
+                    terminal = (
                         invalidated(connection, runtime)
                         or any(row["status"] == "UNKNOWN" for row in rows)
                         or all(row["status"] == "KNOWN" for row in rows)
-                    ):
-                        return freeze(connection, runtime)
+                    )
+        if terminal:
+            with store.transaction() as connection:
+                return freeze(connection, runtime)
         with store.transaction() as connection:
             activate(connection, record, runtime, clock())
             # Frozen runs are never executable, even after an export failure.
@@ -339,13 +342,15 @@ def run(
                 raise blocked()
             recover(connection, runtime)
             rows = paired_rows(connection, runtime)
-            if invalidated(connection, runtime) or any(
+            terminal = invalidated(connection, runtime) or any(
                 row["status"] == "UNKNOWN" for row in rows
-            ):
-                return freeze(connection, runtime)
+            )
             eligible = [
                 row["ordinal"] for row in rows if row["operation_id"] is None
             ]
+        if terminal:
+            with store.transaction() as connection:
+                return freeze(connection, runtime)
         pipes = CorpusPipes(
             owned, eligible, runtime.binding, runtime.record_sha256
         )
@@ -356,7 +361,9 @@ def run(
                 # Expiry after a durable timely prefix is terminal, not a new
                 # admission. The same lease/identity remains held throughout.
                 with store.transaction() as connection:
-                    if expire_incomplete(connection, runtime, clock()):
+                    terminal = expire_incomplete(connection, runtime, clock())
+                if terminal:
+                    with store.transaction() as connection:
                         return freeze(connection, runtime)
                 raise
             if state != "KNOWN":
