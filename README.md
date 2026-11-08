@@ -414,3 +414,19 @@ a separate opt-in, review-only loopback viewer for the original single approved
 Gemini analysis, held in the same Service lifetime. It does not enable ordinary
 UI-driven inference or checkout. Its local opener and provider action retain
 separate authorization; all development checks use fabricated wires only.
+
+## Finite input-only Gemini corpus runner
+
+[Issue #58's finite corpus contract](docs/GEMINI_FINITE_CORPUS.md) adds a distinct
+host-only `prepare`/explicit `run`/credential-free `export` route. It preserves the
+same database and historical reservations, binds exact ordered inputs and finite
+Free-only authority, admits each request once, and freezes case-keyed results
+before separate scoring. UNKNOWN stops the corpus without retry or renewal.
+Observation commits require durable timely receipts. Late or unconfirmed commits
+invalidate the whole run and permit only a distinct audit-only export, preserving
+accounting and candidate history without exporting prediction results. Expired
+incomplete runs also finalize as audit-only without renewing authority or
+altering their timely completion receipts.
+The ordinary UI, prompts, scorer and payment paths are unchanged. This is offline
+implementation evidence, not credential provisioning, account eligibility,
+zero-charge proof or permission to make model calls.

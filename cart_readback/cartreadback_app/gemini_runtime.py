@@ -168,6 +168,7 @@ def _transport_source_sha256():
             ).hexdigest()
             for name in (
                 "gemini_runtime.py",
+                "analysis_history.py",
                 "gemini_http.py",
                 "gemini_client.py",
                 "gemini_capacity.py",
