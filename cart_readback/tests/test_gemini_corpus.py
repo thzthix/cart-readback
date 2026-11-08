@@ -1,9 +1,11 @@
 """Invented development inputs/fake transport only; no semantic assets or gold."""
 
 import copy
+import fcntl
 import importlib.util
 import json
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -247,10 +249,34 @@ class CorpusTests(unittest.TestCase):
             "request": request,
         }
 
+    def private_fifo(self):
+        # Darwin anonymous pipes have mode 0660 and reject fchmod. Use a real
+        # owner-only FIFO for fixtures; never relax the production privacy gate.
+        with tempfile.TemporaryDirectory(dir=self.root) as directory:
+            path = Path(directory) / "credential.fifo"
+            self.assertEqual(0o700, stat.S_IMODE(os.stat(directory).st_mode))
+            os.mkfifo(path, 0o600)
+            read = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            try:
+                write = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+                try:
+                    os.set_blocking(read, True)
+                    os.set_blocking(write, True)
+                    # Only this test-created name is removed. Open descriptors
+                    # retain the real inode, permissions and EOF semantics.
+                    path.unlink()
+                    return read, write
+                except BaseException:
+                    os.close(write)
+                    raise
+            except BaseException:
+                os.close(read)
+                raise
+
     def descriptors(self, ordinals=(0, 1)):
         result = {}
         for ordinal in ordinals:
-            read, write = os.pipe()
+            read, write = self.private_fifo()
             os.write(write, b"invented-test-key")
             os.close(write)
             result[ordinal] = read
@@ -290,6 +316,42 @@ class CorpusTests(unittest.TestCase):
                     reservation, prepared.body, runtime.fence(ordinal), now=NOW
                 )
         return reservation
+
+    def test_private_fifo_fixture_has_real_owner_mode_and_eof(self):
+        read, write = self.private_fifo()
+        try:
+            info = os.fstat(read)
+            self.assertTrue(stat.S_ISFIFO(info.st_mode))
+            self.assertEqual(os.getuid(), info.st_uid)
+            self.assertEqual(0o600, stat.S_IMODE(info.st_mode))
+            self.assertEqual(0, info.st_nlink)
+            self.assertEqual(
+                os.O_RDONLY, fcntl.fcntl(read, fcntl.F_GETFL) & os.O_ACCMODE
+            )
+            self.assertEqual(
+                os.O_WRONLY, fcntl.fcntl(write, fcntl.F_GETFL) & os.O_ACCMODE
+            )
+            os.write(write, b"invented-test-key")
+        finally:
+            os.close(write)
+        try:
+            self.assertEqual(b"invented-test-key", os.read(read, 256))
+            self.assertEqual(b"", os.read(read, 1))
+        finally:
+            os.close(read)
+
+    def test_private_fifo_rejects_wrong_owner_without_reading(self):
+        descriptors = self.descriptors((0,))
+        binding = CredentialBinding("invented", "v1", "test")
+        actual_uid = os.fstat(descriptors[0]).st_uid
+        with (
+            patch("os.getuid", return_value=actual_uid + 1),
+            patch("os.read", side_effect=AssertionError("must not read")),
+            self.assertRaises(AppError),
+        ):
+            CorpusPipes(descriptors, [0], binding, "a" * 64)
+        with self.assertRaises(OSError):
+            os.fstat(descriptors[0])
 
     def test_prepare_is_offline_and_not_authority(self):
         request = self.disclosure()
@@ -544,7 +606,7 @@ class CorpusTests(unittest.TestCase):
 
     def test_no_pipe_or_duplicate_inode_alias_before_reserve(self):
         record = self.approval()
-        read, write = os.pipe()
+        read, write = self.private_fifo()
         os.close(write)
         alias = os.dup(read)
         with self.assertRaises(AppError):
@@ -568,7 +630,7 @@ class CorpusTests(unittest.TestCase):
                     self.root / "ordinary", os.O_CREAT | os.O_RDONLY, 0o600
                 )
             else:
-                read, write = os.pipe()
+                read, write = self.private_fifo()
                 fd, other = (write, read) if kind == "write" else (read, write)
                 os.close(other)
                 if kind == "public":
@@ -1341,7 +1403,7 @@ class CorpusTests(unittest.TestCase):
         import threading
 
         record = self.approval()
-        read, write = os.pipe()
+        read, write = self.private_fifo()
         os.close(write)
         alias = os.dup(read)
         freed = threading.Event()
