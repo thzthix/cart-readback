@@ -36,15 +36,20 @@ from cartreadback_app.gemini_corpus_ledger import (  # noqa: E402
     ExistingCorpusStore,
     activate,
     attach_result,
+    commit_observation,
+    completion_state,
     database_file_identity,
     freeze,
     history_snapshot,
+    invalidated,
     ledger_for,
     paired_rows,
     prepare_database,
     prior_totals,
     read_frozen,
     recover,
+    seal_completion,
+    stage_observation,
 )
 from cartreadback_app.genuine_responses import GenuineExchange  # noqa: E402
 from cartreadback_app.validation import (  # noqa: E402
@@ -218,7 +223,8 @@ def _execute(store, runtime, ordinal, pipes, clock):
             exchange, selected.policy, prepared
         )
         deadline.remaining()
-        with store.transaction() as connection:
+
+        def observe(connection):
             # BEGIN IMMEDIATE may have waited. The 20-second capacity claim
             # does not replace this request's shorter monotonic deadline.
             deadline.remaining()
@@ -247,24 +253,45 @@ def _execute(store, runtime, ordinal, pipes, clock):
                 "MODEL_OUTCOME_UNKNOWN" if state == "UNKNOWN" else code,
                 results if state == "KNOWN" and not code else None,
             )
+            stage_observation(connection, selected, ordinal)
             # Late local validation/attachment rolls this transaction back;
             # the original reservation is then durably marked UNKNOWN.
             deadline.remaining()
             return state
+
+        state, disposition = commit_observation(store, deadline, observe)
     except Exception:
-        # No retry. Even failed local guards after reservation retain capacity.
+        # No retry. Read durable state after an ambiguous commit; never rewrite
+        # KNOWN accounting or immutable candidate bytes as UNKNOWN.
         with store.transaction() as connection:
+            rows = paired_rows(connection, selected)
+            row = rows[ordinal]
+            receipts, _, missing = completion_state(
+                connection, selected.record_sha256, selected.request
+            )
+            if ordinal in missing:
+                seal_completion(connection, selected, ordinal, "UNCONFIRMED")
+                return "INVALIDATED"
+            if ordinal in receipts:
+                raise blocked()
             ledger = ledger_for(connection, selected, clock(), fresh=False)
             ledger.mark_unknown(reservation)
-            attach_result(
-                connection,
-                selected,
-                ordinal,
-                reservation.operation_id,
-                "UNKNOWN",
-                "MODEL_OUTCOME_UNKNOWN",
-            )
+            if not row["result"]:
+                attach_result(
+                    connection,
+                    selected,
+                    ordinal,
+                    reservation.operation_id,
+                    "UNKNOWN",
+                    "MODEL_OUTCOME_UNKNOWN",
+                )
         return "UNKNOWN"
+    # A durable receipt records the already measured COMMIT return. Its own
+    # persistence may finish later, but no next provider request starts first.
+    # Crashing here leaves a provisional marker, recovered as UNCONFIRMED.
+    with store.transaction() as connection:
+        seal_completion(connection, selected, ordinal, disposition)
+    return state if disposition == "TIMELY" else "INVALIDATED"
 
 
 def run(
@@ -295,8 +322,10 @@ def run(
                         raise blocked()
                     recover(connection, runtime)
                     rows = paired_rows(connection, runtime)
-                    if any(row["status"] == "UNKNOWN" for row in rows) or all(
-                        row["status"] == "KNOWN" for row in rows
+                    if (
+                        invalidated(connection, runtime)
+                        or any(row["status"] == "UNKNOWN" for row in rows)
+                        or all(row["status"] == "KNOWN" for row in rows)
                     ):
                         return freeze(connection, runtime)
         with store.transaction() as connection:
@@ -308,7 +337,9 @@ def run(
                 raise blocked()
             recover(connection, runtime)
             rows = paired_rows(connection, runtime)
-            if any(row["status"] == "UNKNOWN" for row in rows):
+            if invalidated(connection, runtime) or any(
+                row["status"] == "UNKNOWN" for row in rows
+            ):
                 return freeze(connection, runtime)
             eligible = [
                 row["ordinal"] for row in rows if row["operation_id"] is None
@@ -317,7 +348,7 @@ def run(
             owned, eligible, runtime.binding, runtime.record_sha256
         )
         for ordinal in eligible:
-            if _execute(store, runtime, ordinal, pipes, clock) == "UNKNOWN":
+            if _execute(store, runtime, ordinal, pipes, clock) != "KNOWN":
                 break
         with store.transaction() as connection:
             return freeze(connection, runtime)
@@ -342,7 +373,8 @@ def main(argv=None):
     offline = commands.add_parser("prepare")
     live = commands.add_parser("run")
     export = commands.add_parser("export")
-    for command in (offline, live, export):
+    audit = commands.add_parser("export-audit")
+    for command in (offline, live, export, audit):
         command.add_argument("--db", required=True)
         command.add_argument("--output", required=True)
     for command in (offline, live):
@@ -355,8 +387,10 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
     try:
-        if args.command == "export":
-            result = read_frozen(args.db)
+        if args.command in ("export", "export-audit"):
+            result = read_frozen(
+                args.db, audit_only=args.command == "export-audit"
+            )
         else:
             owner = token(_read(args.owner_file, 100).decode("ascii"))
             raw = _read(args.corpus, MAX_CORPUS_BYTES)
@@ -384,6 +418,9 @@ def main(argv=None):
                     owned_json(_read(args.approved_record, MAX_CORPUS_BYTES)),
                     descriptors,
                 )
+        if args.command == "run":
+            # Invalidated runs are persisted but require explicit audit export.
+            result = read_frozen(args.db)
         publish(result, args.output)
         print(
             canonical(

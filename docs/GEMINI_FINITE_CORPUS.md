@@ -91,32 +91,70 @@ descriptors is invalid.
 The multi-pipe provisioner and actual data/credential approvals are external
 prerequisites, not implemented by this runner. The new runner is POSIX-only.
 
-Cleanup remains synchronous under the lease. Original monotonic deadline is
-rechecked after exchange/cleanup, after acquiring the observation transaction's
-write lock, after expensive identity/accounting checks and immediately before
-committing result attachment. A local SQLite lock wait does not extend authority. Accounting is
-independent of prose. A known refusal/schema failure becomes a frozen case
-failure and can continue; uncertain usage or a failed guarded attempt is UNKNOWN
-and stops before the next request. Crash recovery permanently fences reserved or
-claimed work UNKNOWN. Recovery/finalization needs no new credential and can occur
-after approval expiry; it never authorizes another request. Resume supplies only
-pipes for the remaining undispatched suffix after a wholly known prefix.
+Cleanup remains synchronous under the lease. The original monotonic deadline is
+checked after exchange/cleanup, after acquiring the observation write lock, after
+expensive guards, and before commit. A corpus-specific transaction limits SQLite
+busy waits to the remaining original deadline, including COMMIT's wait for
+read-only SHARED locks. No generic Store transaction behavior changes. A still
+uncommitted observation rolls back on lock timeout/expiry; the original operation
+then becomes UNKNOWN and stops the suffix. SQLite busy timeout bounds lock waits
+only. It cannot cancel arbitrary OS scheduling, fsync or device latency, and this
+protocol makes no hard wall-clock cancellation guarantee.
 
-Observation and immutable case-result attachment share one transaction. Pairing,
-request identity, result hash and structural result contract are checked before
-freezing. Complete or stopped runs commit canonical case-keyed predictions,
-failures, NOT_RUN suffix, mapping, reservations, accounting and integrity metadata
-as authoritative bytes plus SHA256 in SQLite. No gold/scorer is loaded or accepted.
-Scoring must happen separately after freezing. Late observations cannot alter a
-frozen artifact. These hashes detect accidental changes, not malicious trusted
-host/database rewriting or a cryptographic provider attestation.
+Accounting and an immutable **provisional** case candidate share one transaction,
+alongside an exact provisional-commit marker. Immediately after COMMIT returns,
+the runner captures whether that return was before the original deadline. Only
+a separately durable `TIMELY` completion receipt accepts that candidate or permits
+the next ordinal. The receipt binds grant, ordinal/case, operation, request/runtime,
+accounting and candidate hashes, and the provisional marker. Sealing can finish
+after the earlier deadline because it records the already observed commit fact;
+it never renews the deadline. No next provider call begins before the receipt is
+durable, and each next case must pass fresh authority/window/baseline guards.
+A known refusal/schema failure with a timely receipt can continue. UNKNOWN stops.
+
+If COMMIT succeeds but returns late, the original KNOWN accounting and candidate
+remain unchanged. The runner atomically appends a `LATE` receipt and a terminal
+**whole-run scoring invalidation**. A COMMIT exception with a persisted candidate,
+or a crash after observation COMMIT but before a durable receipt, is instead
+`UNCONFIRMED`, with the same whole-run invalidation. The receipt and invalidation
+are insert-only in the application protocol. Missing, duplicate, orphan or
+mismatched receipts cannot authorize reserve, claim, a guard, freeze or export.
+Old unsealed candidates are never backfilled as timely. Unreadable/inconsistent
+history blocks, without provider retry or a replacement operation.
+
+Crash recovery marks reserved/claimed work without a candidate UNKNOWN. It turns
+unsealed committed candidates into UNCONFIRMED, even after approval expiry.
+A crash inside the sealing transaction cannot preserve an uncommitted TIMELY
+receipt. A durable exact TIMELY receipt permits only same-authority continuation,
+with fresh guards and pipes for the still-undispatched suffix. Durable LATE or
+UNCONFIRMED is terminal. Recovery, reconciliation and terminal audit freezing need
+no credential or renewed authority. The process lease remains held throughout.
+
+Clean or UNKNOWN-stopped runs freeze `gemini-frozen-corpus-results-v2`, including
+case-keyed predictions/failures, NOT_RUN suffix, mapping, reservations, accounting,
+exact completion receipts and hashes. Invalidated runs instead freeze the distinct
+`gemini-frozen-corpus-audit-only-v1` contract: `scoring_eligible:false`, invalidation
+reason/hash, receipt hashes, and accounting/operation/candidate hashes, **without
+ordinary case prediction results for any case**, including a timely prefix.
+Candidate bytes remain in the database for audit. Normal prediction export
+refuses an invalidated run; `export-audit` is explicitly separate. This does not
+claim arbitrary external scorers honor a boolean, and does not change scorer
+semantics. Old v1 frozen prediction artifacts are not accepted by this new export
+protocol; they are not silently upgraded or overwritten.
+
+Authoritative canonical frozen bytes and SHA256 are committed in SQLite before
+export. No gold/scorer is loaded or accepted. Scoring must happen separately on an
+eligible frozen prediction artifact. Late accounting cannot alter frozen bytes.
+Hashes detect accidental changes, not malicious trusted-host/database rewriting
+or cryptographic provider attestation.
 
 Export writes a complete private temporary file, fsyncs it, atomically links it to
 a new destination without clobbering, then fsyncs the directory. A crash can leave
 an orphan temporary file but cannot expose a partial new destination. An existing
 partial or complete artifact is preserved. Export failure never resumes execution.
 Credential-free read-only re-export uses the stored frozen bytes and verifies
-their hash; use a fresh destination if the old path already exists.
+their hash, exact contract and completion receipts; use a fresh destination if
+the old path already exists.
 
 ## Commands and limits
 
@@ -138,7 +176,13 @@ python scripts/run_gemini_corpus.py run --db SAME_DB --owner-file SAME_OWNER \
   --credential-fd 0:INHERITED_FD --credential-fd 1:OTHER_INHERITED_FD \
   --output NEW_FROZEN_RESULTS
 python scripts/run_gemini_corpus.py export --db SAME_DB --output NEW_EXPORT
+# Only for an invalidated run, not an accepted-predictions export:
+python scripts/run_gemini_corpus.py export-audit --db SAME_DB --output NEW_AUDIT
 ```
+
+If `run` ends with an invalidated run, its normal output publication is refused.
+The frozen audit record remains available through `export-audit`; this is not a
+request to rerun or replace the authority.
 
 There is no default network mode, credential lookup, gold argument, public
 endpoint, ordinary UI activation, account setup or provisioner. The physical DB,
@@ -157,7 +201,9 @@ connections only. Procedural separation is not a secure data sandbox.
 Focused corpus tests include raw/mapping drift, opaque IDs, free/finite bounds,
 legacy consumption and UNKNOWN/orphans, simultaneous admission, dup pipe aliases,
 scope/privacy/early cleanup, real child-process crashes after fake dispatch and
-observation, synchronous cleanup deadlines, freeze tampering, and crash-safe
+observation, observation/COMMIT lock deadlines, late and ambiguous COMMIT,
+pre/post-seal process crashes, delayed receipt persistence, missing/tampered
+receipts, whole-run audit-only export rejection, freeze tampering, and crash-safe
 re-export. Existing aggregate evaluation/prompt/UI checks require a separately
 permitted verification role and are not certified by this source-only test pass.
 No actual account eligibility, provider acceptance, real charge, semantic quality,

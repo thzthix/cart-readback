@@ -1389,3 +1389,542 @@ class CorpusTests(unittest.TestCase):
                         os.close(descriptor)
                     except OSError:
                         pass
+
+    def test_review_v3_commit_reader_wait_cannot_accept_late_completion(self):
+        import threading
+        import time
+
+        plan = host_plan()
+        plan["timeout_seconds"] = 1.5
+        record = self.approval(self.disclosure(plan=plan))
+        started = time.monotonic()
+        held = threading.Event()
+        workers = []
+        faults = []
+        original = runner.attach_result
+
+        def reader():
+            connection = self.store.connect()
+            try:
+                connection.execute("BEGIN")
+                connection.execute(
+                    "SELECT ordinal FROM gemini_corpus_requests"
+                ).fetchall()
+                held.set()
+                time.sleep(2.0)
+                connection.rollback()
+            except BaseException as error:
+                faults.append(type(error).__name__)
+            finally:
+                connection.close()
+
+        def attach(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if not workers:
+                thread = threading.Thread(target=reader)
+                workers.append(thread)
+                thread.start()
+                if not held.wait(5):
+                    raise AssertionError("invented reader did not start")
+            return result
+
+        try:
+            with patch.object(runner, "attach_result", attach):
+                frozen = runner.run(
+                    self.db,
+                    self.owner,
+                    self.raw,
+                    record,
+                    self.descriptors(),
+                    transport=self.transport,
+                    clock=lambda: NOW + time.monotonic() - started,
+                )
+        finally:
+            for thread in workers:
+                thread.join(5)
+        self.assertEqual([], faults)
+        self.assertEqual(
+            ["unknown", "not_run"],
+            [item["outcome"] for item in json.loads(frozen)["cases"]],
+        )
+        self.assertEqual(1, len(self.calls))
+
+    def commit_return_patch(self, action, target=0):
+        """Wrap only the target observation COMMIT, never provider transport."""
+        original = runner.ExistingCorpusStore.connect
+        fired = []
+
+        class WrappedConnection:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+
+            def commit(self):
+                tables = self.connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='gemini_corpus_observation_commits'"
+                ).fetchone()
+                pending = (
+                    tables
+                    and self.connection.execute(
+                        "SELECT 1 FROM gemini_corpus_observation_commits m LEFT JOIN gemini_corpus_completion_receipts r ON r.ordinal=m.ordinal WHERE m.ordinal=? AND r.ordinal IS NULL",
+                        (target,),
+                    ).fetchone()
+                )
+                self.connection.commit()
+                if pending and not fired:
+                    fired.append(True)
+                    action()
+
+        return patch.object(
+            runner.ExistingCorpusStore,
+            "connect",
+            lambda store: WrappedConnection(original(store)),
+        )
+
+    def assert_audit_only(self, frozen, reason):
+        value = json.loads(frozen)
+        self.assertEqual("gemini-frozen-corpus-audit-only-v1", value["schema"])
+        self.assertIs(value["scoring_eligible"], False)
+        self.assertEqual(reason, value["invalidation"]["reason"])
+        self.assertNotIn("cases", value)
+        self.assertNotIn('"results":', frozen.decode())
+        with self.assertRaises(AppError):
+            read_frozen(self.db)
+        self.assertEqual(frozen, read_frozen(self.db, audit_only=True))
+        return value
+
+    def test_v4_successful_late_commit_invalidates_entire_prefix(self):
+        import time
+
+        self.raw = canonical(corpus_document(3)).encode()
+        plan = host_plan(3)
+        plan["timeout_seconds"] = 0.8
+        record = self.approval(self.disclosure(plan=plan))
+        with self.commit_return_patch(lambda: time.sleep(1.0), target=1):
+            frozen = self.execute(
+                record, descriptors=self.descriptors((0, 1, 2))
+            )
+        value = self.assert_audit_only(frozen, "LATE")
+        self.assertEqual(
+            ["TIMELY", "LATE"],
+            [r["disposition"] for r in value["completion_receipts"]],
+        )
+        self.assertEqual(
+            ["KNOWN", "KNOWN", "NOT_RUN"],
+            [r["accounting_state"] for r in value["audit_operations"]],
+        )
+        self.assertEqual(2, len(self.calls))
+        with self.store.transaction() as connection:
+            candidates = connection.execute(
+                "SELECT result FROM gemini_corpus_requests WHERE result!=''"
+            ).fetchall()
+            self.assertEqual(
+                ["predicted", "predicted"],
+                [json.loads(r[0])["outcome"] for r in candidates],
+            )
+        with self.assertRaises(AppError):
+            self.execute(record, descriptors={})
+        self.assertEqual(2, len(self.calls))
+
+    def test_v4_ambiguous_commit_preserves_known_and_invalidates(self):
+        def uncertain():
+            raise OSError("invented post-commit uncertainty")
+
+        record = self.approval()
+        with self.commit_return_patch(uncertain):
+            frozen = self.execute(record)
+        value = self.assert_audit_only(frozen, "UNCONFIRMED")
+        self.assertEqual(
+            ["KNOWN", "NOT_RUN"],
+            [r["accounting_state"] for r in value["audit_operations"]],
+        )
+        self.assertEqual(1, len(self.calls))
+
+    def test_v4_process_exit_after_commit_before_seal_invalidates(self):
+        record = self.approval()
+
+        def child():
+            with patch.object(
+                runner,
+                "seal_completion",
+                side_effect=lambda *args: os._exit(41),
+            ):
+                self.execute(record)
+
+        self.child_exit(child, 41)
+        with self.store.transaction() as connection:
+            self.assertEqual(
+                "KNOWN",
+                connection.execute(
+                    "SELECT status FROM gemini_corpus_capacity_operations"
+                ).fetchone()[0],
+            )
+            self.assertEqual(
+                0,
+                connection.execute(
+                    "SELECT count(*) FROM gemini_corpus_completion_receipts"
+                ).fetchone()[0],
+            )
+        frozen = runner.run(
+            self.db,
+            self.owner,
+            self.raw,
+            record,
+            {},
+            transport=self.transport,
+            clock=lambda: NOW + 1000,
+        )
+        self.assert_audit_only(frozen, "UNCONFIRMED")
+        self.assertEqual([], self.calls)
+
+    def test_v4_process_exit_after_timely_seal_resumes_only_suffix(self):
+        record = self.approval()
+        original = runner._execute
+
+        def child():
+            def execute(*args, **kwargs):
+                original(*args, **kwargs)
+                os._exit(42)
+
+            with patch.object(runner, "_execute", execute):
+                self.execute(record)
+
+        self.child_exit(child, 42)
+        # Child used invented response ID 0; the suffix must use a different ID.
+        self.calls.append(b"prior child request, no credentials")
+        frozen = self.execute(record, descriptors=self.descriptors((1,)))
+        self.assertEqual(
+            ["predicted", "predicted"],
+            [r["outcome"] for r in json.loads(frozen)["cases"]],
+        )
+        self.assertEqual(2, len(self.calls))
+
+    def test_v4_delayed_seal_records_past_timely_commit_without_renewal(self):
+        import time
+
+        self.raw = canonical(corpus_document(1)).encode()
+        plan = host_plan(1)
+        plan["timeout_seconds"] = 0.8
+        record = self.approval(self.disclosure(plan=plan))
+        original = runner.seal_completion
+
+        def delayed(*args, **kwargs):
+            time.sleep(1.0)
+            return original(*args, **kwargs)
+
+        with patch.object(runner, "seal_completion", delayed):
+            value = json.loads(
+                self.execute(record, descriptors=self.descriptors((0,)))
+            )
+        self.assertEqual(
+            "TIMELY", value["completion_receipts"][0]["disposition"]
+        )
+        self.assertEqual("predicted", value["cases"][0]["outcome"])
+        self.assertEqual(1, len(self.calls))
+
+    def unsealed_prefix(self, record):
+        with patch.object(
+            runner,
+            "seal_completion",
+            side_effect=RuntimeError("invented seal failure"),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.execute(record)
+
+    def test_v4_missing_receipt_blocks_direct_reserve_freeze_and_guard(self):
+        from cartreadback_app.gemini_corpus_ledger import CorpusCapacityLedger
+
+        record = self.approval()
+        runtime = self.runtime(record)
+        self.unsealed_prefix(record)
+        with self.store.transaction() as connection:
+            ledger = CorpusCapacityLedger(
+                connection, runtime.policy, runtime.authorization
+            )
+            _, prepared = runtime.exact_case(1)
+            with self.assertRaises(AppError):
+                ledger.reserve(prepared.body, runtime.fence(1), now=NOW)
+            with self.assertRaises(AppError):
+                ledger._approved_tuple(
+                    runtime.fence(1), prepared.request_sha256, None
+                )
+            with self.assertRaises(AppError):
+                runner.freeze(connection, runtime)
+        self.assertEqual(1, len(self.calls))
+
+    def test_v4_old_unsealed_candidates_are_never_grandfathered(self):
+        record = self.approval()
+        self.unsealed_prefix(record)
+        with self.store.transaction() as connection:
+            connection.execute("DELETE FROM gemini_corpus_observation_commits")
+        frozen = self.execute(record, descriptors={})
+        value = self.assert_audit_only(frozen, "UNCONFIRMED")
+        self.assertIsNone(
+            value["completion_receipts"][0]["observation_commit_sha256"]
+        )
+        self.assertEqual(1, len(self.calls))
+
+    def test_v4_receipt_tamper_duplicate_orphan_and_missing_rejected(self):
+        import sqlite3
+
+        record = self.approval()
+        runtime = self.runtime(record)
+        self.execute(record)
+        with self.store.transaction() as connection:
+            original = connection.execute(
+                "SELECT document,sha256 FROM gemini_corpus_completion_receipts WHERE ordinal=0"
+            ).fetchone()
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO gemini_corpus_completion_receipts VALUES(0,?,?)",
+                    tuple(original),
+                )
+            with self.assertRaises(AppError):
+                runner.seal_completion(connection, runtime, 0, "TIMELY")
+        for field in (
+            "approved_record_sha256",
+            "request_sha256",
+            "runtime_sha256",
+            "candidate_sha256",
+            "accounting_sha256",
+            "operation_id",
+            "ordinal",
+        ):
+            with self.subTest(field=field):
+                value = json.loads(original[0])
+                value[field] = 1 if field == "ordinal" else "bad"
+                with self.store.transaction() as connection:
+                    connection.execute(
+                        "UPDATE gemini_corpus_completion_receipts SET document=?,sha256=? WHERE ordinal=0",
+                        (canonical(value), digest(value)),
+                    )
+                with self.assertRaises(AppError):
+                    read_frozen(self.db)
+                with self.store.transaction() as connection:
+                    connection.execute(
+                        "UPDATE gemini_corpus_completion_receipts SET document=?,sha256=? WHERE ordinal=0",
+                        tuple(original),
+                    )
+        with self.store.transaction() as connection:
+            connection.execute(
+                "INSERT INTO gemini_corpus_completion_receipts VALUES(5,?,?)",
+                tuple(original),
+            )
+        with self.assertRaises(AppError):
+            read_frozen(self.db)
+        with self.store.transaction() as connection:
+            connection.execute(
+                "DELETE FROM gemini_corpus_completion_receipts WHERE ordinal IN (0,5)"
+            )
+        with self.assertRaises(AppError):
+            read_frozen(self.db)
+        with self.store.transaction() as connection:
+            with self.assertRaises(AppError):
+                runner.freeze(connection, runtime)
+
+    def test_v4_old_frozen_schema_rejected_even_with_valid_byte_hash(self):
+        frozen = json.loads(self.execute())
+        frozen["schema"] = "gemini-frozen-corpus-results-v1"
+        raw = canonical(frozen) + "\n"
+        with self.store.transaction() as connection:
+            connection.execute(
+                "UPDATE gemini_corpus_identity SET frozen=?,frozen_sha256=?",
+                (raw, text_hash(raw)),
+            )
+        with self.assertRaises(AppError):
+            read_frozen(self.db)
+        with self.assertRaises(AppError):
+            read_frozen(self.db, audit_only=True)
+
+    def test_v4_normal_cli_export_refuses_audit_only_artifact(self):
+        def uncertain():
+            raise OSError("invented commit uncertainty")
+
+        with self.commit_return_patch(uncertain):
+            frozen = self.execute()
+        target = self.root / "predictions.json"
+        audit = self.root / "audit.json"
+        self.assertEqual(
+            1,
+            runner.main(
+                ["export", "--db", str(self.db), "--output", str(target)]
+            ),
+        )
+        self.assertFalse(target.exists())
+        self.assertEqual(
+            0,
+            runner.main(
+                ["export-audit", "--db", str(self.db), "--output", str(audit)]
+            ),
+        )
+        self.assertEqual(frozen, audit.read_bytes())
+
+    def test_v4_expiry_while_sealing_cannot_dispatch_suffix(self):
+        now = [NOW]
+        record = self.approval()
+        original = runner.seal_completion
+
+        def expired(*args, **kwargs):
+            original(*args, **kwargs)
+            now[0] = NOW + 1000
+
+        with patch.object(runner, "seal_completion", expired):
+            with self.assertRaises(AppError):
+                runner.run(
+                    self.db,
+                    self.owner,
+                    self.raw,
+                    record,
+                    self.descriptors(),
+                    transport=self.transport,
+                    clock=lambda: now[0],
+                )
+        self.assertEqual(1, len(self.calls))
+        with self.store.transaction() as connection:
+            receipt = json.loads(
+                connection.execute(
+                    "SELECT document FROM gemini_corpus_completion_receipts"
+                ).fetchone()[0]
+            )
+            self.assertEqual("TIMELY", receipt["disposition"])
+            self.assertIsNone(
+                connection.execute(
+                    "SELECT operation_id FROM gemini_corpus_requests WHERE ordinal=1"
+                ).fetchone()[0]
+            )
+        with self.assertRaises(AppError):
+            runner.run(
+                self.db,
+                self.owner,
+                self.raw,
+                record,
+                {},
+                transport=self.transport,
+                clock=lambda: now[0],
+            )
+        self.assertEqual(1, len(self.calls))
+
+    def test_v4_crash_during_seal_transaction_cannot_restore_timely(self):
+        record = self.approval()
+        original = runner.seal_completion
+
+        def child():
+            def interrupted(*args, **kwargs):
+                original(*args, **kwargs)
+                os._exit(43)
+
+            with patch.object(runner, "seal_completion", interrupted):
+                self.execute(record)
+
+        self.child_exit(child, 43)
+        frozen = self.execute(record, descriptors={})
+        self.assert_audit_only(frozen, "UNCONFIRMED")
+        self.assertEqual([], self.calls)
+
+    def test_v4_terminal_invalidation_blocks_direct_ledger_admission(self):
+        from cartreadback_app.gemini_corpus_ledger import CorpusCapacityLedger
+
+        record = self.approval()
+        runtime = self.runtime(record)
+
+        def uncertain():
+            raise OSError("invented commit uncertainty")
+
+        with (
+            self.commit_return_patch(uncertain),
+            patch.object(
+                runner,
+                "freeze",
+                side_effect=RuntimeError("invented freeze interruption"),
+            ),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.execute(record)
+        with self.store.transaction() as connection:
+            ledger = CorpusCapacityLedger(
+                connection, runtime.policy, runtime.authorization
+            )
+            _, prepared = runtime.exact_case(1)
+            with self.assertRaises(AppError):
+                ledger.reserve(prepared.body, runtime.fence(1), now=NOW)
+        self.assert_audit_only(
+            self.execute(record, descriptors={}), "UNCONFIRMED"
+        )
+        self.assertEqual(1, len(self.calls))
+
+    def test_v4_late_unknown_commit_is_audit_only_too(self):
+        import time
+
+        self.unknown_at = 0
+        plan = host_plan()
+        plan["timeout_seconds"] = 0.8
+        record = self.approval(self.disclosure(plan=plan))
+        with self.commit_return_patch(lambda: time.sleep(1.0)):
+            frozen = self.execute(record)
+        value = self.assert_audit_only(frozen, "LATE")
+        self.assertEqual(
+            "UNKNOWN", value["audit_operations"][0]["accounting_state"]
+        )
+        self.assertEqual(1, len(self.calls))
+
+    def test_v4_audit_export_rejects_prediction_fields_even_with_new_hash(self):
+        def uncertain():
+            raise OSError("invented commit uncertainty")
+
+        with self.commit_return_patch(uncertain):
+            original = self.execute()
+        for key in ("cases", "results"):
+            value = json.loads(original)
+            value[key] = [{"status": "invented prediction must not export"}]
+            raw = canonical(value) + "\n"
+            with self.store.transaction() as connection:
+                connection.execute(
+                    "UPDATE gemini_corpus_identity SET frozen=?,frozen_sha256=?",
+                    (raw, text_hash(raw)),
+                )
+            with self.assertRaises(AppError):
+                read_frozen(self.db, audit_only=True)
+
+    def test_v4_missing_protocol_table_never_grandfathers_frozen_results(self):
+        self.execute()
+        with self.store.transaction() as connection:
+            connection.execute("DROP TABLE gemini_corpus_completion_receipts")
+        with self.assertRaises(AppError):
+            read_frozen(self.db)
+
+    def test_v4_normal_run_cli_does_not_publish_audit_as_predictions(self):
+        def uncertain():
+            raise OSError("invented commit uncertainty")
+
+        record = self.approval()
+        with self.commit_return_patch(uncertain):
+            frozen = self.execute(record)
+        owner = self.root / "invented-owner"
+        corpus = self.root / "invented-input.json"
+        approval = self.root / "invented-approval.json"
+        output = self.root / "must-not-publish-predictions.json"
+        owner.write_text(self.owner)
+        corpus.write_bytes(self.raw)
+        approval.write_text(canonical(record))
+        with patch.object(runner, "run", return_value=frozen):
+            self.assertEqual(
+                1,
+                runner.main(
+                    [
+                        "run",
+                        "--db",
+                        str(self.db),
+                        "--owner-file",
+                        str(owner),
+                        "--corpus",
+                        str(corpus),
+                        "--approved-record",
+                        str(approval),
+                        "--output",
+                        str(output),
+                    ]
+                ),
+            )
+        self.assertFalse(output.exists())
