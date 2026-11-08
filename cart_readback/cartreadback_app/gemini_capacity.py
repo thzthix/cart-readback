@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from cartreadback_app.analysis_history import reject_active_corpus
 from cartreadback_app.gemini_client import (
     GeminiClient,
     GeminiConfig,
@@ -409,7 +410,17 @@ def initialize_gemini_capacity(connection: sqlite3.Connection) -> None:
     """Initialize schema without requiring any current installation or approval."""
     if not connection.in_transaction:
         raise _error()
-    for statement in _SCHEMA.split(";"):
+    _initialize_capacity(connection, "gemini")
+
+
+def _initialize_capacity(connection, prefix):
+    if (
+        prefix not in ("gemini", "gemini_corpus")
+        or not connection.in_transaction
+    ):
+        raise _error()
+    schema = _SCHEMA.replace("gemini_capacity", prefix + "_capacity")
+    for statement in schema.split(";"):
         if statement.strip():
             connection.execute(statement)
 
@@ -459,6 +470,8 @@ class TransactionGeminiCapacityLedger:
     is accepted. Returned claims confer only local accounting identity.
     """
 
+    _prefix = "gemini"
+
     def __init__(
         self,
         connection: sqlite3.Connection,
@@ -487,17 +500,17 @@ class TransactionGeminiCapacityLedger:
                 "host_authorization": asdict(authorization),
             }
         )
-        initialize_gemini_capacity(connection)
+        _initialize_capacity(connection, self._prefix)
         row = connection.execute(
-            "SELECT document FROM gemini_capacity_identity WHERE singleton = 1"
+            f"SELECT document FROM {self._prefix}_capacity_identity WHERE singleton = 1"
         ).fetchone()
         if row is None:
             if connection.execute(
-                "SELECT 1 FROM gemini_capacity_operations LIMIT 1"
+                f"SELECT 1 FROM {self._prefix}_capacity_operations LIMIT 1"
             ).fetchone():
                 raise _error()
             connection.execute(
-                "INSERT INTO gemini_capacity_identity VALUES (1, ?, 0)",
+                f"INSERT INTO {self._prefix}_capacity_identity VALUES (1, ?, 0)",
                 (self._identity,),
             )
         elif row[0] != self._identity:
@@ -546,7 +559,7 @@ class TransactionGeminiCapacityLedger:
         if not connection.in_transaction:
             raise _error()
         row = connection.execute(
-            "SELECT document FROM gemini_capacity_identity WHERE singleton = 1"
+            f"SELECT document FROM {self._prefix}_capacity_identity WHERE singleton = 1"
         ).fetchone()
         if row is None or row[0] != self._identity:
             raise _error()
@@ -556,10 +569,10 @@ class TransactionGeminiCapacityLedger:
         _time(now)
         connection = self._transaction()
         last = connection.execute(
-            "SELECT last_seen FROM gemini_capacity_identity WHERE singleton = 1"
+            f"SELECT last_seen FROM {self._prefix}_capacity_identity WHERE singleton = 1"
         ).fetchone()[0]
         connection.execute(
-            "UPDATE gemini_capacity_identity SET last_seen = ? WHERE singleton = 1",
+            f"UPDATE {self._prefix}_capacity_identity SET last_seen = ? WHERE singleton = 1",
             (max(last, now),),
         )
         return (
@@ -579,20 +592,26 @@ class TransactionGeminiCapacityLedger:
         if fence.runtime_sha256 != auth.runtime_sha256 or not self._fresh(now):
             raise _error()
         rows = connection.execute(
-            "SELECT reservation, status FROM gemini_capacity_operations"
+            f"SELECT reservation, status FROM {self._prefix}_capacity_operations"
         ).fetchall()
         cost = self._policy.estimate(
             self._policy.max_input_tokens, OUTPUT_TOKENS
         )
+        if self._prefix == "gemini":
+            reject_active_corpus(connection)
         # All reservations use the same immutable policy; KNOWN never refunds.
+        prior_calls, prior_input, prior_output, prior_cost = (
+            self._prior_totals()
+        )
         count = len(rows) + 1
         if (
             any(row[1] != "KNOWN" for row in rows)
-            or count > auth.max_calls
-            or count * self._policy.max_input_tokens
+            or count + prior_calls > auth.max_calls
+            or count * self._policy.max_input_tokens + prior_input
             > auth.max_total_input_tokens
-            or count * OUTPUT_TOKENS > auth.max_total_output_tokens
-            or count * cost > auth.max_micro_usd
+            or count * OUTPUT_TOKENS + prior_output
+            > auth.max_total_output_tokens
+            or count * cost + prior_cost > auth.max_micro_usd
         ):
             raise _error()
         reservation = GeminiReservation(
@@ -605,12 +624,12 @@ class TransactionGeminiCapacityLedger:
             cost,
         )
         if connection.execute(
-            "SELECT 1 FROM gemini_capacity_operations WHERE fence_sha256 = ?",
+            f"SELECT 1 FROM {self._prefix}_capacity_operations WHERE fence_sha256 = ?",
             (reservation.fence_sha256,),
         ).fetchone():
             raise _error()
         connection.execute(
-            "INSERT INTO gemini_capacity_operations (operation_id, reservation, fence_sha256, status) VALUES (?, ?, ?, 'RESERVED')",
+            f"INSERT INTO {self._prefix}_capacity_operations (operation_id, reservation, fence_sha256, status) VALUES (?, ?, ?, 'RESERVED')",
             (
                 reservation.operation_id,
                 canonical(asdict(reservation)),
@@ -619,13 +638,16 @@ class TransactionGeminiCapacityLedger:
         )
         return reservation
 
+    def _prior_totals(self):
+        return (0, 0, 0, 0)
+
     def _row(self, reservation: GeminiReservation) -> tuple:
         if type(reservation) is not GeminiReservation:
             raise _error()
         row = (
             self._transaction()
             .execute(
-                "SELECT reservation, status, claim_token, observation, claim_deadline FROM gemini_capacity_operations WHERE operation_id = ?",
+                f"SELECT reservation, status, claim_token, observation, claim_deadline FROM {self._prefix}_capacity_operations WHERE operation_id = ?",
                 (reservation.operation_id,),
             )
             .fetchone()
@@ -666,14 +688,14 @@ class TransactionGeminiCapacityLedger:
         fresh = self._fresh(now)
         if not matches or not fresh:
             self._transaction().execute(
-                "UPDATE gemini_capacity_operations SET status = 'UNKNOWN' WHERE operation_id = ? AND status = 'RESERVED'",
+                f"UPDATE {self._prefix}_capacity_operations SET status = 'UNKNOWN' WHERE operation_id = ? AND status = 'RESERVED'",
                 (reservation.operation_id,),
             )
             return None
         token = secrets.token_hex(32)
         deadline = min(now + 20, self._authorization.expires_at)
         self._transaction().execute(
-            "UPDATE gemini_capacity_operations SET status = 'CLAIMED', claim_token = ?, claim_deadline = ? WHERE operation_id = ? AND status = 'RESERVED'",
+            f"UPDATE {self._prefix}_capacity_operations SET status = 'CLAIMED', claim_token = ?, claim_deadline = ? WHERE operation_id = ? AND status = 'RESERVED'",
             (token, deadline, reservation.operation_id),
         )
         return GeminiClaim(reservation, token, deadline)
@@ -726,7 +748,7 @@ class TransactionGeminiCapacityLedger:
             if (
                 self._transaction()
                 .execute(
-                    "SELECT 1 FROM gemini_capacity_operations WHERE response_id_sha256 = ? OR request_id_sha256 = ?",
+                    f"SELECT 1 FROM {self._prefix}_capacity_operations WHERE response_id_sha256 = ? OR request_id_sha256 = ?",
                     (accounting["response_id_sha256"], text_hash(request_id)),
                 )
                 .fetchone()
@@ -758,7 +780,7 @@ class TransactionGeminiCapacityLedger:
                 else "UNKNOWN"
             )
         self._transaction().execute(
-            "UPDATE gemini_capacity_operations SET status = ?, observation = ?, response_id_sha256 = ?, request_id_sha256 = ? WHERE operation_id = ? AND claim_token = ? AND observation = '' AND status IN ('CLAIMED','UNKNOWN')",
+            f"UPDATE {self._prefix}_capacity_operations SET status = ?, observation = ?, response_id_sha256 = ?, request_id_sha256 = ? WHERE operation_id = ? AND claim_token = ? AND observation = '' AND status IN ('CLAIMED','UNKNOWN')",
             (
                 status,
                 observation,
@@ -776,6 +798,6 @@ class TransactionGeminiCapacityLedger:
         if row[1] not in ("RESERVED", "CLAIMED", "UNKNOWN"):
             raise _error()
         self._transaction().execute(
-            "UPDATE gemini_capacity_operations SET status = 'UNKNOWN' WHERE operation_id = ?",
+            f"UPDATE {self._prefix}_capacity_operations SET status = 'UNKNOWN' WHERE operation_id = ?",
             (reservation.operation_id,),
         )
