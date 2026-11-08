@@ -1449,7 +1449,7 @@ class CorpusTests(unittest.TestCase):
         )
         self.assertEqual(1, len(self.calls))
 
-    def commit_return_patch(self, action, target=0):
+    def commit_return_patch(self, action, target=0, phase="observation"):
         """Wrap only the target observation COMMIT, never provider transport."""
         original = runner.ExistingCorpusStore.connect
         fired = []
@@ -1472,6 +1472,11 @@ class CorpusTests(unittest.TestCase):
                         (target,),
                     ).fetchone()
                 )
+                if tables and phase == "seal":
+                    pending = self.connection.execute(
+                        "SELECT 1 FROM gemini_corpus_completion_receipts WHERE ordinal=?",
+                        (target,),
+                    ).fetchone()
                 self.connection.commit()
                 if pending and not fired:
                     fired.append(True)
@@ -1771,16 +1776,16 @@ class CorpusTests(unittest.TestCase):
             now[0] = NOW + 1000
 
         with patch.object(runner, "seal_completion", expired):
-            with self.assertRaises(AppError):
-                runner.run(
-                    self.db,
-                    self.owner,
-                    self.raw,
-                    record,
-                    self.descriptors(),
-                    transport=self.transport,
-                    clock=lambda: now[0],
-                )
+            frozen = runner.run(
+                self.db,
+                self.owner,
+                self.raw,
+                record,
+                self.descriptors(),
+                transport=self.transport,
+                clock=lambda: now[0],
+            )
+        self.assert_audit_only(frozen, "EXPIRED")
         self.assertEqual(1, len(self.calls))
         with self.store.transaction() as connection:
             receipt = json.loads(
@@ -1928,3 +1933,260 @@ class CorpusTests(unittest.TestCase):
                 ),
             )
         self.assertFalse(output.exists())
+
+    def test_v5_expiry_after_durable_timely_prefix_freezes_terminal_audit(self):
+        now = [NOW]
+        record = self.approval()
+        with self.commit_return_patch(
+            lambda: now.__setitem__(0, NOW + 1000), phase="seal"
+        ):
+            frozen = runner.run(
+                self.db,
+                self.owner,
+                self.raw,
+                record,
+                self.descriptors(),
+                transport=self.transport,
+                clock=lambda: now[0],
+            )
+        value = self.assert_audit_only(frozen, "EXPIRED")
+        self.assertEqual(1, len(self.calls))
+        self.assertEqual(
+            ["KNOWN", "NOT_RUN"],
+            [r["accounting_state"] for r in value["audit_operations"]],
+        )
+        self.assertEqual(
+            ["TIMELY"], [r["disposition"] for r in value["completion_receipts"]]
+        )
+        self.assertEqual(
+            value["receipt_hashes"], value["invalidation"]["receipt_hashes"]
+        )
+        self.assertEqual([1], value["invalidation"]["not_run_ordinals"])
+        with self.store.transaction() as connection:
+            self.assertEqual(
+                "predicted",
+                json.loads(
+                    connection.execute(
+                        "SELECT result FROM gemini_corpus_requests WHERE ordinal=0"
+                    ).fetchone()[0]
+                )["outcome"],
+            )
+            self.assertEqual(
+                1,
+                connection.execute(
+                    "SELECT count(*) FROM gemini_corpus_capacity_operations"
+                ).fetchone()[0],
+            )
+        with self.assertRaises(AppError):
+            runner.run(
+                self.db,
+                self.owner,
+                self.raw,
+                record,
+                {},
+                transport=self.transport,
+                clock=lambda: now[0],
+            )
+        self.assertEqual(frozen, read_frozen(self.db, audit_only=True))
+
+    def test_v5_expired_restart_finalizes_without_any_new_pipe(self):
+        record = self.approval()
+        original = runner._execute
+
+        def interrupted(*args, **kwargs):
+            original(*args, **kwargs)
+            raise KeyboardInterrupt(
+                "invented process interruption after durable seal"
+            )
+
+        with patch.object(runner, "_execute", interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                self.execute(record)
+        with self.store.transaction() as connection:
+            self.assertEqual(
+                "",
+                connection.execute(
+                    "SELECT frozen FROM gemini_corpus_identity"
+                ).fetchone()[0],
+            )
+        frozen = runner.run(
+            self.db,
+            self.owner,
+            self.raw,
+            record,
+            {},
+            transport=self.transport,
+            clock=lambda: NOW + 1000,
+        )
+        self.assert_audit_only(frozen, "EXPIRED")
+        self.assertEqual(1, len(self.calls))
+
+    def test_v5_expiry_is_exact_terminal_append_not_new_authority(self):
+        from cartreadback_app.gemini_corpus_ledger import CorpusCapacityLedger
+
+        record = self.approval()
+        runtime = self.runtime(record)
+        original = runner._execute
+
+        def interrupted(*args, **kwargs):
+            original(*args, **kwargs)
+            raise KeyboardInterrupt("invented interruption")
+
+        with patch.object(runner, "_execute", interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                self.execute(record)
+        expires_at = record["request"]["plan"]["limits"]["expires_at"]
+        with self.store.transaction() as connection:
+            candidate = tuple(
+                connection.execute(
+                    "SELECT result,result_sha256 FROM gemini_corpus_requests WHERE ordinal=0"
+                ).fetchone()
+            )
+            receipt = tuple(
+                connection.execute(
+                    "SELECT document,sha256 FROM gemini_corpus_completion_receipts WHERE ordinal=0"
+                ).fetchone()
+            )
+            identity = connection.execute(
+                "SELECT document FROM gemini_corpus_identity"
+            ).fetchone()[0]
+            self.assertFalse(
+                runner.expire_incomplete(
+                    connection, runtime, expires_at - 0.001
+                )
+            )
+            self.assertTrue(
+                runner.expire_incomplete(connection, runtime, expires_at)
+            )
+            self.assertTrue(
+                runner.expire_incomplete(connection, runtime, expires_at + 1)
+            )
+            self.assertEqual(
+                1,
+                connection.execute(
+                    "SELECT count(*) FROM gemini_corpus_invalidation"
+                ).fetchone()[0],
+            )
+            self.assertEqual(
+                candidate,
+                tuple(
+                    connection.execute(
+                        "SELECT result,result_sha256 FROM gemini_corpus_requests WHERE ordinal=0"
+                    ).fetchone()
+                ),
+            )
+            self.assertEqual(
+                receipt,
+                tuple(
+                    connection.execute(
+                        "SELECT document,sha256 FROM gemini_corpus_completion_receipts WHERE ordinal=0"
+                    ).fetchone()
+                ),
+            )
+            self.assertEqual(
+                identity,
+                connection.execute(
+                    "SELECT document FROM gemini_corpus_identity"
+                ).fetchone()[0],
+            )
+            ledger = CorpusCapacityLedger(
+                connection, runtime.policy, runtime.authorization
+            )
+            _, prepared = runtime.exact_case(1)
+            with self.assertRaises(AppError):
+                ledger.reserve(prepared.body, runtime.fence(1), now=NOW)
+            frozen = runner.freeze(connection, runtime)
+        self.assert_audit_only(frozen, "EXPIRED")
+        self.assertEqual(1, len(self.calls))
+
+    def test_v5_not_run_case_identity_mismatch_is_rejected_on_export(self):
+        self.unknown_at = 0
+        frozen = json.loads(self.execute())
+        frozen["cases"][1]["case_id"] = "unrelated/invented-case"
+        changed = canonical(frozen) + "\n"
+        with self.store.transaction() as connection:
+            connection.execute(
+                "UPDATE gemini_corpus_identity SET frozen=?,frozen_sha256=?",
+                (changed, text_hash(changed)),
+            )
+        with self.assertRaises(AppError):
+            read_frozen(self.db)
+
+    def test_v5_entire_not_run_placeholder_and_source_mapping_are_exact(self):
+        # Deliberate local corruption with recomputed hashes tests contract
+        # validation, not protection from an attacker controlling the database.
+        self.unknown_at = 0
+        original = json.loads(self.execute())
+        changes = {
+            "ordinal": 7,
+            "case_id": "invented/wrong",
+            "condition_ids": ["wrong"],
+            "request_sha256": "f" * 64,
+            "operation_id": "invented-other",
+            "accounting_state": "KNOWN",
+            "outcome": "predicted",
+            "error_code": "OTHER",
+            "results": [],
+            "extra": True,
+        }
+        for field, changed_value in changes.items():
+            with self.subTest(field=field):
+                value = copy.deepcopy(original)
+                value["cases"][1][field] = changed_value
+                changed = canonical(value) + "\n"
+                with self.store.transaction() as connection:
+                    connection.execute(
+                        "UPDATE gemini_corpus_identity SET frozen=?,frozen_sha256=?",
+                        (changed, text_hash(changed)),
+                    )
+                with self.assertRaises(AppError):
+                    read_frozen(self.db)
+        value = copy.deepcopy(original)
+        value["mapping"][1]["source_identity_sha256"] = "e" * 64
+        changed = canonical(value) + "\n"
+        with self.store.transaction() as connection:
+            connection.execute(
+                "UPDATE gemini_corpus_identity SET frozen=?,frozen_sha256=?",
+                (changed, text_hash(changed)),
+            )
+        with self.assertRaises(AppError):
+            read_frozen(self.db)
+
+    def test_v5_expired_audit_identity_tampering_is_rejected(self):
+        now = [NOW]
+        record = self.approval()
+        with self.commit_return_patch(
+            lambda: now.__setitem__(0, NOW + 1000), phase="seal"
+        ):
+            runner.run(
+                self.db,
+                self.owner,
+                self.raw,
+                record,
+                self.descriptors(),
+                transport=self.transport,
+                clock=lambda: now[0],
+            )
+        with self.store.transaction() as connection:
+            original = json.loads(
+                connection.execute(
+                    "SELECT document FROM gemini_corpus_invalidation"
+                ).fetchone()[0]
+            )
+        for field, changed in (
+            ("observed_at", NOW),
+            ("completed_prefix_length", 0),
+            ("receipt_hashes", []),
+            ("not_run_ordinals", [0, 1]),
+            ("approved_record_sha256", "f" * 64),
+        ):
+            with self.subTest(field=field):
+                value = copy.deepcopy(original)
+                value[field] = changed
+                with self.store.transaction() as connection:
+                    connection.execute(
+                        "UPDATE gemini_corpus_invalidation SET document=?,sha256=?",
+                        (canonical(value), digest(value)),
+                    )
+                with self.assertRaises(AppError):
+                    read_frozen(self.db, audit_only=True)

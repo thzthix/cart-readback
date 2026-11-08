@@ -1,6 +1,7 @@
 """Same-store immutable corpus grants, paired operations and frozen results."""
 
 import json
+import math
 import sqlite3
 import time
 from contextlib import closing
@@ -258,7 +259,20 @@ def completion_state(connection, record_sha256, request):
             ),
             None,
         )
-        expected = _invalidation_value(record_sha256, match) if match else None
+        if invalidation.get("reason") == "EXPIRED":
+            if terminal or missing:
+                raise blocked()
+            expected = _expiry_value(
+                record_sha256,
+                request,
+                rows,
+                verified,
+                invalidation.get("observed_at"),
+            )
+        else:
+            expected = (
+                _invalidation_value(record_sha256, match) if match else None
+            )
         if (
             expected is None
             or invalid["document"] != canonical(expected)
@@ -279,6 +293,113 @@ def _invalidation_value(record_sha256, receipt):
         "ordinal": receipt["ordinal"],
         "operation_id": receipt["operation_id"],
         "receipt_sha256": digest(receipt),
+    }
+
+
+def _expiry_value(record_sha256, request, rows, receipts, now):
+    expires_at = min(
+        request["plan"]["limits"]["expires_at"],
+        request["plan"]["policy"]["expires_at"],
+    )
+    if (
+        type(now) not in (int, float)
+        or not math.isfinite(now)
+        or not expires_at <= now <= MAX_INTEGER
+    ):
+        raise blocked()
+    prefix = len(receipts)
+    if (
+        prefix >= len(rows)
+        or set(receipts) != set(range(prefix))
+        or any(
+            row["status"] != "KNOWN"
+            or receipts[index]["disposition"] != "TIMELY"
+            for index, row in enumerate(rows[:prefix])
+        )
+        or any(
+            row["operation_id"] is not None
+            or row["status"] is not None
+            or row["result"]
+            or row["result_sha256"]
+            for row in rows[prefix:]
+        )
+    ):
+        raise blocked()
+    return {
+        "schema": "gemini-corpus-expiry-invalidation-v1",
+        "approved_record_sha256": record_sha256,
+        "runtime_sha256": request["runtime_sha256"],
+        "mapping_sha256": request["mapping_sha256"],
+        "scoring_eligible": False,
+        "reason": "EXPIRED",
+        "expires_at": expires_at,
+        "observed_at": now,
+        "completed_prefix_length": prefix,
+        "receipt_hashes": [digest(receipts[index]) for index in range(prefix)],
+        "not_run_ordinals": list(range(prefix, len(rows))),
+    }
+
+
+def expire_incomplete(connection, runtime, now):
+    """Append terminal audit invalidation to an expired grant, never renew it.
+
+    Only an already activated, unchanged identity and a wholly timely KNOWN
+    prefix plus untouched suffix qualify. Pending/uncertain work must first go
+    through normal recovery. Complete runs remain complete; other stale guards
+    are not reinterpreted as expiry. No credential or fresh admission is needed.
+    """
+    if not connection.in_transaction:
+        raise blocked()
+    identity = connection.execute(
+        "SELECT document,frozen FROM gemini_corpus_identity WHERE singleton=1"
+    ).fetchone()
+    if (
+        identity is None
+        or identity["frozen"]
+        or text_hash(identity["document"]) != runtime.record_sha256
+    ):
+        raise blocked()
+    rows = paired_rows(connection, runtime)
+    receipts, invalidation, missing = completion_state(
+        connection, runtime.record_sha256, runtime.request
+    )
+    if invalidation:
+        return True
+    if type(now) not in (int, float) or not math.isfinite(now):
+        raise blocked()
+    expires_at = min(
+        runtime.request["plan"]["limits"]["expires_at"],
+        runtime.request["plan"]["policy"]["expires_at"],
+    )
+    if (
+        now < expires_at
+        or missing
+        or all(row["status"] == "KNOWN" for row in rows)
+        or any(row["status"] not in (None, "KNOWN") for row in rows)
+    ):
+        return False
+    value = _expiry_value(
+        runtime.record_sha256, runtime.request, rows, receipts, now
+    )
+    connection.execute(
+        "INSERT INTO gemini_corpus_invalidation VALUES(1,?,?)",
+        (canonical(value), digest(value)),
+    )
+    completion_state(connection, runtime.record_sha256, runtime.request)
+    return True
+
+
+def _not_run_value(item):
+    return {
+        "ordinal": item["ordinal"],
+        "case_id": item["case_id"],
+        "condition_ids": item["condition_ids"],
+        "request_sha256": item["request_sha256"],
+        "operation_id": None,
+        "accounting_state": "NOT_RUN",
+        "outcome": "not_run",
+        "error_code": "PRIOR_OUTCOME_UNKNOWN",
+        "results": None,
     }
 
 
@@ -817,19 +938,8 @@ def freeze(connection, runtime):
         if row["result"]:
             cases.append(json.loads(row["result"]))
         else:
-            item = runtime.request["mapping"][row["ordinal"]]
             cases.append(
-                {
-                    "ordinal": row["ordinal"],
-                    "case_id": item["case_id"],
-                    "condition_ids": item["condition_ids"],
-                    "request_sha256": item["request_sha256"],
-                    "operation_id": None,
-                    "accounting_state": "NOT_RUN",
-                    "outcome": "not_run",
-                    "error_code": "PRIOR_OUTCOME_UNKNOWN",
-                    "results": None,
-                }
+                _not_run_value(runtime.request["mapping"][row["ordinal"]])
             )
     value = {
         "schema": PREDICTIONS_SCHEMA,
@@ -1007,8 +1117,9 @@ def _verified_frozen(connection, *, audit_only=False):
             if row["result"] and case != json.loads(row["result"]):
                 raise blocked()
             if not row["result"] and (
-                case.get("outcome") != "not_run"
-                or case.get("results") is not None
+                row["operation_id"] is not None
+                or row["status"] is not None
+                or case != _not_run_value(record["request"]["mapping"][index])
             ):
                 raise blocked()
     return frozen_raw

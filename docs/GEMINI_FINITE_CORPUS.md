@@ -130,12 +130,29 @@ with fresh guards and pipes for the still-undispatched suffix. Durable LATE or
 UNCONFIRMED is terminal. Recovery, reconciliation and terminal audit freezing need
 no credential or renewed authority. The process lease remains held throughout.
 
+An already activated run with a wholly TIMELY known prefix and an untouched
+suffix can become terminal when its original authority expires. The runner
+appends a separate `EXPIRED` run invalidation, binding the original grant/runtime,
+mapping, expiry/observation time, unchanged receipt hashes and exact undispatched
+ordinals. This is not a LATE/UNCONFIRMED operation receipt: the timely receipts,
+candidates, reservations and authority remain unchanged. Both the original run
+and credential-free restart can freeze the distinct audit-only contract. No new
+reservation, provider request, renewal or complete-evaluation claim is made.
+Pending/uncertain work still uses normal recovery first; a fully completed run
+remains complete. Expiry does not silently reinterpret unrelated stale guards.
+
 Clean or UNKNOWN-stopped runs freeze `gemini-frozen-corpus-results-v2`, including
 case-keyed predictions/failures, NOT_RUN suffix, mapping, reservations, accounting,
 exact completion receipts and hashes. Invalidated runs instead freeze the distinct
 `gemini-frozen-corpus-audit-only-v1` contract: `scoring_eligible:false`, invalidation
 reason/hash, receipt hashes, and accounting/operation/candidate hashes, **without
 ordinary case prediction results for any case**, including a timely prefix.
+Each ordinary NOT_RUN placeholder is reconstructed in full from the immutable
+mapping during freeze and export: exact ordinal, case/condition IDs, request
+identity, null operation/results, status and error code. The complete mapping
+retains and verifies source identity/revision/hash. Recomputing a frozen-byte hash
+does not make a mismatched placeholder contract valid; this is validation, not
+protection against an attacker controlling the host/database.
 Candidate bytes remain in the database for audit. Normal prediction export
 refuses an invalidated run; `export-audit` is explicitly separate. This does not
 claim arbitrary external scorers honor a boolean, and does not change scorer
@@ -203,7 +220,8 @@ legacy consumption and UNKNOWN/orphans, simultaneous admission, dup pipe aliases
 scope/privacy/early cleanup, real child-process crashes after fake dispatch and
 observation, observation/COMMIT lock deadlines, late and ambiguous COMMIT,
 pre/post-seal process crashes, delayed receipt persistence, missing/tampered
-receipts, whole-run audit-only export rejection, freeze tampering, and crash-safe
+receipts, whole-run audit-only export rejection, expired-prefix terminal audit, exact
+NOT_RUN placeholders, freeze tampering, and crash-safe
 re-export. Existing aggregate evaluation/prompt/UI checks require a separately
 permitted verification role and are not certified by this source-only test pass.
 No actual account eligibility, provider acceptance, real charge, semantic quality,

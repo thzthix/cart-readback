@@ -424,7 +424,9 @@ Free-only authority, admits each request once, and freezes case-keyed results
 before separate scoring. UNKNOWN stops the corpus without retry or renewal.
 Observation commits require durable timely receipts. Late or unconfirmed commits
 invalidate the whole run and permit only a distinct audit-only export, preserving
-accounting and candidate history without exporting prediction results.
+accounting and candidate history without exporting prediction results. Expired
+incomplete runs also finalize as audit-only without renewing authority or
+altering their timely completion receipts.
 The ordinary UI, prompts, scorer and payment paths are unchanged. This is offline
 implementation evidence, not credential provisioning, account eligibility,
 zero-charge proof or permission to make model calls.

@@ -39,6 +39,7 @@ from cartreadback_app.gemini_corpus_ledger import (  # noqa: E402
     commit_observation,
     completion_state,
     database_file_identity,
+    expire_incomplete,
     freeze,
     history_snapshot,
     invalidated,
@@ -321,6 +322,7 @@ def run(
                     ):
                         raise blocked()
                     recover(connection, runtime)
+                    expire_incomplete(connection, runtime, clock())
                     rows = paired_rows(connection, runtime)
                     if (
                         invalidated(connection, runtime)
@@ -348,7 +350,16 @@ def run(
             owned, eligible, runtime.binding, runtime.record_sha256
         )
         for ordinal in eligible:
-            if _execute(store, runtime, ordinal, pipes, clock) != "KNOWN":
+            try:
+                state = _execute(store, runtime, ordinal, pipes, clock)
+            except Exception:
+                # Expiry after a durable timely prefix is terminal, not a new
+                # admission. The same lease/identity remains held throughout.
+                with store.transaction() as connection:
+                    if expire_incomplete(connection, runtime, clock()):
+                        return freeze(connection, runtime)
+                raise
+            if state != "KNOWN":
                 break
         with store.transaction() as connection:
             return freeze(connection, runtime)
