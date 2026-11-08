@@ -70,6 +70,8 @@ not a production-security endorsement.
 
 ## Local fixture quickstart
 
+For a concise walkthrough and evidence limits, see the [reviewer runbook](docs/JUDGE_RUNBOOK.md).
+
 Python 3.11+ is required. Runtime has no third-party packages, API keys or account
 setup or UI build step. A browser is needed for the UI. From the repository root:
 
