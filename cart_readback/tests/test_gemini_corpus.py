@@ -1287,3 +1287,105 @@ class CorpusTests(unittest.TestCase):
         with self.assertRaises(AppError):
             self.execute(record, descriptors=self.descriptors((1,)))
         self.assertEqual(1, len(self.calls))
+
+    def test_review_v2_deadline_after_observation_lock_wait(self):
+        import threading
+        import time
+
+        plan = host_plan()
+        plan["timeout_seconds"] = 1.5
+        record = self.approval(self.disclosure(plan=plan))
+        started = time.monotonic()
+        held = threading.Event()
+        workers = []
+        faults = []
+
+        def writer():
+            try:
+                with self.store.transaction():
+                    held.set()
+                    time.sleep(2.0)
+            except BaseException as error:
+                faults.append(type(error).__name__)
+
+        def cleanup(connection):
+            if not workers:
+                thread = threading.Thread(target=writer)
+                workers.append(thread)
+                thread.start()
+                if not held.wait(5):
+                    raise AssertionError("invented writer did not start")
+
+        try:
+            with patch.object(Connection, "close", cleanup):
+                frozen = runner.run(
+                    self.db,
+                    self.owner,
+                    self.raw,
+                    record,
+                    self.descriptors(),
+                    transport=self.transport,
+                    clock=lambda: NOW + time.monotonic() - started,
+                )
+        finally:
+            for thread in workers:
+                thread.join(5)
+        self.assertEqual([], faults)
+        self.assertEqual(
+            ["unknown", "not_run"],
+            [item["outcome"] for item in json.loads(frozen)["cases"]],
+        )
+        self.assertEqual(1, len(self.calls))
+
+    def test_review_v2_constructor_failure_never_double_closes_reused_fd(self):
+        import threading
+
+        record = self.approval()
+        read, write = os.pipe()
+        os.close(write)
+        alias = os.dup(read)
+        freed = threading.Event()
+        resume = threading.Event()
+        faults = []
+        reused = []
+        original_close = CorpusPipes.close
+
+        def close(owner):
+            original_close(owner)
+            freed.set()
+            if not resume.wait(5):
+                raise AssertionError("invented scheduling barrier timeout")
+
+        def attempt():
+            try:
+                self.execute(record, descriptors={0: read, 1: alias})
+            except AppError:
+                pass
+            except BaseException as error:
+                faults.append(type(error).__name__)
+
+        with patch.object(CorpusPipes, "close", close):
+            thread = threading.Thread(target=attempt)
+            thread.start()
+            try:
+                self.assertTrue(freed.wait(5))
+                descriptor = os.open(
+                    self.root / "unrelated-resource",
+                    os.O_CREAT | os.O_RDWR,
+                    0o600,
+                )
+                reused.append(descriptor)
+                self.assertIn(descriptor, (read, alias))
+                resume.set()
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual([], faults)
+                os.fstat(descriptor)
+            finally:
+                resume.set()
+                thread.join(5)
+                for descriptor in reused:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass

@@ -25,17 +25,58 @@ def _pipe_identity(descriptor):
     return info.st_dev, info.st_ino
 
 
+class OwnedDescriptors:
+    """One cleanup owner shared across validation, construction and execution.
+
+    The caller relinquishes these descriptor numbers on construction. Cleanup
+    atomically consumes the pending set before closing anything, so a later
+    cleanup cannot close an unrelated resource that reused a released number.
+    """
+
+    def __init__(self, descriptors: dict[int, int]):
+        """Snapshot the caller's mapping without inspecting or reading keys."""
+        self._descriptors = dict(descriptors)
+        self._pending = tuple(
+            {
+                value
+                for value in self._descriptors.values()
+                if type(value) is int and value >= 3
+            }
+        )
+        self._close_lock = threading.Lock()
+
+    def snapshot(self) -> dict[int, int]:
+        """Return an isolated mapping for validation, not a second owner."""
+        return dict(self._descriptors)
+
+    def close(self) -> None:
+        """Consume cleanup ownership exactly once, including concurrent calls."""
+        with self._close_lock:
+            pending, self._pending = self._pending, ()
+        for descriptor in pending:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
 class CorpusPipes:
     """Own exactly the still-eligible request descriptors for one finite grant.
 
-    Ownership transfers on construction. Even failed validation closes valid
-    descriptor numbers supplied here. Callers must not pass unrelated handles.
-    Descriptor metadata is checked without reading any secret bytes.
+    A supplied OwnedDescriptors retains sole cleanup ownership. A plain mapping
+    transfers ownership into a new owner. Failed validation closes that owner;
+    the caller may close the same owner again, never the raw integers. Callers
+    must not pass unrelated handles. Validation never reads secret bytes.
     """
 
     def __init__(self, descriptors, ordinals, binding, grant_sha256):
         """Validate readable private pipes and forbid dup aliases before reserve."""
-        self._descriptors = dict(descriptors)
+        self._owner = (
+            descriptors
+            if type(descriptors) is OwnedDescriptors
+            else OwnedDescriptors(descriptors)
+        )
+        self._descriptors = self._owner.snapshot()
         self._binding = binding
         self._grant = grant_sha256
         self._identities = {}
@@ -78,12 +119,7 @@ class CorpusPipes:
         if self._closed:
             return
         self._closed = True
-        for descriptor in set(self._descriptors.values()):
-            if type(descriptor) is int and descriptor >= 3:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
+        self._owner.close()
 
 
 class _RequestPipe:

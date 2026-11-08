@@ -83,12 +83,18 @@ checked before reservation and again before one-shot borrow. Each handle binds
 the exact ordinal, grant and credential version. There is no secret cache or
 reuse of a single-case credential handle. Read size, nonblocking reads, EOF and
 monotonic deadline remain bounded. All owned descriptors, including unused ones,
-close on completion or rejection. Supplying unrelated descriptors is invalid.
+close on completion or rejection. One explicit descriptor owner carries cleanup
+through early validation, pipe construction and execution. Its pending set is
+consumed once before close, so constructor failure cannot trigger a second close
+of an unrelated resource that reused the descriptor number. Supplying unrelated
+descriptors is invalid.
 The multi-pipe provisioner and actual data/credential approvals are external
 prerequisites, not implemented by this runner. The new runner is POSIX-only.
 
 Cleanup remains synchronous under the lease. Original monotonic deadline is
-rechecked after exchange/cleanup and before accepting results. Accounting is
+rechecked after exchange/cleanup, after acquiring the observation transaction's
+write lock, after expensive identity/accounting checks and immediately before
+committing result attachment. A local SQLite lock wait does not extend authority. Accounting is
 independent of prose. A known refusal/schema failure becomes a frozen case
 failure and can continue; uncertain usage or a failed guarded attempt is UNKNOWN
 and stops before the next request. Crash recovery permanently fences reserved or

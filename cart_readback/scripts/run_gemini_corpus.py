@@ -28,7 +28,10 @@ from cartreadback_app.gemini_corpus import (  # noqa: E402
     parse_corpus,
     plan_parts,
 )
-from cartreadback_app.gemini_corpus_credentials import CorpusPipes  # noqa: E402
+from cartreadback_app.gemini_corpus_credentials import (  # noqa: E402
+    CorpusPipes,
+    OwnedDescriptors,
+)
 from cartreadback_app.gemini_corpus_ledger import (  # noqa: E402
     ExistingCorpusStore,
     activate,
@@ -216,17 +219,23 @@ def _execute(store, runtime, ordinal, pipes, clock):
         )
         deadline.remaining()
         with store.transaction() as connection:
+            # BEGIN IMMEDIATE may have waited. The 20-second capacity claim
+            # does not replace this request's shorter monotonic deadline.
+            deadline.remaining()
             ledger = ledger_for(connection, selected, clock())
             paired_rows(connection, selected)
+            current_fence = selected.fence(ordinal)
+            deadline.remaining()
             state = ledger.observe(
                 claim,
                 exchange.envelope,
                 request_sha256=exchange.request_sha256,
                 runtime_sha256=exchange.runtime_sha256,
                 request_id=exchange.request_id,
-                current_fence=selected.fence(ordinal),
+                current_fence=current_fence,
                 now=clock(),
             )
+            deadline.remaining()
             if fault and state == "KNOWN":
                 raise blocked()
             attach_result(
@@ -238,6 +247,9 @@ def _execute(store, runtime, ordinal, pipes, clock):
                 "MODEL_OUTCOME_UNKNOWN" if state == "UNKNOWN" else code,
                 results if state == "KNOWN" and not code else None,
             )
+            # Late local validation/attachment rolls this transaction back;
+            # the original reservation is then durably marked UNKNOWN.
+            deadline.remaining()
             return state
     except Exception:
         # No retry. Even failed local guards after reservation retain capacity.
@@ -259,6 +271,7 @@ def run(
     db, owner, raw, record, descriptors, *, transport=None, clock=time.time
 ):
     """Execute a sequential known prefix once; freeze before exporting/scoring."""
+    owned = OwnedDescriptors(descriptors)
     pipes = lease = None
     try:
         record = owned_json(canonical(record).encode())
@@ -301,7 +314,7 @@ def run(
                 row["ordinal"] for row in rows if row["operation_id"] is None
             ]
         pipes = CorpusPipes(
-            descriptors, eligible, runtime.binding, runtime.record_sha256
+            owned, eligible, runtime.binding, runtime.record_sha256
         )
         for ordinal in eligible:
             if _execute(store, runtime, ordinal, pipes, clock) == "UNKNOWN":
@@ -309,18 +322,17 @@ def run(
         with store.transaction() as connection:
             return freeze(connection, runtime)
     finally:
-        if pipes is not None:
-            pipes.close()
-        else:
-            # Handles are owned even when validation/recovery blocks the run.
-            for descriptor in set(descriptors.values()):
-                if type(descriptor) is int and descriptor >= 3:
-                    try:
-                        os.close(descriptor)
-                    except OSError:
-                        pass
-        if lease is not None:
-            lease.close()
+        try:
+            if pipes is not None:
+                pipes.close()
+        finally:
+            try:
+                # Constructor failure may already have consumed this owner.
+                # Never close the original integer list a second time.
+                owned.close()
+            finally:
+                if lease is not None:
+                    lease.close()
 
 
 def main(argv=None):
