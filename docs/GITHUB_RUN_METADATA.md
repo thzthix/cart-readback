@@ -104,6 +104,10 @@ suppressed. A primary direct cancellation takes precedence over cleanup faults;
 otherwise the first direct cleanup cancellation takes precedence over an
 ordinary primary failure. Grouped exceptions, including `BaseExceptionGroup`,
 and unexpected `BaseException` types become the same constant unavailable error.
+The exchange captures its own primary exception explicitly, independent of any
+unrelated exception being handled by its caller. Response cleanup performed
+inside the standard-library `getresponse()` failure handler preserves an active
+direct cancellation instead of replacing it with a secondary close failure.
 This contract does not contain a callback that independently prints or logs.
 No cancellation/error returns a completed observation. Closing a connection is
 not proof of remote cancellation.

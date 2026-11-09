@@ -601,6 +601,14 @@ class ReaderTests(unittest.TestCase):
                             reader, gm.MetadataUnavailable
                         )
 
+    def test_unrelated_caller_exception_cannot_hide_cleanup_failure(self):
+        self.failures = {0: "close"}
+        try:
+            raise KeyboardInterrupt(TOKEN)
+        except KeyboardInterrupt:
+            self.assert_failure()
+        self.assertEqual(len(self.connections), 1)
+
     def test_bad_credential_or_callback_does_not_request(self):
         for bad in ("", None, "synthetic\r\nHeader: value", 1, "x" * 4097):
             with self.subTest(bad=bad):
@@ -691,6 +699,144 @@ class EnrollmentTests(unittest.TestCase):
 
 
 class ProductionConnectionTests(unittest.TestCase):
+    def test_actual_cleanup_ignores_unrelated_caller_exception(self):
+        try:
+            raise KeyboardInterrupt(TOKEN)
+        except KeyboardInterrupt:
+            self.test_actual_getresponse_preserves_primary_and_cleanup_precedence()
+
+    def test_actual_getresponse_preserves_primary_and_cleanup_precedence(self):
+        address = ("192.0.2.1", 443)
+        original_close = gm._StrictResponse.close
+        for primary in (
+            None,
+            RuntimeError,
+            KeyboardInterrupt,
+            SystemExit,
+            GeneratorExit,
+        ):
+            for response_fault in (
+                RuntimeError,
+                KeyboardInterrupt,
+                SystemExit,
+                GeneratorExit,
+            ):
+                for socket_fault in (
+                    RuntimeError,
+                    KeyboardInterrupt,
+                    SystemExit,
+                    GeneratorExit,
+                ):
+                    with self.subTest(
+                        primary=primary,
+                        response=response_fault,
+                        socket=socket_fault,
+                    ):
+                        events = []
+
+                        def stage(name):
+                            events.append(name)
+                            if primary is not None and name == "read":
+                                raise primary(TOKEN)
+
+                        class RawSocket:
+                            def __init__(self):
+                                self.file = FakeSocket(wire(run()), stage, None)
+                                self.closed = False
+
+                            def connect(self, target):
+                                self.target = target
+
+                            def settimeout(self, _timeout):
+                                pass
+
+                            def sendall(self, _data):
+                                pass
+
+                            def makefile(self, _mode):
+                                return self.file
+
+                            def close(self):
+                                self.closed = True
+                                events.append("socket_close")
+                                raise socket_fault(TOKEN)
+
+                        def response_close(response):
+                            try:
+                                original_close(response)
+                            finally:
+                                events.append("response_close")
+                            raise response_fault(TOKEN)
+
+                        raw = RawSocket()
+                        expected = next(
+                            (
+                                kind
+                                for kind in (
+                                    primary,
+                                    response_fault,
+                                    socket_fault,
+                                )
+                                if kind
+                                in (
+                                    KeyboardInterrupt,
+                                    SystemExit,
+                                    GeneratorExit,
+                                )
+                            ),
+                            gm.MetadataUnavailable,
+                        )
+                        with (
+                            mock.patch.object(
+                                gm, "_wall_clock", return_value=NOW
+                            ),
+                            mock.patch.object(
+                                gm, "_monotonic", return_value=10
+                            ),
+                            mock.patch.object(
+                                gm,
+                                "_resolve",
+                                return_value=(
+                                    socket.AF_INET,
+                                    socket.SOCK_STREAM,
+                                    socket.IPPROTO_TCP,
+                                    address,
+                                ),
+                            ),
+                            mock.patch.object(
+                                socket, "socket", return_value=raw
+                            ) as factory,
+                            mock.patch.object(
+                                ssl.SSLContext, "wrap_socket", return_value=raw
+                            ),
+                            mock.patch.object(
+                                gm._StrictResponse, "close", response_close
+                            ),
+                        ):
+                            reader = gm.GitHubRunMetadataReader(
+                                enrollment(), lambda: TOKEN
+                            )
+                            try:
+                                reader.read(404)
+                            except BaseException as error:
+                                self.assertIs(type(error), expected)
+                                self.assertNotIn(TOKEN, repr(error.args))
+                                self.assertNotIn(
+                                    TOKEN,
+                                    "".join(traceback.format_exception(error)),
+                                )
+                                if expected is SystemExit:
+                                    self.assertEqual(error.code, 1)
+                            else:
+                                self.fail("fault returned metadata observation")
+                            with self.assertRaises(gm.MetadataUnavailable):
+                                reader.read(404)
+                            factory.assert_called_once()
+                        self.assertEqual(raw.target, address)
+                        self.assertTrue(raw.closed)
+                        self.assertIn("response_close", events)
+                        self.assertIn("socket_close", events)
+
     def test_raw_connect_cleanup_preserves_normalized_public_cancellation(self):
         address = ("192.0.2.1", 443)
         for primary in (

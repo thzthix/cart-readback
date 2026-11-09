@@ -516,6 +516,8 @@ class GitHubRunMetadataReader:
     def _get(self, path, deadline):
         connection = response = established = None
         headers, token = {}, None
+        primary = None
+        stdlib_entry_error = None
 
         def guard():
             _require(established is not None)
@@ -539,6 +541,22 @@ class GitHubRunMetadataReader:
                     super().__init__(*args, **kwargs)
                     self.fp = _Reader(self.fp, guard)
 
+                def close(self):
+                    # getresponse/connection.close perform nested cleanup while
+                    # handling failures. Preserve only a newly active exception
+                    # inside those calls, not their inherited caller context.
+                    active = sys.exc_info()
+                    changed = stdlib_entry_error is not None and (
+                        active[1] is not stdlib_entry_error[1]
+                        or active[2] is not stdlib_entry_error[2]
+                    )
+                    try:
+                        super().close()
+                    except BaseException:
+                        if changed and _direct_cancellation(active[1]):
+                            raise active[1]
+                        raise
+
             connection.response_class = GuardedResponse
             connection.connect()
             established = connection.sock
@@ -561,7 +579,11 @@ class GitHubRunMetadataReader:
                 token = None
                 headers.clear()
             guard()
-            response = connection.getresponse()
+            stdlib_entry_error = sys.exc_info()
+            try:
+                response = connection.getresponse()
+            finally:
+                stdlib_entry_error = None
             deadline.check()
             _require(
                 type(response) is GuardedResponse
@@ -585,15 +607,19 @@ class GitHubRunMetadataReader:
             result = _json(bytes(raw))
             deadline.check()
             return result
+        except BaseException as error:
+            primary = error
+            raise
         finally:
             token = None
             headers.clear()
-            primary = sys.exc_info()[1]
             cleanup_fault = None
             cleanup_cancellation = None
             for resource in (response, connection):
                 if resource is not None:
                     try:
+                        if resource is connection:
+                            stdlib_entry_error = sys.exc_info()
                         resource.close()
                     except BaseException as error:
                         if cleanup_fault is None:
@@ -603,6 +629,8 @@ class GitHubRunMetadataReader:
                             and _direct_cancellation(error)
                         ):
                             cleanup_cancellation = error
+                    finally:
+                        stdlib_entry_error = None
             if cleanup_cancellation is not None and not _direct_cancellation(
                 primary
             ):
