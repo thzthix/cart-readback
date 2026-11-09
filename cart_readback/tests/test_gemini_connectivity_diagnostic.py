@@ -1,84 +1,44 @@
-"""Synthetic diagnostic regressions. No provider, credential or asset reads."""
+"""Fake-only tests of the actual one-shot client and branch workflow contract."""
 
 import contextlib
-import copy
+import hashlib
+import http.client
 import importlib.util
 import io
 import json
+import os
 import pathlib
-import socket
+import signal
 import ssl
-import sys
-import threading
+import tempfile
 import unittest
 from unittest import mock
 
+import yaml
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "cart_readback"))
-MODULE = ROOT / "cart_readback/scripts/gemini_connectivity_diagnostic.py"
-SPEC = importlib.util.spec_from_file_location("offline_diagnostic", MODULE)
-diagnostic = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(diagnostic)
+PATH = ROOT / "cart_readback/scripts/gemini_connectivity_diagnostic.py"
+SPEC = importlib.util.spec_from_file_location("diagnostic", PATH)
+probe = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(probe)
+NOW = 1700000100
 
 
-def fixtures():
-    enrollment = {
-        "repository_id": 100,
-        "workflow_id": 200,
-        "actor_id": 300,
-        "path": diagnostic.WORKFLOW_PATH,
-        "ref": "refs/heads/main",
-        "head_sha": "a" * 40,
-        "valid_from": 1000,
-        "expires_at": 2000,
-    }
-    current = {
-        k: v
-        for k, v in enrollment.items()
-        if k not in ("valid_from", "expires_at")
-    }
-    current.update(
-        {
-            "id": 400,
-            "run_number": 1,
-            "run_attempt": 1,
-            "event": "workflow_dispatch",
-            "created_at": 1100,
-            "status": "in_progress",
-            "conclusion": None,
-        }
-    )
-    snapshot = {
-        "evidence_kind": "fabricated-offline",
-        "http_status": 200,
-        "next_page": None,
-        "truncated": False,
-        "current": current,
-        "history": {
-            "total_count": 1,
-            "workflow_runs": [copy.deepcopy(current)],
-        },
-    }
-    grant = {
-        "schema": "fabricated-connectivity-grant-v1",
-        "request_sha256": diagnostic.REQUEST_SHA256,
-        "endpoint": diagnostic.ENDPOINT,
-        "model": diagnostic.MODEL,
-        "expected_model_version": diagnostic.MODEL,
-        "valid_from": 1000,
-        "expires_at": 2000,
-        "max_calls": 1,
-        "max_total_input_tokens": 1048576,
-        "max_total_output_tokens": 2048,
-        "max_micro_usd": 0,
-        "admission_mode": "externally-verified-free-tier",
-        "exact_request_owner_grant_sha256": "b" * 64,
-        "credential_transmission_grant_sha256": "c" * 64,
-        "free_project_facts_sha256": "d" * 64,
-        "zero_cost_compute_facts_sha256": "e" * 64,
-    }
-    response = {
-        "modelVersion": diagnostic.MODEL,
+class TrackedEnv(dict):
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.borrowed = 0
+
+    def pop(self, key, *default):
+        if key == "GEMINI_KEY":
+            self.borrowed += 1
+        return super().pop(key, *default)
+
+
+def envelope():
+    return {
+        "modelVersion": probe.MODEL,
+        "responseId": "synthetic_id",
         "usageMetadata": {
             "promptTokenCount": 12,
             "candidatesTokenCount": 2,
@@ -89,353 +49,13 @@ def fixtures():
             {
                 "content": {
                     "role": "model",
-                    "parts": [{"text": "PRIVATE_SENTINEL"}],
+                    "parts": [{"text": "PRIVATE_TEXT"}],
                 },
                 "finishReason": "STOP",
                 "index": 0,
             }
         ],
     }
-    return enrollment, snapshot, grant, response
-
-
-class FakeTransport:
-    evidence_kind = "fabricated-offline"
-
-    def __init__(self, response, status=200):
-        self.body = json.dumps(response).encode()
-        self.status = status
-        self.calls = []
-        self.error = None
-
-    def exchange(self, endpoint, payload, timeout_seconds):
-        self.calls.append((endpoint, payload, timeout_seconds))
-        if self.error:
-            raise self.error
-        return self.status, self.body
-
-
-class DiagnosticTest(unittest.TestCase):
-    def setUp(self):
-        self.socket_guard = mock.patch.object(
-            socket, "socket", side_effect=AssertionError("network forbidden")
-        )
-        self.socket_guard.start()
-        self.addCleanup(self.socket_guard.stop)
-        self.enrollment, self.snapshot, self.grant, self.response = fixtures()
-        self.transport = FakeTransport(self.response)
-        self.subject = diagnostic.OfflineDiagnostic()
-
-    def run_fixture(self, clock=lambda: 1200):
-        return self.subject.run(
-            self.enrollment, self.snapshot, self.grant, self.transport, clock
-        )
-
-    def assert_blocked(self):
-        self.assertEqual(self.run_fixture()["status"], "NOT_RUN")
-        self.assertEqual(self.transport.calls, [])
-
-    def test_one_fixed_call_and_safe_result(self):
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            result = self.run_fixture()
-        self.assertEqual(
-            result,
-            {
-                "status": "FABRICATED_ACCEPTED",
-                "evidence_kind": "fabricated-offline",
-                "model": diagnostic.MODEL,
-                "input_tokens": 12,
-                "output_tokens": 3,
-                "total_tokens": 15,
-            },
-        )
-        self.assertEqual(
-            self.transport.calls,
-            [(diagnostic.ENDPOINT, diagnostic.REQUEST, 20)],
-        )
-        self.assertNotIn(
-            "PRIVATE_SENTINEL", json.dumps(result) + output.getvalue()
-        )
-        self.assertEqual(self.run_fixture()["status"], "NOT_RUN")
-        self.assertEqual(len(self.transport.calls), 1)
-
-    def test_request_is_fixed_public_minimal_surface(self):
-        request = json.loads(diagnostic.REQUEST)
-        self.assertEqual(set(request), {"contents", "generationConfig"})
-        self.assertEqual(
-            request["generationConfig"],
-            {
-                "candidateCount": 1,
-                "maxOutputTokens": 32,
-                "temperature": 0,
-                "thinkingConfig": {"thinkingLevel": "MINIMAL"},
-            },
-        )
-        self.assertEqual(
-            diagnostic.REQUEST_SHA256,
-            "1d5aeeb73cc4fa2225e99bd1bdccd5a963251e00e1f7cd9f6561489b980f95f8",
-        )
-
-    def test_production_is_always_not_run(self):
-        with mock.patch.dict(
-            "os.environ", {"GEMINI_API_KEY": "SYNTHETIC_ONLY"}
-        ):
-            self.assertEqual(
-                diagnostic.production_status(),
-                {
-                    "status": "NOT_RUN",
-                    "reason": "PRODUCTION_ACTIVATION_UNSUPPORTED",
-                },
-            )
-        self.assertEqual(self.transport.calls, [])
-
-    def test_workflow_is_frozen_and_cannot_activate_through_inputs(self):
-        workflow = ROOT / diagnostic.WORKFLOW_PATH
-        self.assertEqual(
-            diagnostic.hashlib.sha256(workflow.read_bytes()).hexdigest(),
-            "e1cbad98fe5a04cf2aa5abaa0a66fb5e512b09365bfd1a7bec314cc71f6af21a",
-        )
-
-    def test_concurrent_use_cannot_dispatch_twice(self):
-        entered, release = threading.Event(), threading.Event()
-        original = self.transport.exchange
-
-        def blocked_exchange(*args):
-            entered.set()
-            if not release.wait(2):
-                raise TimeoutError()
-            return original(*args)
-
-        self.transport.exchange = blocked_exchange
-        results = []
-        worker = threading.Thread(
-            target=lambda: results.append(self.run_fixture())
-        )
-        worker.start()
-        try:
-            self.assertTrue(entered.wait(2))
-            self.assertEqual(self.run_fixture()["status"], "NOT_RUN")
-        finally:
-            release.set()
-            worker.join(3)
-        self.assertFalse(worker.is_alive())
-        self.assertEqual(results[0]["status"], "FABRICATED_ACCEPTED")
-        self.assertEqual(len(self.transport.calls), 1)
-
-    def test_changed_records_during_exchange_are_unknown(self):
-        original = self.transport.exchange
-
-        def changed_exchange(*args):
-            self.enrollment["actor_id"] = 999
-            return original(*args)
-
-        self.transport.exchange = changed_exchange
-        self.assertEqual(self.run_fixture()["status"], "UNKNOWN")
-
-    def test_interruption_is_unknown_and_consumes_the_attempt(self):
-        for error in (
-            KeyboardInterrupt(),
-            SystemExit("PRIVATE_EXCEPTION_SENTINEL"),
-        ):
-            with self.subTest(error=type(error)):
-                self.setUp_candidate()
-                self.transport.error = error
-                self.assertEqual(self.run_fixture()["status"], "UNKNOWN")
-                self.assertEqual(self.run_fixture()["status"], "NOT_RUN")
-                self.assertEqual(len(self.transport.calls), 1)
-
-    def test_optional_response_id_is_validated_and_discarded(self):
-        self.response["responseId"] = "SYNTHETIC_RESPONSE_ID"
-        self.transport.body = json.dumps(self.response).encode()
-        result = self.run_fixture()
-        self.assertEqual(result["status"], "FABRICATED_ACCEPTED")
-        self.assertNotIn("SYNTHETIC_RESPONSE_ID", json.dumps(result))
-        self.setUp_candidate()
-        self.response["responseId"] = "invalid\nheader"
-        self.transport.body = json.dumps(self.response).encode()
-        self.assertEqual(self.run_fixture()["status"], "UNKNOWN")
-
-    def test_counter_types_and_values(self):
-        for field in ("run_number", "run_attempt"):
-            for value in (0, 2, -1, True, "1", None, 1.0):
-                with self.subTest(field=field, value=value):
-                    self.setUp_candidate()
-                    self.snapshot["current"][field] = value
-                    self.assert_blocked()
-
-    def setUp_candidate(self):
-        self.enrollment, self.snapshot, self.grant, self.response = fixtures()
-        self.transport = FakeTransport(self.response)
-        self.subject = diagnostic.OfflineDiagnostic()
-
-    def test_identity_and_revision_mismatches(self):
-        for field, value in (
-            ("repository_id", 101),
-            ("workflow_id", 201),
-            ("actor_id", 301),
-            ("repository_id", True),
-            ("workflow_id", "200"),
-            ("actor_id", 0),
-            ("path", ".github/workflows/recreated.yml"),
-            ("ref", "refs/heads/feature"),
-            ("head_sha", "b" * 40),
-            ("event", "pull_request"),
-            ("status", "queued"),
-            ("conclusion", "success"),
-            ("id", False),
-        ):
-            with self.subTest(field=field):
-                self.setUp_candidate()
-                self.snapshot["current"][field] = value
-                self.assert_blocked()
-
-    def test_any_extra_history_record_rejects_all_outcomes(self):
-        for outcome in ("failure", "cancelled", "queued", "success", None):
-            with self.subTest(outcome=outcome):
-                self.setUp_candidate()
-                prior = copy.deepcopy(self.snapshot["current"])
-                prior.update(id=399, conclusion=outcome)
-                self.snapshot["history"]["workflow_runs"].append(prior)
-                self.snapshot["history"]["total_count"] = 2
-                self.assert_blocked()
-
-    def test_absent_inconsistent_partial_history(self):
-        mutations = (
-            lambda s: s.update(current=None),
-            lambda s: s.update(history={}),
-            lambda s: s.update(next_page="page2"),
-            lambda s: s.update(truncated=True),
-            lambda s: s.update(http_status=403),
-            lambda s: s.update(evidence_kind=None),
-            lambda s: s.update(evidence_kind="github-authenticated"),
-            lambda s: s["history"].update(total_count=2),
-            lambda s: s["history"].update(total_count=True),
-            lambda s: s["history"].update(workflow_runs=[]),
-            lambda s: s["history"]["workflow_runs"][0].update(run_number=True),
-            lambda s: s["history"]["workflow_runs"][0].update(
-                head_sha="b" * 40
-            ),
-        )
-        for mutate in mutations:
-            with self.subTest(mutate=mutate):
-                self.setUp_candidate()
-                mutate(self.snapshot)
-                self.assert_blocked()
-
-    def test_invalid_enrollment_and_nonrenewable_window(self):
-        for field, value in (
-            ("valid_from", 1201),
-            ("expires_at", 1200),
-            ("expires_at", 87401),
-            ("valid_from", True),
-            ("workflow_id", 0),
-            ("head_sha", "A" * 40),
-        ):
-            with self.subTest(field=field, value=value):
-                self.setUp_candidate()
-                self.enrollment[field] = value
-                self.assert_blocked()
-        self.setUp_candidate()
-        self.snapshot["current"]["created_at"] = 999
-        self.assert_blocked()
-
-    def test_grant_never_infers_missing_authority(self):
-        for key in self.grant:
-            with self.subTest(key=key):
-                self.setUp_candidate()
-                del self.grant[key]
-                self.assert_blocked()
-        for key, value in (
-            ("request_sha256", "0" * 64),
-            ("endpoint", "https://example.org"),
-            ("model", "other"),
-            ("max_calls", True),
-            ("max_calls", 2),
-            ("max_micro_usd", 1),
-            ("max_total_input_tokens", 100),
-            ("max_total_output_tokens", 32),
-            ("expires_at", 2001),
-            ("admission_mode", "paid"),
-        ):
-            with self.subTest(key=key, value=value):
-                self.setUp_candidate()
-                self.grant[key] = value
-                self.assert_blocked()
-
-    def test_no_provider_transport_allowed(self):
-        self.transport.evidence_kind = "provider-runtime"
-        self.assert_blocked()
-
-    def test_http_errors_and_transport_failure_are_terminal_unknown(self):
-        for status in (201, 301, 400, 429, 500, True):
-            with self.subTest(status=status):
-                self.setUp_candidate()
-                self.transport.status = status
-                self.assertEqual(self.run_fixture()["status"], "UNKNOWN")
-                self.assertEqual(self.run_fixture()["status"], "NOT_RUN")
-                self.assertEqual(len(self.transport.calls), 1)
-        self.setUp_candidate()
-        self.transport.error = TimeoutError("PRIVATE_EXCEPTION_SENTINEL")
-        self.assertEqual(
-            self.run_fixture(),
-            {"status": "UNKNOWN", "evidence_kind": "fabricated-offline"},
-        )
-
-    def test_timeout_backwards_clock_and_expiry_are_unknown(self):
-        for ended in (1199, 1220, 2000, True):
-            with self.subTest(ended=ended):
-                self.setUp_candidate()
-                values = iter((1200, ended))
-                self.assertEqual(
-                    self.run_fixture(lambda: next(values))["status"], "UNKNOWN"
-                )
-
-    def test_invalid_wire_shapes_are_unknown_and_redacted(self):
-        for body in (
-            b"not-json",
-            b"\xff",
-            b"{}",
-            b"[]",
-            b"{" * 2000,
-            b'{"a":1,"a":2}',
-            b'{"a":NaN}',
-            b"x" * 16385,
-        ):
-            with self.subTest(body=body[:20]):
-                self.setUp_candidate()
-                self.transport.body = body
-                self.assertEqual(self.run_fixture()["status"], "UNKNOWN")
-
-    def test_wrong_model_and_usage_never_produce_observation(self):
-        mutations = (
-            lambda r: r.update(modelVersion="wrong"),
-            lambda r: r["usageMetadata"].update(promptTokenCount=True),
-            lambda r: r["usageMetadata"].update(promptTokenCount=0),
-            lambda r: r["usageMetadata"].update(candidatesTokenCount=-1),
-            lambda r: r["usageMetadata"].update(thoughtsTokenCount=32),
-            lambda r: r["usageMetadata"].update(totalTokenCount=14),
-            lambda r: r["usageMetadata"].update(cachedContentTokenCount=1),
-            lambda r: r["usageMetadata"].pop("thoughtsTokenCount"),
-            lambda r: r.update(candidates=[]),
-            lambda r: r["candidates"][0].update(finishReason="MAX_TOKENS"),
-            lambda r: r["candidates"][0].update(index=False),
-            lambda r: r["candidates"][0]["content"]["parts"][0].update(
-                functionCall={"name": "not-allowed"}
-            ),
-        )
-        for mutate in mutations:
-            with self.subTest(mutate=mutate):
-                self.setUp_candidate()
-                mutate(self.response)
-                self.transport.body = json.dumps(self.response).encode()
-                self.assertEqual(
-                    self.run_fixture(),
-                    {
-                        "status": "UNKNOWN",
-                        "evidence_kind": "fabricated-offline",
-                    },
-                )
 
 
 class FakeHTTPSConnection:
@@ -461,7 +81,7 @@ class FakeHTTPSConnection:
 
     def request(self, method, path, **kwargs):
         self.requests.append(
-            (method, path, kwargs["body"], dict(kwargs["headers"]))
+            (method, path, kwargs.get("body"), dict(kwargs["headers"]))
         )
 
     def getresponse(self):
@@ -498,214 +118,365 @@ class FakeHTTPSConnection:
         self.closed += 1
 
 
-class UnselectedWireTest(unittest.TestCase):
+class ProbeTest(unittest.TestCase):
     def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
         for target in (
             "socket.socket",
             "socket.create_connection",
             "http.client.HTTPSConnection",
         ):
             patch = mock.patch(
-                target, side_effect=AssertionError("real network")
+                target, side_effect=AssertionError("real network forbidden")
             )
             patch.start()
             self.addCleanup(patch.stop)
-        self.connection = FakeHTTPSConnection()
+        self.env = self.environment(self.directory.name)
+        self.connection = FakeHTTPSConnection(json.dumps(envelope()).encode())
         self.factories = []
-        self.borrows = 0
-        self.guards = 0
 
-    def make(self, failure=None):
-        def factory(host, port, *, timeout, context):
-            self.factories.append((host, port, context))
-            if failure == "factory":
-                raise SystemExit("PRIVATE_SENTINEL")
-            return self.connection
-
-        def borrow(**kwargs):
-            self.borrows += 1
-            if failure == "borrow":
-                raise SystemExit("PRIVATE_SENTINEL")
-            return "synthetic-only-key"
-
-        def guard(**kwargs):
-            self.guards += 1
-            self.assertEqual(kwargs["endpoint"], diagnostic.ENDPOINT)
-            self.assertEqual(kwargs["body"], diagnostic.REQUEST)
-            if failure == "guard":
-                raise SystemExit("PRIVATE_SENTINEL")
-
-        return diagnostic.UnselectedHTTPSWire(
-            borrow, guard, connection_factory=factory
+    def environment(self, directory):
+        return TrackedEnv(
+            {
+                **probe.EXPECTED_CONTEXT,
+                "GITHUB_SHA": "a" * 40,
+                "GITHUB_WORKFLOW_SHA": "a" * 40,
+                "PROBE_REVIEWED_SHA": "a" * 40,
+                "GITHUB_RUN_ID": "12345",
+                "PROBE_WINDOW_START": str(NOW - 100),
+                "PROBE_WINDOW_END": str(NOW + 100),
+                "PROBE_SOURCE_SHA256": hashlib.sha256(
+                    PATH.read_bytes()
+                ).hexdigest(),
+                "RUNNER_TEMP": directory,
+                "GEMINI_KEY": "synthetic-only-key",
+            }
         )
 
-    def exchange(self, wire):
-        return wire.exchange(diagnostic.ENDPOINT, diagnostic.REQUEST, 20)
+    def factory(self, host, port, **kwargs):
+        self.factories.append((host, port, kwargs))
+        return self.connection
 
-    def assert_sanitized(self, wire):
-        with self.assertRaises(ValueError) as caught:
-            self.exchange(wire)
-        self.assertNotIn("PRIVATE_SENTINEL", str(caught.exception))
-        self.assertIsNone(caught.exception.__cause__)
-        with self.assertRaises(ValueError):
-            self.exchange(wire)
+    def run_probe(self, **kwargs):
+        return probe.execute(
+            self.env,
+            connection_factory=self.factory,
+            wall=lambda: NOW,
+            monotonic=lambda: 100,
+            **kwargs,
+        )
 
-    def test_reuses_real_transport_only_with_fake_connection(self):
-        wire = self.make()
-        self.assertEqual(self.exchange(wire), (200, b"{}"))
-        host, port, context = self.factories[0]
+    def test_exact_one_post_claim_and_sanitized_receipt(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = self.run_probe()
+        self.assertEqual(
+            result,
+            {
+                "status": "RESPONSE_VALIDATED",
+                "model": probe.MODEL,
+                "input_tokens": 12,
+                "output_tokens": 3,
+                "total_tokens": 15,
+            },
+        )
+        self.assertNotIn("PRIVATE_TEXT", json.dumps(result) + output.getvalue())
+        self.assertNotIn("synthetic-only-key", json.dumps(result))
+        self.assertEqual(self.env.borrowed, 1)
+        self.assertNotIn("GEMINI_KEY", self.env)
+        self.assertEqual(
+            self.connection.requests[0][:3],
+            (
+                "POST",
+                "/v1beta/models/gemini-3.5-flash-lite:generateContent",
+                probe.REQUEST,
+            ),
+        )
+        self.assertEqual(
+            self.connection.requests[0][3]["x-goog-api-key"],
+            "synthetic-only-key",
+        )
+        self.assertNotIn("Authorization", self.connection.requests[0][3])
+        self.assertEqual(self.connection.auto_open, 0)
+        self.assertEqual(self.connection.closed, 1)
+        self.assertEqual(self.connection.response_closed, 1)
+        self.assertEqual(
+            len(list(pathlib.Path(self.directory.name).glob("*.claim"))), 1
+        )
+        self.assertEqual(self.run_probe(), {"status": "NOT_RUN"})
+        self.assertEqual(len(self.factories), 1)
+
+    def test_all_context_mismatches_block_before_key_or_factory(self):
+        mutations = [(k, "wrong") for k in probe.EXPECTED_CONTEXT]
+        mutations += [
+            ("GITHUB_SHA", "b" * 40),
+            ("GITHUB_WORKFLOW_SHA", "b" * 40),
+            ("PROBE_REVIEWED_SHA", "a;bad"),
+            ("GITHUB_RUN_ID", "../bad"),
+            ("PROBE_WINDOW_START", str(NOW + 1)),
+            ("PROBE_WINDOW_END", str(NOW)),
+            ("PROBE_WINDOW_END", str(NOW + 1000)),
+            ("PROBE_SOURCE_SHA256", "0" * 64),
+        ]
+        for key, value in mutations:
+            with self.subTest(key=key):
+                self.env = self.environment(self.directory.name)
+                self.env[key] = value
+                self.assertEqual(self.run_probe(), {"status": "NOT_RUN"})
+                self.assertEqual(self.env.borrowed, 0)
+                self.assertEqual(self.factories, [])
+
+    def test_identity_constants_and_request_digest(self):
+        self.assertEqual(
+            probe.EXPECTED_CONTEXT["GITHUB_REPOSITORY_ID"], "1443556432"
+        )
+        self.assertEqual(
+            probe.EXPECTED_CONTEXT["GITHUB_REPOSITORY_OWNER_ID"], "95135403"
+        )
+        self.assertEqual(
+            probe.REQUEST_SHA256,
+            "1d5aeeb73cc4fa2225e99bd1bdccd5a963251e00e1f7cd9f6561489b980f95f8",
+        )
+        self.assertEqual(probe.MAX_INPUT_RESERVATION, 1048576)
+        self.assertEqual(probe.MAX_OUTPUT_RESERVATION, 2048)
+
+    def test_fixed_tls_and_no_ambient_proxy_key_or_keylog(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "HTTPS_PROXY": "http://invalid",
+                "SSLKEYLOGFILE": self.directory.name + "/no-keylog",
+                "GEMINI_API_KEY": "alternate-not-used",
+            },
+        ):
+            self.assertEqual(self.run_probe()["status"], "RESPONSE_VALIDATED")
+        host, port, args = self.factories[0]
         self.assertEqual(
             (host, port), ("generativelanguage.googleapis.com", 443)
         )
+        context = args["context"]
         self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
         self.assertTrue(context.check_hostname)
         self.assertEqual(context.minimum_version, ssl.TLSVersion.TLSv1_2)
         self.assertIsNone(context.keylog_filename)
-        self.assertEqual(self.borrows, 1)
-        self.assertGreaterEqual(self.guards, 6)
-        method, path, body, headers = self.connection.requests[0]
-        self.assertEqual(method, "POST")
-        self.assertEqual(
-            path, "/v1beta/models/gemini-3.5-flash-lite:generateContent"
+        self.assertFalse(
+            pathlib.Path(self.directory.name, "no-keylog").exists()
         )
-        self.assertEqual(body, diagnostic.REQUEST)
-        self.assertEqual(headers["x-goog-api-key"], "synthetic-only-key")
-        self.assertNotIn("Authorization", headers)
-        self.assertNotIn("?", path)
-        self.assertEqual(self.connection.auto_open, 0)
-        self.assertEqual(self.connection.closed, 1)
-        self.assertEqual(self.connection.response_closed, 1)
-        self.assert_sanitized(wire)
-        self.assertEqual(len(self.factories), 1)
 
-    def test_denied_guard_has_no_connection_or_borrow(self):
-        self.assert_sanitized(self.make("guard"))
-        self.assertEqual(self.factories, [])
-        self.assertEqual(self.borrows, 0)
+    def test_falsey_explicit_factory_is_used_without_truthiness(self):
+        subject = self
+
+        class Factory:
+            def __bool__(self):
+                raise SystemExit("PRIVATE_ERROR")
+
+            def __call__(self, *args, **kwargs):
+                return subject.factory(*args, **kwargs)
+
+        result = probe.execute(
+            self.env,
+            connection_factory=Factory(),
+            wall=lambda: NOW,
+            monotonic=lambda: 100,
+        )
+        self.assertEqual(result["status"], "RESPONSE_VALIDATED")
+
+    def test_missing_or_malformed_key_burns_without_post(self):
+        self.env["GEMINI_KEY"] = "invalid\nkey"
+        self.assertEqual(self.run_probe(), {"status": "UNKNOWN"})
+        self.assertEqual(self.connection.requests, [])
+        self.assertEqual(self.env.borrowed, 1)
+        self.assertEqual(self.run_probe(), {"status": "NOT_RUN"})
+
+    def test_expiry_after_connect_prevents_borrow_and_post(self):
+        now = [NOW]
+        self.connection.connect = lambda: now.__setitem__(0, NOW + 101)
+        result = probe.execute(
+            self.env,
+            connection_factory=self.factory,
+            wall=lambda: now[0],
+            monotonic=lambda: 100,
+        )
+        self.assertEqual(result, {"status": "UNKNOWN"})
+        self.assertEqual(self.env.borrowed, 0)
         self.assertEqual(self.connection.requests, [])
 
-    def test_explicit_factory_never_evaluates_truthiness_or_uses_default(self):
-        for raises in (False, True):
-            with self.subTest(raises=raises):
-                self.connection = FakeHTTPSConnection()
-                wire = self.make()
-                original = wire._factory
-
-                class ExplicitFactory:
-                    def __bool__(self):
-                        if raises:
-                            raise SystemExit("PRIVATE_SENTINEL")
-                        return False
-
-                    def __call__(self, *args, **kwargs):
-                        return original(*args, **kwargs)
-
-                wire._factory = ExplicitFactory()
-                with mock.patch(
-                    "cartreadback_app.gemini_http.unselected_gemini_connection",
-                    side_effect=AssertionError(
-                        "default must remain unselected"
-                    ),
-                ) as default:
-                    self.assertEqual(self.exchange(wire), (200, b"{}"))
-                    default.assert_not_called()
-
-    def test_factory_borrow_read_and_close_failures_are_sanitized(self):
-        for failure in ("factory", "borrow", "read", "close"):
-            with self.subTest(failure=failure):
-                self.connection = FakeHTTPSConnection()
-                self.connection.failure = failure
-                self.assert_sanitized(self.make(failure))
-                if failure != "factory":
-                    self.assertEqual(self.connection.closed, 1)
-
-    def test_redirect_and_oversized_response_do_not_retry(self):
-        for status, size in ((302, 2), (200, 16385), (200, 131073)):
-            with self.subTest(status=status, size=size):
-                self.connection = FakeHTTPSConnection(b"x" * size, status)
-                before = len(self.factories)
-                self.assert_sanitized(self.make())
-                self.assertEqual(len(self.factories), before + 1)
+    def test_http_redirect_errors_fail_without_retry(self):
+        for status in (201, 301, 302, 307, 308, 400, 429, 500):
+            with (
+                self.subTest(status=status),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                self.env = self.environment(directory)
+                self.connection = FakeHTTPSConnection(b"PRIVATE_ERROR", status)
+                self.assertEqual(self.run_probe(), {"status": "UNKNOWN"})
                 self.assertEqual(len(self.connection.requests), 1)
                 self.assertEqual(self.connection.closed, 1)
 
-    def test_wrong_request_burns_before_import_or_effect(self):
-        wire = self.make()
-        with self.assertRaises(ValueError):
-            wire.exchange(
-                diagnostic.ENDPOINT + "?x=invalid", diagnostic.REQUEST, 20
-            )
-        self.assert_sanitized(wire)
-        self.assertEqual(self.factories, [])
-
-    def test_no_semantic_asset_reads_on_lazy_import_or_send(self):
-        validation = importlib.import_module("cartreadback_app.validation")
-        adapter = importlib.import_module("cartreadback_app.responses_adapter")
-        original_error, original_deadline = (
-            validation.AppError,
-            adapter.Deadline,
-        )
-        original_modules = {
-            name: module
-            for name, module in sys.modules.items()
-            if name == "cartreadback_app"
-            or name.startswith("cartreadback_app.")
-        }
-        for fail in (False, True):
-            with self.subTest(fail=fail):
-                self.connection = FakeHTTPSConnection()
-                expected = (
-                    self.assertRaises(RuntimeError)
-                    if fail
-                    else contextlib.nullcontext()
-                )
-                with expected:
-                    with mock.patch.dict(sys.modules):
-                        for name in original_modules:
-                            del sys.modules[name]
-                        with (
-                            mock.patch(
-                                "builtins.open",
-                                side_effect=AssertionError("asset read"),
-                            ),
-                            mock.patch(
-                                "io.open",
-                                side_effect=AssertionError("asset read"),
-                            ),
-                        ):
-                            self.assertEqual(
-                                self.exchange(self.make()), (200, b"{}")
-                            )
-                        if fail:
-                            raise RuntimeError("synthetic probe failure")
-                restored = {
-                    name: module
-                    for name, module in sys.modules.items()
-                    if name == "cartreadback_app"
-                    or name.startswith("cartreadback_app.")
-                }
-                self.assertEqual(restored.keys(), original_modules.keys())
-                for name, module in original_modules.items():
-                    self.assertIs(restored[name], module)
-                self.assertIs(
-                    importlib.import_module(
-                        "cartreadback_app.validation"
-                    ).AppError,
-                    original_error,
-                )
-                self.assertIs(
-                    importlib.import_module(
-                        "cartreadback_app.responses_adapter"
-                    ).Deadline,
-                    original_deadline,
-                )
-
-    def test_missing_runtime_module_is_sanitized_without_effect(self):
-        with mock.patch.dict(
-            sys.modules, {"cartreadback_app.gemini_http": None}
+    def test_malformed_model_usage_and_response_bounds_fail(self):
+        bodies = [
+            b"PRIVATE_ERROR",
+            b"x" * 16385,
+            b'{"a":1,"a":2}',
+            b'{"a":NaN}',
+        ]
+        for mutate in (
+            lambda x: x.update(modelVersion="wrong"),
+            lambda x: x["usageMetadata"].update(totalTokenCount=1),
+            lambda x: x["usageMetadata"].update(promptTokenCount=True),
+            lambda x: x["usageMetadata"].update(thoughtsTokenCount=40),
         ):
-            self.assert_sanitized(self.make())
-        self.assertEqual(self.factories, [])
+            value = envelope()
+            mutate(value)
+            bodies.append(json.dumps(value).encode())
+        for body in bodies:
+            with (
+                self.subTest(size=len(body)),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                self.env = self.environment(directory)
+                self.connection = FakeHTTPSConnection(body)
+                self.assertEqual(self.run_probe(), {"status": "UNKNOWN"})
+
+    def test_cancel_read_cleanup_and_factory_failures_are_sanitized(self):
+        for failure in ("read", "close", "factory"):
+            with (
+                self.subTest(failure=failure),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                self.env = self.environment(directory)
+                self.connection = FakeHTTPSConnection(b"{}")
+                self.connection.failure = failure
+
+                def factory(*args, **kwargs):
+                    if failure == "factory":
+                        raise SystemExit("PRIVATE_ERROR")
+                    return self.connection
+
+                self.assertEqual(
+                    probe.execute(
+                        self.env,
+                        connection_factory=factory,
+                        wall=lambda: NOW,
+                        monotonic=lambda: 100,
+                    ),
+                    {"status": "UNKNOWN"},
+                )
+
+    def test_late_read_never_becomes_success(self):
+        ticks = iter((100, 100, 100, 100, 100, 100, 100, 100, 121, 121, 121))
+        result = probe.execute(
+            self.env,
+            connection_factory=self.factory,
+            wall=lambda: NOW,
+            monotonic=lambda: next(ticks),
+        )
+        self.assertEqual(result, {"status": "UNKNOWN"})
+
+    def test_main_sanitizes_signal_and_restores_handler(self):
+        before = signal.getsignal(signal.SIGTERM)
+        self.connection.getresponse = lambda: os.kill(
+            os.getpid(), signal.SIGTERM
+        )
+        output = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, self.env, clear=True),
+            mock.patch.object(
+                probe.http.client, "HTTPSConnection", self.factory
+            ),
+            mock.patch.object(probe.time, "time", lambda: NOW),
+            contextlib.redirect_stdout(output),
+        ):
+            # execute's default wall is bound at definition; inject the test clock.
+            original = probe.execute
+            with mock.patch.object(
+                probe,
+                "execute",
+                lambda env: original(
+                    env,
+                    connection_factory=self.factory,
+                    wall=lambda: NOW,
+                    monotonic=lambda: 100,
+                ),
+            ):
+                self.assertEqual(probe.main(), 2)
+        self.assertEqual(json.loads(output.getvalue()), {"status": "UNKNOWN"})
+        self.assertIs(signal.getsignal(signal.SIGTERM), before)
+
+    def test_workflow_only_final_step_has_google_key(self):
+        workflow = yaml.load(
+            (ROOT / probe.WORKFLOW_PATH).read_text(), Loader=yaml.BaseLoader
+        )
+        self.assertEqual(set(workflow["on"]), {"workflow_dispatch"})
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
+        job = workflow["jobs"]["gemini-connectivity"]
+        self.assertEqual(job["timeout-minutes"], "2")
+        self.assertEqual(
+            job["concurrency"],
+            {
+                "group": "cartreadback-gemini-connectivity-one-shot",
+                "cancel-in-progress": "false",
+            },
+        )
+        self.assertEqual(len(job["steps"]), 2)
+        fetch, final = job["steps"]
+        self.assertNotIn("GEMINI_KEY", fetch["env"])
+        self.assertNotIn("GITHUB_TOKEN", final["env"])
+        self.assertEqual(
+            final["env"]["GEMINI_KEY"], "${{ secrets.GEMINI_KEY }}"
+        )
+        self.assertEqual(
+            final["env"]["PROBE_SOURCE_SHA256"],
+            hashlib.sha256(PATH.read_bytes()).hexdigest(),
+        )
+        self.assertNotIn("uses:", yaml.safe_dump(job))
+        self.assertIn(
+            hashlib.sha256(PATH.read_bytes()).hexdigest(), fetch["run"]
+        )
+
+    def test_pinned_fetch_good_and_fail_closed(self):
+        workflow = yaml.load(
+            (ROOT / probe.WORKFLOW_PATH).read_text(), Loader=yaml.BaseLoader
+        )
+        script = workflow["jobs"]["gemini-connectivity"]["steps"][0]["run"]
+        code = "\n".join(script.splitlines()[1:-1])
+        cases = [
+            (200, PATH.read_bytes(), True),
+            (302, b"redirect", False),
+            (200, b"wronghash", False),
+            (200, b"x" * 65537, False),
+        ]
+        for status, body, success in cases:
+            with (
+                self.subTest(status=status, size=len(body)),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                env = self.environment(directory)
+                env.pop("GEMINI_KEY")
+                env["GITHUB_TOKEN"] = "synthetic-github-token"
+                conn = FakeHTTPSConnection(body, status)
+                with (
+                    mock.patch.dict(os.environ, env, clear=True),
+                    mock.patch.object(
+                        http.client, "HTTPSConnection", return_value=conn
+                    ),
+                    mock.patch("time.time", return_value=NOW),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    if success:
+                        exec(compile(code, "workflow-fetch", "exec"), {})
+                    else:
+                        with self.assertRaises(SystemExit):
+                            exec(compile(code, "workflow-fetch", "exec"), {})
+                target = pathlib.Path(directory, "cartreadback-gemini-probe.py")
+                self.assertEqual(target.exists(), success)
+                self.assertEqual(len(conn.requests), 1)
+                self.assertEqual(conn.requests[0][0], "GET")
+                self.assertNotIn("key", conn.requests[0][1])
+                self.assertEqual(conn.closed, 1)
+                if success:
+                    self.assertEqual(target.read_bytes(), PATH.read_bytes())
 
 
 if __name__ == "__main__":

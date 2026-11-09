@@ -1,179 +1,109 @@
-# Disabled hosted Gemini connectivity diagnostic
+# One-call branch diagnostic, not application integration
 
-Issue #64 adds a functional **fabricated-offline diagnostic core**, not a live
-connection or application integration. The workflow is physically disabled with
-one constant-false job. It has no input, Secret binding, checkout, installation,
-upload, provider command or activation flag. Do not dispatch it: even a skipped
-scaffold run could consume the first-run counter of a later enrollment.
+Issue #64 / draft PR #65 now prepares the shortest actual hosted connectivity
+path. Earlier fake-only APIs (`OfflineDiagnostic`, fabricated grants/enrollment
+and the separate disabled workflow) are retired from the current branch. Their
+commits, reproduced failures and reviews remain preserved history, not evidence
+that a provider connection occurred. Application Service, DB, prepared approvals,
+semantic assets and PayPal are unchanged.
 
-The production script always prints `NOT_RUN` with
-`PRODUCTION_ACTIVATION_UNSUPPORTED`, exits 2, and does not read arguments,
-environment values, metadata, credentials, files or application assets.
-The default path imports no application code. A separate unselected wire lazily
-imports the reviewed HTTPS transport and deadline primitive, never an application
-Service, runner, database, client constructor or protected semantic assets.
-Existing fixture/server/payment behavior and PR #63 are unchanged.
+**No workflow was dispatched or credential read during implementation.** Do not
+run this until the operator has verified the exact request/recipient approval,
+required action-time credential-transmission approval, key-to-Free-project
+binding, current model/account eligibility, no paid fallback and zero-cost
+compute. Workflow inputs and public pricing do not establish those facts.
+Unknown means no agent dispatch.
 
-## Fixed public synthetic request
+## Minimal operator path
 
-The canonical ASCII JSON bytes are produced only by this module's fixed literal,
-with sorted keys and compact separators. The prompt is:
+1. Review the exact final draft commit and source hashes. In the existing
+   registered **Offline application checks** manual workflow, select branch
+   `feat/64-disabled-connectivity-diagnostic` and mode `gemini-connectivity`.
+   Supply that exact 40-hex reviewed commit and absolute UTC epoch start/expiry,
+   with a positive window of at most 600 seconds. This is a future separately
+   approved operation, not a dispatch performed or authorized by these docs.
+2. One Ubuntu 24.04 job, at most two minutes, checks trusted GitHub context and
+   fetches only the standalone probe from the fixed GitHub Contents endpoint at
+   that revision. A literal SHA-256 pin is checked before any execution. Only
+   this GET step receives the builtin token, with contents:read; no checkout,
+   setup/install, cache, upload or semantic-asset materialization.
+3. Only the final guarded step receives `GEMINI_KEY` through step environment.
+   The probe rechecks context, source hash and window; creates an exclusive local
+   claim; then borrows the sole key and performs one fixed Google POST. No key is
+   placed in arguments, shell interpolation, source, files, logs or result text.
 
-`Synthetic connectivity diagnostic. Reply READY.`
+The existing fixture job/default remains offline and unchanged apart from the
+mode selector and moving its existing cancellation group to job scope. It is not
+run as part of diagnostic mode. The workflow remains manual-only. Testing the
+reviewed draft branch does not require merging or changing another draft PR.
 
-- Fixed endpoint: `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent`.
-- Fixed requested and expected observed model: `gemini-3.5-flash-lite`.
-- SHA-256: `1d5aeeb73cc4fa2225e99bd1bdccd5a963251e00e1f7cd9f6561489b980f95f8`.
-- One candidate, temperature 0, MINIMAL thinking and a requested maxOutputTokens
-  cap of 32. Accepted local observations require answer plus thoughts at most 32.
-  This does not prove a real model's externally enforced billing cap. No tools,
-  streaming, count request, caching, files, SDK or fallback.
-- The synthetic grant still requires the conservative one-call allowance of
-  1,048,576 input and 2,048 output tokens, zero micro-USD and explicit
-  `externally-verified-free-tier` mode. These are local limits, not account facts,
-  a quota guarantee, actual usage or an invoice.
+## Exact bounded trust and first-attempt fence
 
-The fixture transport receives only this endpoint, these bytes and a 20-second
-timeout parameter. No key is accepted by this core. The fixture must perform no
-network I/O. Returning late is UNKNOWN; this core cannot forcibly cancel a
-blocking injected function or prove a remote request was cancelled.
+The trusted context binds repository `thzthix/cart-readback`, numeric repository
+1443556432 and owner/actor 95135403, triggering actor thzthix, workflow_dispatch,
+the one draft ref and exact application-checks workflow_ref. Both github SHA and
+workflow SHA must equal the separately reviewed 40-hex input. Run number and
+attempt must both be exactly one. The diagnostic uses one fixed repository-wide
+concurrency group without cancellation, no matrix or alternative activation path.
 
-## Unselected reusable HTTPS wire
+This relies on the reviewed GitHub-hosted workflow/runner and trusted control
+plane with no deletion, recreation, rename, rollback or counter reset. Under
+that explicitly limited assumption, the existing workflow's first-run counter is
+the cross-run burn. It is not universal attestation, a general persistent ledger
+or proof of externally verified approval/account facts. Numeric workflow ID is
+not an additional enrollment service here.
 
-`UnselectedHTTPSWire` reuses the existing `GeminiHTTPTransport`; it does not
-implement another TLS stack. Construction retains explicit host claim-guard and
-credential-borrow callbacks without imports or I/O. A one-shot lock burns before
-lazy imports. Exchange accepts only the exact fixed endpoint, bytes and timeout.
-The reused transport rechecks the guard before each I/O stage, borrows once,
-uses verified TLS with minimum TLS 1.2 and no key logging, disables automatic
-reconnect, and follows no redirect or ambient proxy. Private response bytes feed
-the validator, never user-facing output. All failures, including BaseException
-subclasses, are sanitized after synchronous transport cleanup, without retry.
+**Any first workflow run consumes this path**, including offline mode, failure,
+cancellation, timeout, skipped diagnostic or unknown result. Never trial-dispatch,
+rerun, change key/model/branch, renew the window, replace the workflow or reset
+history to obtain another attempt. The local mode-0600 exclusive claim remains
+in the same runner temporary directory and is never deleted for retry. It is not
+exported/restored and does not make ephemeral hosted storage durable.
 
-The existing wire's response hard limit is 131,072 bytes. The wrapper rejects
-returned bodies over 16,384 bytes, which is also the parser limit; it does not
-claim the network stops reading at 16 KiB. Guard/borrow callbacks are trusted
-host plumbing, not verified authority. No permanent diagnostic claim or secure
-credential resolver is supplied. New wire objects cannot renew actual authority.
-The class labels itself `unselected-provider-runtime`, never provider evidence.
-The fabricated executor rejects this class. Neither CLI nor workflow constructs
-it, even if metadata or environment values are supplied.
+## Fixed public request and response
 
-Tests exercise real reviewed HTTPS logic with fake connections and synthetic
-keys only, while banning actual sockets/default HTTPS construction. They cover
-guard denial before effects, TLS/framing, redirects, bounded bodies, single
-borrow, cleanup, sanitized factory/borrow/read/close and missing-module failures.
-Fresh lazy import/send is checked with `builtins.open` and `io.open` patched to
-fail. This does not guard importlib/source-loader, OS or OpenSSL certificate-store
-reads. The exact ten-module import closure was separately inspected for top-level
-semantic-asset reads. Only those reviewed runtime Python dependencies were
-materialized for the focused checks; no protected semantic assets were read or
-copied. This observation is not an OS-wide file-read prohibition.
+- Endpoint: `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent`.
+- Public prompt: `Synthetic connectivity diagnostic. Reply READY.`
+- Canonical request SHA-256: `1d5aeeb73cc4fa2225e99bd1bdccd5a963251e00e1f7cd9f6561489b980f95f8`.
+- One candidate, temperature 0, MINIMAL thinking, requested maxOutputTokens 32.
+  Accepted local observations require answer plus thoughts at most 32. This is
+  not proof of an externally enforced billing cap. Conservative reference bounds
+  remain 1048576 input / 2048 output; they are not an invoice or account allowance.
 
-## Offline consistency contract
+The standalone standard-library client uses direct fixed-host verified TLS
+(minimum TLS 1.2, key logging disabled), no proxy discovery, redirects, automatic
+reconnect, retries, tools, streaming, count/cache/file calls or model fallback.
+It checks the remaining absolute/monotonic deadline before and after I/O. Accepted
+headers are bounded and strictly framed; response body is at most 16 KiB.
 
-`OfflineDiagnostic.run` accepts minimized synthetic projections and a fabricated
-transport. Fixtures deliberately invent all IDs, grant references and timestamps.
-`fabricated-offline` is an evidence label, not an authenticated capability. Python
-objects can be forged. This code does not authenticate metadata, establish owner
-consent or verify hashes against an external authority.
+Only enum status, exact validated model and bounded integer usage are emitted,
+after synchronous cleanup. Text, responseId, headers, raw errors, project data
+and key are never printed. RESPONSE_VALIDATED means this response satisfied the
+local wire schema, not semantic quality, application integration, verified Free
+eligibility or actual zero charge. Non-200, malformed/wrong-model/late/ambiguous
+responses and interrupted or failed cleanup are UNKNOWN; no automatic retry.
+A missing final receipt is never success and must be treated as UNKNOWN.
 
-The enrollment projection has exactly numeric `repository_id`, `workflow_id` and
-`actor_id`; fixed workflow `path`; `refs/heads/main`; reviewed 40-hex `head_sha`;
-and integer `valid_from` / `expires_at`. Its absolute window must be positive,
-at most 86,400 seconds, and current. No actual enrollment is committed or minted
-from newly discovered metadata.
+The 20-second monotonic admission deadline cannot prove hard OS/DNS/socket or
+remote cancellation. The hosted two-minute job timeout is the outer attempt
+bound; stopping it cannot undo provider work. Python cannot erase every immutable
+string or inherited environment copy. The trusted runner may retain memory,
+logs or a killed process outside this best-effort redaction/cleanup guarantee.
 
-The snapshot projection has exactly `evidence_kind`, `http_status`, `next_page`,
-`truncated`, `current` and `history`. Only fabricated-offline, integer 200, no next
-page and exact false truncation are accepted. The current normalized run binds
-the exact enrollment identity plus positive `id`, integer `run_number == 1`,
-integer `run_attempt == 1`, `workflow_dispatch`, `in_progress`, null conclusion
-and in-window integer `created_at`. History must contain exactly that same typed
-current record with integer `total_count == 1`. Missing, partial, inconsistent,
-paginated, unexpected or malformed evidence fails closed. Any extra run fails,
-including failed, cancelled, queued, successful and unknown outcomes.
+## Verification and remaining gates
 
-The fabricated grant requires the exact request digest, endpoint/model/version,
-finite window inside enrollment, exact limits/mode, and nonsecret 64-hex reference
-fields for exact-request owner approval, credential-transmission approval,
-Free-project facts and zero-cost compute facts. It is explicitly a
-`fabricated-connectivity-grant-v1` test object, never an application
-`gemini-approved-host-record-v2`. No command generates either real approval.
+From repository root, using already available reviewed development tools:
 
-Each diagnostic object consumes its sole in-memory attempt before validation.
-Concurrent/repeated use cannot call its transport again. This memory guard is
-**not** a cross-process permanent ledger: new objects are allowed only as new
-synthetic test cases, never as live retries. HTTP errors, exceptions, cancellation,
-timeout/late response, clock regression, expiry, wrong model, malformed or
-contradictory/missing usage, unsupported fields and incomplete candidates produce
-terminal UNKNOWN. No retry, fallback, renewal or credit is implemented.
-
-Safe fabricated results contain only status/evidence enums and, when accepted,
-the exact validated model plus bounded integer input/output/total usage. Output
-tokens include thoughts. Response text, headers, raw bodies, exception text,
-project data and grant references are never returned or logged. Text shape is
-checked but its meaning is not evaluated. `FABRICATED_ACCEPTED` is not provider
-acceptance, semantic quality, actual zero charge or a successful application run.
-The ordinary optional responseId is bounded, validated and discarded. Additional
-usage detail fields or thought signatures remain explicit schema blockers, not
-silently ignored or evidence of a usable production integration.
-
-## Unsupported production gates
-
-Activation is a separate reviewed implementation and permission decision, not
-an edit to a workflow input or a copied example grant. All the following remain
-unsupported or UNKNOWN:
-
-1. A fixed verified GitHub HTTPS metadata adapter with ephemeral builtin token
-   and only `actions:read`, exact current-run and complete history reads, strict
-   API/authentication/error handling, and no tokens in URLs/logs. The present
-   parser cannot turn injected JSON into authenticated evidence.
-2. A pre-enrolled immutable numeric repository/workflow/actor identity, fixed
-   path/ref/reviewed revision and one absolute nonrenewable window at most one
-   day. Authenticated run number one **and** attempt one are mandatory. Fixed
-   global concurrency with no cancellation only supplements this fence.
-3. Permanent retirement after any first run, expiry, uncertainty or workflow
-   deletion/recreation/rename. Run-history retention/deletion makes history alone
-   insufficient. Never enroll a newly discovered replacement ID or reset/rotate
-   the window to recover another attempt. This is a bounded one-time enrollment,
-   not a general persistent accounting service.
-4. Real owner approval of these exact diagnostic bytes and recipient, plus the
-   required action-time approval for Secret-to-Google transmission. A dispatch
-   click, generic preapproval, workflow input or fabricated hash supplies neither.
-5. Actual project/model Free eligibility, no paid fallback and current zero-cost
-   GitHub compute conditions. Public price pages do not verify either account.
-   Unknown means blocked; hosted private-repository compute is not assumed free.
-6. A production activation adapter joining the unselected HTTPS primitive to
-   externally preserved permanent burn evidence, current verified account facts,
-   approved credential transmission and secure one-shot borrowing. The existing
-   wire alone does not establish these facts. No activation adapter or Secret
-   binding exists in this change.
-
-This separate connectivity diagnostic never prepares, restores, approves or runs
-an application analysis. Application execution still requires its original
-same-host DB path/device/inode/owner/runtime binding, exact prepared-request
-external review and permanent capacity/UNKNOWN history. It cannot export a DB
-artifact, restore a cache, manufacture an approved record or renew app authority.
-
-## Verification and remaining evidence
-
-From repository root, the isolated checks need Python standard library only:
-
-```sh
+```
 python -m unittest discover -s cart_readback/tests -p test_gemini_connectivity_diagnostic.py -v
 python -m compileall -q cart_readback/scripts/gemini_connectivity_diagnostic.py cart_readback/tests/test_gemini_connectivity_diagnostic.py
-python cart_readback/scripts/gemini_connectivity_diagnostic.py
-# Last command must print NOT_RUN and exit 2, never imply a successful call.
 ```
 
-Tests forbid real socket creation and use invented metadata and response bytes.
-Workflow YAML/static guards are separate checks. Full repository fixture
-integration remains required by CONTRIBUTING.md; these focused tests do not
-replace it. Full semantic assets were not materialized for this change.
-Hosted workflow, real metadata authentication/enrollment, key validity, account
-eligibility, costs, Gemini call, application integration, semantic evaluation,
-PayPal, browser, deployment and submission all remain NOT_RUN or UNKNOWN.
-
-Rollback removes these four additions only. Never erase an actual workflow run,
-database, approval or burn history as rollback/retry preparation.
+Tests use invented hosted context, synthetic keys and fake sockets only. They
+ban real socket/default HTTPS construction, exercise real client code and the
+actual inline fetch step, and check the source pin and final-step-only key binding.
+Earlier fake-framework test counts are historical, not counts for this rewrite.
+No provider/account/billing/hosted execution pass is claimed. Full integrated
+application aggregate remains NOT_RUN because protected semantic assets were not
+materialized. Actual dispatch requires the operator's final external facts and
+approval; app integration, semantic evaluation, PayPal and deployment are separate.

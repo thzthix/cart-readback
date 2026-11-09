@@ -1,19 +1,20 @@
-"""Exercise one fixed synthetic diagnostic with fabricated transport only.
+"""One fixed Google connectivity POST, only in the reviewed hosted branch job.
 
-The default entry point has no network, credential, database or asset activity.
-An unselected wire reuses reviewed HTTPS code via lazy imports only. Injected
-metadata and grants are test data, not authenticated evidence or approval. The
-production entry point is unconditionally NOT_RUN, never a live launcher or an
-alternative application-analysis approval path.
+This script does not verify Free eligibility, billing or user consent. The trusted
+operator must establish those facts before the sole manual workflow dispatch.
+Tests use invented context, synthetic keys and fake HTTPS connections only.
 """
 
 import hashlib
+import http.client
 import json
+import math
+import os
+import pathlib
 import re
-import threading
+import signal
+import ssl
 import time
-from collections.abc import Callable
-from typing import Protocol
 
 MODEL = "gemini-3.5-flash-lite"
 ENDPOINT = (
@@ -21,7 +22,7 @@ ENDPOINT = (
     + MODEL
     + ":generateContent"
 )
-WORKFLOW_PATH = ".github/workflows/gemini-connectivity-diagnostic.yml"
+WORKFLOW_PATH = ".github/workflows/application-checks.yml"
 MAX_INPUT_RESERVATION = 1048576
 MAX_OUTPUT_RESERVATION = 2048
 MAX_OUTPUT_TOKENS = 32
@@ -49,132 +50,6 @@ REQUEST = json.dumps(
 ).encode("ascii")
 REQUEST_SHA256 = hashlib.sha256(REQUEST).hexdigest()
 
-_IDENTITY_KEYS = {
-    "repository_id",
-    "workflow_id",
-    "actor_id",
-    "path",
-    "ref",
-    "head_sha",
-}
-_WINDOW_KEYS = {"valid_from", "expires_at"}
-_RUN_KEYS = _IDENTITY_KEYS | {
-    "id",
-    "run_number",
-    "run_attempt",
-    "event",
-    "created_at",
-    "status",
-    "conclusion",
-}
-_GRANT_KEYS = _WINDOW_KEYS | {
-    "schema",
-    "request_sha256",
-    "endpoint",
-    "model",
-    "expected_model_version",
-    "max_calls",
-    "max_total_input_tokens",
-    "max_total_output_tokens",
-    "max_micro_usd",
-    "admission_mode",
-    "exact_request_owner_grant_sha256",
-    "credential_transmission_grant_sha256",
-    "free_project_facts_sha256",
-    "zero_cost_compute_facts_sha256",
-}
-
-
-class FabricatedTransport(Protocol):
-    """An injected offline fixture, never a production adapter."""
-
-    evidence_kind: str
-
-    def exchange(
-        self, endpoint: str, payload: bytes, timeout_seconds: int
-    ) -> tuple[int, bytes]:
-        """Return fabricated HTTP status and bytes without network access."""
-
-
-class UnselectedHTTPSWire:
-    """Reuse reviewed HTTPS mechanics, never selected by this CLI or workflow.
-
-    Explicit trusted host callbacks must enforce a permanent diagnostic claim,
-    exact request grant, credential binding and expiry at every I/O step. Their
-    presence is not evidence those external facts exist. OfflineDiagnostic rejects
-    this provider-capable object. No new approval or credential resolver exists.
-    """
-
-    evidence_kind = "unselected-provider-runtime"
-
-    def __init__(
-        self,
-        borrow_credential: Callable,
-        claim_guard: Callable,
-        *,
-        connection_factory: Callable | None = None,
-    ) -> None:
-        """Retain explicit seams without importing app code or doing I/O."""
-        if not callable(borrow_credential) or not callable(claim_guard):
-            raise ValueError("unsupported diagnostic wire")
-        if connection_factory is not None and not callable(connection_factory):
-            raise ValueError("unsupported diagnostic wire")
-        self._borrow = borrow_credential
-        self._guard = claim_guard
-        self._factory = connection_factory
-        self._lock = threading.Lock()
-        self._used = False
-
-    def exchange(
-        self, endpoint: str, payload: bytes, timeout_seconds: int
-    ) -> tuple[int, bytes]:
-        """Consume one fixed request; return bytes only to the private validator.
-
-        Failure is sanitized and permanently consumes this object. A real host
-        must persist its burn independently before constructing or using it.
-        """
-        with self._lock:
-            if self._used:
-                raise ValueError("diagnostic wire unavailable")
-            self._used = True
-        try:
-            if (
-                type(endpoint) is not str
-                or endpoint != ENDPOINT
-                or type(payload) is not bytes
-                or payload != REQUEST
-                or type(timeout_seconds) is not int
-                or timeout_seconds != TIMEOUT_SECONDS
-            ):
-                raise ValueError()
-            # Exact-main import closure has no top-level semantic-asset reads.
-            # Never construct GeminiClient or OfflineResponsesAdapter here.
-            from cartreadback_app.gemini_http import (
-                GeminiHTTPTransport,
-                unselected_gemini_connection,
-            )
-            from cartreadback_app.responses_adapter import Deadline
-
-            def guard(**kwargs):
-                if kwargs["endpoint"] != ENDPOINT or kwargs["body"] != REQUEST:
-                    raise ValueError()
-                return self._guard(**kwargs)
-
-            transport = GeminiHTTPTransport(
-                self._factory
-                if self._factory is not None
-                else unselected_gemini_connection,
-                self._borrow,
-                guard,
-            )
-            deadline = Deadline(time.monotonic() + TIMEOUT_SECONDS, 3.0, 12.0)
-            raw = transport.send(ENDPOINT, REQUEST, deadline=deadline)
-            if type(raw) is not bytes or not 0 < len(raw) <= 16384:
-                raise ValueError()
-            return 200, raw
-        except BaseException:
-            raise ValueError("diagnostic wire outcome unknown") from None
-
 
 def _shape(value: object, keys: set[str]) -> bool:
     return type(value) is dict and value.keys() == keys
@@ -189,123 +64,6 @@ def _digest(value: object, length: int = 64) -> bool:
         type(value) is str
         and re.fullmatch("[0-9a-f]{" + str(length) + "}", value) is not None
     )
-
-
-def _window(value: dict, now: int) -> bool:
-    return (
-        _integer(now)
-        and _integer(value["valid_from"])
-        and _integer(value["expires_at"])
-        and 0 < value["expires_at"] - value["valid_from"] <= 86400
-        and value["valid_from"] <= now < value["expires_at"]
-    )
-
-
-def _identity(value: dict) -> bool:
-    return (
-        all(
-            _integer(value[k], 1)
-            for k in ("repository_id", "workflow_id", "actor_id")
-        )
-        and value["path"] == WORKFLOW_PATH
-        and value["ref"] == "refs/heads/main"
-        and _digest(value["head_sha"], 40)
-    )
-
-
-def fabricated_fence_consistent(
-    enrollment: object, snapshot: object, now: int
-) -> bool:
-    """Check synthetic projections, without authenticating or enrolling them.
-
-    The future authenticated transport, immutable enrollment and permanent
-    retirement policy are unsupported. A True result is never an execution grant.
-    """
-    if not _shape(enrollment, _IDENTITY_KEYS | _WINDOW_KEYS):
-        return False
-    if not _identity(enrollment) or not _window(enrollment, now):
-        return False
-    if not _shape(
-        snapshot,
-        {
-            "evidence_kind",
-            "http_status",
-            "next_page",
-            "truncated",
-            "current",
-            "history",
-        },
-    ):
-        return False
-    if (
-        snapshot["evidence_kind"] != "fabricated-offline"
-        or type(snapshot["http_status"]) is not int
-        or snapshot["http_status"] != 200
-        or snapshot["next_page"] is not None
-        or snapshot["truncated"] is not False
-    ):
-        return False
-    current, history = snapshot["current"], snapshot["history"]
-    if not _shape(current, _RUN_KEYS) or not _identity(current):
-        return False
-    if any(current[k] != enrollment[k] for k in _IDENTITY_KEYS):
-        return False
-    if (
-        not _integer(current["id"], 1)
-        or type(current["run_number"]) is not int
-        or current["run_number"] != 1
-        or type(current["run_attempt"]) is not int
-        or current["run_attempt"] != 1
-        or current["event"] != "workflow_dispatch"
-        or current["status"] != "in_progress"
-        or current["conclusion"] is not None
-        or not _integer(current["created_at"])
-        or not enrollment["valid_from"] <= current["created_at"] <= now
-    ):
-        return False
-    if not _shape(history, {"total_count", "workflow_runs"}):
-        return False
-    runs = history["workflow_runs"]
-    return (
-        type(history["total_count"]) is int
-        and history["total_count"] == 1
-        and type(runs) is list
-        and len(runs) == 1
-        and _shape(runs[0], _RUN_KEYS)
-        and all(
-            type(runs[0][k]) is type(v) and runs[0][k] == v
-            for k, v in current.items()
-        )
-    )
-
-
-def _grant_consistent(grant: object, enrollment: dict, now: int) -> bool:
-    if not _shape(grant, _GRANT_KEYS) or not _window(grant, now):
-        return False
-    fixed = {
-        "schema": "fabricated-connectivity-grant-v1",
-        "request_sha256": REQUEST_SHA256,
-        "endpoint": ENDPOINT,
-        "model": MODEL,
-        "expected_model_version": MODEL,
-        "max_calls": 1,
-        "max_total_input_tokens": MAX_INPUT_RESERVATION,
-        "max_total_output_tokens": MAX_OUTPUT_RESERVATION,
-        "max_micro_usd": 0,
-        "admission_mode": "externally-verified-free-tier",
-    }
-    if any(
-        type(grant[k]) is not type(v) or grant[k] != v for k, v in fixed.items()
-    ):
-        return False
-    if not (
-        enrollment["valid_from"]
-        <= grant["valid_from"]
-        < grant["expires_at"]
-        <= enrollment["expires_at"]
-    ):
-        return False
-    return all(_digest(grant[k]) for k in _GRANT_KEYS if k.endswith("_sha256"))
 
 
 def _unique_pairs(pairs: list[tuple[str, object]]) -> dict:
@@ -404,75 +162,271 @@ def _safe_observation(status: int, body: bytes) -> dict | None:
     }
 
 
-def _result(state: str, observation: dict | None = None) -> dict:
-    result = {"status": state, "evidence_kind": "fabricated-offline"}
-    if observation is not None:
-        result.update(observation)
+REPOSITORY = "thzthix/cart-readback"
+REF = "refs/heads/feat/64-disabled-connectivity-diagnostic"
+EXPECTED_CONTEXT = {
+    "GITHUB_REPOSITORY": REPOSITORY,
+    "GITHUB_REPOSITORY_ID": "1443556432",
+    "GITHUB_REPOSITORY_OWNER_ID": "95135403",
+    "GITHUB_ACTOR_ID": "95135403",
+    "GITHUB_TRIGGERING_ACTOR": "thzthix",
+    "GITHUB_EVENT_NAME": "workflow_dispatch",
+    "GITHUB_REF": REF,
+    "GITHUB_WORKFLOW_REF": REPOSITORY + "/" + WORKFLOW_PATH + "@" + REF,
+    "GITHUB_RUN_NUMBER": "1",
+    "GITHUB_RUN_ATTEMPT": "1",
+    "GITHUB_SERVER_URL": "https://github.com",
+    "GITHUB_API_URL": "https://api.github.com",
+    "PROBE_MODE": "gemini-connectivity",
+}
+
+
+def validate_context(env: dict, now: float) -> float:
+    """Validate trusted hosted context, not external approval or account facts."""
+    if not math.isfinite(now) or any(
+        env.get(k) != v for k, v in EXPECTED_CONTEXT.items()
+    ):
+        raise ValueError()
+    sha = env.get("PROBE_REVIEWED_SHA", "")
+    if (
+        not _digest(sha, 40)
+        or env.get("GITHUB_SHA") != sha
+        or env.get("GITHUB_WORKFLOW_SHA") != sha
+    ):
+        raise ValueError()
+    if re.fullmatch(r"[1-9][0-9]{0,19}", env.get("GITHUB_RUN_ID", "")) is None:
+        raise ValueError()
+    windows = [
+        env.get(k, "") for k in ("PROBE_WINDOW_START", "PROBE_WINDOW_END")
+    ]
+    if any(re.fullmatch(r"[0-9]{10}", v) is None for v in windows):
+        raise ValueError()
+    start, end = map(int, windows)
+    if not 0 < end - start <= 600 or not start <= now < end:
+        raise ValueError()
+    return end - now
+
+
+def _headers(response) -> int | None:
+    values, size = {}, 0
+    raw = response.getheaders()
+    if type(raw) is not list or len(raw) > 64:
+        raise ValueError()
+    for pair in raw:
+        if type(pair) is not tuple or len(pair) != 2:
+            raise ValueError()
+        name, value = pair
+        if type(name) is not str or type(value) is not str:
+            raise ValueError()
+        if re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,256}", name) is None:
+            raise ValueError()
+        if len(value) > 4096 or any(ord(c) < 32 or ord(c) > 126 for c in value):
+            raise ValueError()
+        size += len(name) + len(value)
+        if size > 16384:
+            raise ValueError()
+        name = name.lower()
+        if name in {
+            "content-type",
+            "content-length",
+            "transfer-encoding",
+            "content-encoding",
+        }:
+            if name in values:
+                raise ValueError()
+            values[name] = value.strip().lower()
+    if (
+        re.fullmatch(
+            r'application/json(?:;\s*charset=(?:utf-8|"utf-8"))?',
+            values.get("content-type", ""),
+        )
+        is None
+    ):
+        raise ValueError()
+    if values.get("content-encoding", "identity") != "identity":
+        raise ValueError()
+    transfer, length = (
+        values.get("transfer-encoding"),
+        values.get("content-length"),
+    )
+    if transfer is not None and (transfer != "chunked" or length is not None):
+        raise ValueError()
+    if transfer is None and length is None:
+        raise ValueError()
+    if length is None:
+        return None
+    if (
+        re.fullmatch(r"0|[1-9][0-9]{0,5}", length) is None
+        or not 0 < int(length) <= 16384
+    ):
+        raise ValueError()
+    return int(length)
+
+
+def execute(
+    env: dict,
+    *,
+    connection_factory=None,
+    wall=time.time,
+    monotonic=time.monotonic,
+) -> dict:
+    """Burn one local attempt before reading the sole key; never retry.
+
+    Callers in tests supply fake context and sockets. The CLI uses only the fixed
+    native HTTPS constructor. A missing completion is UNKNOWN, not success.
+    """
+    claim = connection = response = None
+    claimed = False
+    token = None
+    headers = {}
+    result = {"status": "NOT_RUN"}
+    try:
+        remaining = validate_context(env, wall())
+        expected_source = env.get("PROBE_SOURCE_SHA256", "")
+        if (
+            not _digest(expected_source)
+            or hashlib.sha256(pathlib.Path(__file__).read_bytes()).hexdigest()
+            != expected_source
+        ):
+            raise ValueError()
+        directory = pathlib.Path(env.get("RUNNER_TEMP", ""))
+        if not directory.is_absolute() or not directory.is_dir():
+            raise ValueError()
+        path = directory / (
+            "cartreadback-gemini-" + env["GITHUB_RUN_ID"] + ".claim"
+        )
+        claim = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+        )
+        claimed = True
+        identity = os.fstat(claim)
+        expires = monotonic() + min(TIMEOUT_SECONDS, remaining)
+
+        def guard():
+            remaining = min(
+                validate_context(env, wall()), expires - monotonic()
+            )
+            current = path.stat(follow_symlinks=False)
+            if remaining <= 0 or (current.st_dev, current.st_ino) != (
+                identity.st_dev,
+                identity.st_ino,
+            ):
+                raise TimeoutError()
+            return remaining
+
+        guard()
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+        context.keylog_filename = None
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.set_alpn_protocols(["http/1.1"])
+        factory = (
+            http.client.HTTPSConnection
+            if connection_factory is None
+            else connection_factory
+        )
+        connection = factory(
+            "generativelanguage.googleapis.com",
+            443,
+            timeout=min(3, guard()),
+            context=context,
+        )
+        connection.set_debuglevel(0)
+        connection.auto_open = 0
+        guard()
+        connection.connect()
+        connection.sock.settimeout(min(12, guard()))
+        # The irreversible local claim and all context gates precede key access.
+        token = env.pop("GEMINI_KEY", None)
+        if (
+            type(token) is not str
+            or re.fullmatch(r"[A-Za-z0-9_-]{1,256}", token) is None
+        ):
+            raise ValueError()
+        headers = {
+            "Host": "generativelanguage.googleapis.com",
+            "x-goog-api-key": token,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+            "Content-Length": str(len(REQUEST)),
+            "Connection": "close",
+        }
+        connection.sock.settimeout(min(12, guard()))
+        try:
+            connection.request(
+                "POST",
+                "/v1beta/models/" + MODEL + ":generateContent",
+                body=REQUEST,
+                headers=headers,
+                encode_chunked=False,
+            )
+        finally:
+            token = None
+            headers.clear()
+        connection.sock.settimeout(min(12, guard()))
+        response = connection.getresponse()
+        guard()
+        if (
+            type(response.status) is not int
+            or response.status != 200
+            or response.version != 11
+        ):
+            raise ValueError()
+        expected = _headers(response)
+        raw = bytearray()
+        while True:
+            connection.sock.settimeout(min(12, guard()))
+            chunk = response.read1(min(8192, 16385 - len(raw)))
+            guard()
+            if type(chunk) is not bytes or len(raw) + len(chunk) > 16384:
+                raise ValueError()
+            if not chunk:
+                break
+            raw.extend(chunk)
+        if expected is not None and len(raw) != expected:
+            raise ValueError()
+        observation = _safe_observation(200, bytes(raw))
+        guard()
+        if observation is None:
+            raise ValueError()
+        result = {"status": "RESPONSE_VALIDATED", **observation}
+    except BaseException:
+        result = {"status": "UNKNOWN" if claimed else "NOT_RUN"}
+    finally:
+        token = None
+        headers.clear()
+        for resource in (response, connection):
+            if resource is not None:
+                try:
+                    resource.close()
+                except BaseException:
+                    result = {"status": "UNKNOWN"}
+        if claim is not None:
+            try:
+                os.close(claim)
+            except BaseException:
+                result = {"status": "UNKNOWN"}
     return result
 
 
-class OfflineDiagnostic:
-    """One in-memory fabricated attempt, not a durable production burn fence."""
+def main() -> int:
+    """Emit only the sanitized final receipt, after synchronous cleanup."""
+    previous = signal.getsignal(signal.SIGTERM)
 
-    def __init__(self) -> None:
-        """Start a fresh synthetic test object, never a live allowance."""
-        self._lock = threading.Lock()
-        self._consumed = False
+    def interrupted(_number, _frame):
+        raise KeyboardInterrupt()
 
-    def run(
-        self,
-        enrollment: object,
-        snapshot: object,
-        grant: object,
-        transport: FabricatedTransport,
-        clock: Callable[[], int],
-    ) -> dict:
-        """Attempt once through a fabricated transport; ambiguity is terminal.
-
-        A caller-supplied grant or metadata is never externally verified here.
-        No exception text or arbitrary transport result escapes this boundary.
-        """
-        with self._lock:
-            if self._consumed:
-                return _result("NOT_RUN")
-            self._consumed = True
-        try:
-            started = clock()
-            if (
-                not fabricated_fence_consistent(enrollment, snapshot, started)
-                or not _grant_consistent(grant, enrollment, started)
-                or transport.evidence_kind != "fabricated-offline"
-            ):
-                return _result("NOT_RUN")
-            original = json.dumps([enrollment, snapshot, grant], sort_keys=True)
-            status, body = transport.exchange(
-                ENDPOINT, REQUEST, TIMEOUT_SECONDS
-            )
-            ended = clock()
-            if (
-                not _integer(ended)
-                or not started <= ended
-                or ended - started >= TIMEOUT_SECONDS
-                or not _window(enrollment, ended)
-                or not _window(grant, ended)
-                or json.dumps([enrollment, snapshot, grant], sort_keys=True)
-                != original
-            ):
-                return _result("UNKNOWN")
-            observation = _safe_observation(status, body)
-            if observation is None:
-                return _result("UNKNOWN")
-            return _result("FABRICATED_ACCEPTED", observation)
-        except BaseException:
-            # Sanitize untrusted fixture failures; never retry after ambiguity.
-            return _result("UNKNOWN")
-
-
-def production_status() -> dict:
-    """Return terminal NOT_RUN without reading inputs, metadata or credentials."""
-    return {"status": "NOT_RUN", "reason": "PRODUCTION_ACTIVATION_UNSUPPORTED"}
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        result = execute(os.environ)
+    except BaseException:
+        result = {"status": "UNKNOWN"}
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    print(json.dumps(result, sort_keys=True), flush=True)
+    return 0 if result["status"] == "RESPONSE_VALIDATED" else 2
 
 
 if __name__ == "__main__":
-    print(json.dumps(production_status(), sort_keys=True))
-    raise SystemExit(2)
+    raise SystemExit(main())
