@@ -63,9 +63,12 @@ Tests exercise real reviewed HTTPS logic with fake connections and synthetic
 keys only, while banning actual sockets/default HTTPS construction. They cover
 guard denial before effects, TLS/framing, redirects, bounded bodies, single
 borrow, cleanup, sanitized factory/borrow/read/close and missing-module failures.
-Fresh lazy import/send is checked with Python file opens forbidden. Only the ten
-reviewed runtime Python dependencies were materialized for these focused checks;
-no semantic assets were read or copied.
+Fresh lazy import/send is checked with `builtins.open` and `io.open` patched to
+fail. This does not guard importlib/source-loader, OS or OpenSSL certificate-store
+reads. The exact ten-module import closure was separately inspected for top-level
+semantic-asset reads. Only those reviewed runtime Python dependencies were
+materialized for the focused checks; no protected semantic assets were read or
+copied. This observation is not an OS-wide file-read prohibition.
 
 ## Offline consistency contract
 
