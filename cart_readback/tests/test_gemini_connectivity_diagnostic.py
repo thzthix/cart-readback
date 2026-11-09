@@ -261,7 +261,8 @@ class ProbeTest(unittest.TestCase):
     def test_all_context_mismatches_block_before_key_or_factory(self):
         mutations = [(k, "wrong") for k in probe.EXPECTED_CONTEXT]
         mutations += [
-            ("GITHUB_RUN_NUMBER", "2"),
+            ("GITHUB_RUN_NUMBER", "1"),
+            ("GITHUB_RUN_NUMBER", "3"),
             ("GITHUB_RUN_ATTEMPT", "2"),
             ("GITHUB_SHA", "b" * 40),
             ("GITHUB_WORKFLOW_SHA", "b" * 40),
@@ -283,6 +284,64 @@ class ProbeTest(unittest.TestCase):
                 self.assertEqual(self.env.borrowed, 0)
                 self.assertEqual(self.factories, [])
 
+    def test_only_new_run_two_attempt_one_has_a_local_slot(self):
+        self.assertEqual(probe.EXPECTED_CONTEXT["GITHUB_RUN_NUMBER"], "2")
+        self.assertEqual(probe.EXPECTED_CONTEXT["GITHUB_RUN_ATTEMPT"], "1")
+        job = workflow_parts()[1]
+        self.assertIn(
+            "&& github.run_number == 2 && github.run_attempt == 1 }}",
+            job,
+        )
+        self.assertNotIn("github.run_number == 1", job)
+        config = json.loads(probe.REQUEST)["generationConfig"]
+        self.assertEqual(
+            config,
+            {
+                "temperature": 0,
+                "maxOutputTokens": 32,
+                "thinkingConfig": {"thinkingLevel": "MINIMAL"},
+            },
+        )
+
+    def test_fetch_rejects_spent_and_other_slots_before_token_or_io(self):
+        code = workflow_parts()[4]
+        for number, attempt in (
+            ("1", "1"),
+            ("1", "2"),
+            ("2", "2"),
+            ("3", "1"),
+            ("02", "1"),
+            ("2", "01"),
+        ):
+            with (
+                self.subTest(number=number, attempt=attempt),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                env = self.environment(directory)
+                env.pop("GEMINI_KEY")
+                env["GITHUB_RUN_NUMBER"] = number
+                env["GITHUB_RUN_ATTEMPT"] = attempt
+                env["GITHUB_TOKEN"] = "synthetic-github-token"
+                conn = FakeHTTPSConnection(PATH.read_bytes())
+                with (
+                    mock.patch.object(os, "environ", env),
+                    mock.patch.object(
+                        http.client, "HTTPSConnection", return_value=conn
+                    ),
+                    mock.patch("time.time", return_value=NOW),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    with self.assertRaises(SystemExit):
+                        exec(compile(code, "workflow-fetch", "exec"), {})
+                self.assertEqual(env["GITHUB_TOKEN"], "synthetic-github-token")
+                self.assertEqual(conn.connected, 0)
+                self.assertEqual(conn.requests, [])
+                self.assertFalse(
+                    pathlib.Path(
+                        directory, "cartreadback-gemini-probe.py"
+                    ).exists()
+                )
+
     def test_identity_constants_and_request_digest(self):
         self.assertEqual(
             probe.EXPECTED_CONTEXT["GITHUB_REPOSITORY_ID"], "1443556432"
@@ -292,7 +351,7 @@ class ProbeTest(unittest.TestCase):
         )
         self.assertEqual(
             probe.REQUEST_SHA256,
-            "1d5aeeb73cc4fa2225e99bd1bdccd5a963251e00e1f7cd9f6561489b980f95f8",
+            "b62b017f7a20d56124b384ba406bcc2f31b9da13b7ae240bb3fa7f765bf03fca",
         )
         self.assertEqual(probe.MAX_INPUT_RESERVATION, 1048576)
         self.assertEqual(probe.MAX_OUTPUT_RESERVATION, 2048)

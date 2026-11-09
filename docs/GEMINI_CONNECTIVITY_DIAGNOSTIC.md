@@ -14,6 +14,38 @@ binding, current model/account eligibility, no paid fallback and zero-cost
 compute. Workflow inputs and public pricing do not establish those facts.
 Unknown means no agent dispatch.
 
+## Local run-2 candidate; NOT ACTIVATED
+
+This local-only candidate is based on commit
+`9314c4d3d300053425dce95716967e762b981723`. Nothing was pushed or dispatched.
+Read-only GitHub metadata reports exactly one repository workflow run:
+workflow 405198760, run 42617340271, number 1, attempt 1. With history preserved,
+the sole next candidate slot is run number 2, attempt 1. Immediately before any
+later approved dispatch, recheck those facts; if any other run exists, STOP.
+Do not advance the fence again, rerun, delete/reset history or use another route.
+
+The only proposed request change is omitting `candidateCount`. The
+[Gemini 3.5 migration guide](https://ai.google.dev/gemini-api/docs/generate-content/whats-new-gemini-3.5?hl=en)
+says it is unsupported in Gemini 3.x; the
+[generic API reference](https://ai.google.dev/api/generate-content?hl=en)
+defaults omission to one. All other payload/model/caps remain unchanged.
+This does not establish why the old attempt was UNKNOWN. Proposed canonical
+request SHA-256: `b62b017f7a20d56124b384ba406bcc2f31b9da13b7ae240bb3fa7f765bf03fca`.
+
+The job, inline fetch and client each admit only run 2 / attempt 1; old run 1
+stays spent. Source pins, exact reviewed commit, at most 600-second fresh absolute
+window, concurrency, exclusive claim and one-POST/no-retry controls remain.
+The existing step-only `GEMINI_KEY` binding is unchanged. Before publication or
+execution, obtain the user's explicit new per-action credential-transmission
+approval for this exact request to Google, verify the same key's Free-project
+binding/current eligibility and zero-cost Actions capacity. No key value, hash,
+length or fragment is read during preparation. Public Free pricing is not account
+evidence. Unknown eligibility/cost/approval means STOP; no paid or OpenAI fallback.
+
+The historical sections below describe the spent run-1 baseline. They do not
+authorize, restore or replay it. Any newly approved run-2 attempt is consumed by
+failure, cancellation, skipping, timeout or UNKNOWN, as well as success.
+
 ## Spent executed baseline and future-only observability
 
 The one authorized attempt is SPENT: [run 42617340271, attempt 1](https://github.com/thzthix/cart-readback/actions/runs/42617340271)
@@ -34,20 +66,21 @@ model/usage while preserving the prior phase/status with cleanup_failed:true.
 No exception text, body/header data, credential facts, lengths or hashes are
 added to failure output. These fields improve FUTURE diagnostics only.
 
-The first-run/attempt/window/no-reset guards and exact request remain unchanged.
-There is no retry, rerun, new window/key/model/branch/workflow, counter reset or
-renewed provider authority. Do not dispatch this spent route again. The operator
-path below is historical, not permission to try the observability patch live.
+At the executed/observability baseline, first-run/attempt/window/no-reset guards
+and request were unchanged. Run 1 remains spent forever. The local run-2
+proposal above grants no provider authority. The operator path below is
+historical, not permission to try the spent observability route live.
 
-## Separate unresolved compatibility concern
+## Historical compatibility concern and proposed field removal
 
 The [Gemini 3.5 migration guide](https://ai.google.dev/gemini-api/docs/generate-content/whats-new-gemini-3.5)
 says to remove candidate_count for 3.x, while the generic reference still lists
 candidateCount with default 1. The executed canonical body included candidateCount
 1. This documentation conflict is NOT proof that 1 was rejected or the cause of
 the UNKNOWN outcome. The observability patch deliberately leaves that payload
-unchanged. Any later compatibility change requires a separate explicit decision;
-it would not authorize a second request on this spent route.
+unchanged. The local run-2 candidate proposes only that field removal, as disclosed above.
+It still requires separate explicit approval and never reopens the spent run-1
+route.
 
 ## Historical operator path; route is spent
 
@@ -72,7 +105,7 @@ mode selector and moving its existing cancellation group to job scope. It is not
 run as part of diagnostic mode. The workflow remains manual-only. Testing the
 reviewed draft branch does not require merging or changing another draft PR.
 
-## Exact bounded trust and first-attempt fence
+## Historical run-1 bounded trust and first-attempt fence
 
 The trusted context binds repository `thzthix/cart-readback`, numeric repository
 1443556432 and owner/actor 95135403, triggering actor thzthix, workflow_dispatch,
@@ -95,7 +128,7 @@ history to obtain another attempt. The local mode-0600 exclusive claim remains
 in the same runner temporary directory and is never deleted for retry. It is not
 exported/restored and does not make ephemeral hosted storage durable.
 
-## Fixed public request and response
+## Historical run-1 public request and unchanged response policy
 
 - Endpoint: `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent`.
 - Public prompt: `Synthetic connectivity diagnostic. Reply READY.`

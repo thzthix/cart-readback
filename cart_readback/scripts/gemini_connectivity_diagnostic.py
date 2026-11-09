@@ -40,7 +40,6 @@ REQUEST = json.dumps(
         ],
         "generationConfig": {
             "temperature": 0,
-            "candidateCount": 1,
             "maxOutputTokens": MAX_OUTPUT_TOKENS,
             "thinkingConfig": {"thinkingLevel": "MINIMAL"},
         },
@@ -208,7 +207,7 @@ EXPECTED_CONTEXT = {
     "GITHUB_EVENT_NAME": "workflow_dispatch",
     "GITHUB_REF": REF,
     "GITHUB_WORKFLOW_REF": REPOSITORY + "/" + WORKFLOW_PATH + "@" + REF,
-    "GITHUB_RUN_NUMBER": "1",
+    "GITHUB_RUN_NUMBER": "2",
     "GITHUB_RUN_ATTEMPT": "1",
     "GITHUB_SERVER_URL": "https://github.com",
     "GITHUB_API_URL": "https://api.github.com",
