@@ -12,6 +12,7 @@ import socket
 import ssl
 import tempfile
 import threading
+import traceback
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -475,6 +476,131 @@ class ReaderTests(unittest.TestCase):
             reader.read(404)
         self.assertEqual(len(self.connections), 1)
 
+    def assert_safe_exception(self, reader, expected):
+        with self.assertRaises(expected) as result:
+            reader.read(404)
+        error = result.exception
+        self.assertIs(type(error), expected)
+        self.assertNotIn(TOKEN, repr(error.args))
+        self.assertNotIn(TOKEN, "".join(traceback.format_exception(error)))
+        if expected is SystemExit:
+            self.assertEqual(error.code, 1)
+            self.assertIs(type(error.code), int)
+        elif expected in (KeyboardInterrupt, GeneratorExit):
+            self.assertEqual(error.args, ())
+        else:
+            self.assertEqual(
+                str(error), "GitHub run metadata unavailable; no retry."
+            )
+        count = len(self.connections)
+        self.assertTrue(all(item.closed for item in self.connections))
+        self.assertLessEqual(count, 3)
+        with self.assertRaises(gm.MetadataUnavailable):
+            reader.read(404)
+        self.assertEqual(len(self.connections), count)
+
+    def test_argument_bearing_cancellation_each_request_and_phase(self):
+        original_stage = self.stage
+        original_close = FakeConnection.close
+        for kind in (KeyboardInterrupt, SystemExit, GeneratorExit):
+            for phase in ("credential", "request", "read", "close"):
+                for index in range(3):
+                    with self.subTest(kind=kind, phase=phase, index=index):
+                        self.connections.clear()
+
+                        def stage(name):
+                            original_stage(name)
+                            if (
+                                name == phase
+                                and len(self.connections) == index + 1
+                            ):
+                                raise kind(TOKEN)
+
+                        def close(connection):
+                            original_close(connection)
+                            if (
+                                phase == "close"
+                                and len(self.connections) == index + 1
+                            ):
+                                raise kind(TOKEN)
+
+                        with (
+                            mock.patch.object(self, "stage", stage),
+                            mock.patch.object(FakeConnection, "close", close),
+                        ):
+                            reader = gm.GitHubRunMetadataReader(
+                                enrollment(), self.credential
+                            )
+                            self.assert_safe_exception(reader, kind)
+                        self.assertEqual(len(self.connections), index + 1)
+
+    def test_primary_and_cleanup_cancellation_precedence(self):
+        original_close = FakeConnection.close
+        for primary in (
+            RuntimeError,
+            KeyboardInterrupt,
+            SystemExit,
+            GeneratorExit,
+        ):
+            for cleanup in (
+                RuntimeError,
+                KeyboardInterrupt,
+                SystemExit,
+                GeneratorExit,
+            ):
+                with self.subTest(primary=primary, cleanup=cleanup):
+                    self.connections.clear()
+
+                    def credential():
+                        raise primary(TOKEN)
+
+                    def close(connection):
+                        original_close(connection)
+                        raise cleanup(TOKEN)
+
+                    expected = (
+                        primary
+                        if primary is not RuntimeError
+                        else cleanup
+                        if cleanup is not RuntimeError
+                        else gm.MetadataUnavailable
+                    )
+                    with mock.patch.object(FakeConnection, "close", close):
+                        reader = gm.GitHubRunMetadataReader(
+                            enrollment(), credential
+                        )
+                        self.assert_safe_exception(reader, expected)
+
+    def test_unexpected_and_grouped_base_exceptions_are_unavailable(self):
+        values = (
+            BaseException(TOKEN),
+            BaseExceptionGroup(TOKEN, [KeyboardInterrupt(TOKEN)]),
+            BaseExceptionGroup(TOKEN, [SystemExit(TOKEN), ValueError(TOKEN)]),
+        )
+        original_close = FakeConnection.close
+        for value in values:
+            for phase in ("credential", "cleanup"):
+                with self.subTest(value=type(value), phase=phase):
+                    self.connections.clear()
+
+                    def credential():
+                        if phase == "credential":
+                            raise value
+                        return self.credential()
+
+                    def close(connection):
+                        original_close(connection)
+                        if phase == "cleanup":
+                            raise value
+
+                    with mock.patch.object(FakeConnection, "close", close):
+                        reader = gm.GitHubRunMetadataReader(
+                            enrollment(), credential
+                        )
+                        self.assert_safe_exception(
+                            reader, gm.MetadataUnavailable
+                        )
+
     def test_bad_credential_or_callback_does_not_request(self):
         for bad in ("", None, "synthetic\r\nHeader: value", 1, "x" * 4097):
             with self.subTest(bad=bad):
@@ -565,6 +691,67 @@ class EnrollmentTests(unittest.TestCase):
 
 
 class ProductionConnectionTests(unittest.TestCase):
+    def test_raw_connect_cleanup_preserves_normalized_public_cancellation(self):
+        address = ("192.0.2.1", 443)
+        for primary in (
+            RuntimeError,
+            KeyboardInterrupt,
+            SystemExit,
+            GeneratorExit,
+        ):
+            for cleanup in (
+                RuntimeError,
+                KeyboardInterrupt,
+                SystemExit,
+                GeneratorExit,
+            ):
+                with self.subTest(primary=primary, cleanup=cleanup):
+                    raw, credential = mock.Mock(), mock.Mock()
+                    raw.connect.side_effect = primary(TOKEN)
+                    raw.close.side_effect = cleanup(TOKEN)
+                    expected = (
+                        primary
+                        if primary is not RuntimeError
+                        else cleanup
+                        if cleanup is not RuntimeError
+                        else gm.MetadataUnavailable
+                    )
+                    with (
+                        mock.patch.object(gm, "_wall_clock", return_value=NOW),
+                        mock.patch.object(gm, "_monotonic", return_value=10),
+                        mock.patch.object(
+                            gm,
+                            "_resolve",
+                            return_value=(
+                                socket.AF_INET,
+                                socket.SOCK_STREAM,
+                                socket.IPPROTO_TCP,
+                                address,
+                            ),
+                        ),
+                        mock.patch.object(socket, "socket", return_value=raw),
+                    ):
+                        reader = gm.GitHubRunMetadataReader(
+                            enrollment(), credential
+                        )
+                        with self.assertRaises(expected) as result:
+                            reader.read(404)
+                        self.assertIs(type(result.exception), expected)
+                        self.assertNotIn(TOKEN, repr(result.exception.args))
+                        self.assertNotIn(
+                            TOKEN,
+                            "".join(
+                                traceback.format_exception(result.exception)
+                            ),
+                        )
+                        if expected is SystemExit:
+                            self.assertEqual(result.exception.code, 1)
+                        with self.assertRaises(gm.MetadataUnavailable):
+                            reader.read(404)
+                    raw.connect.assert_called_once_with(address)
+                    raw.close.assert_called_once()
+                    credential.assert_not_called()
+
     def test_connect_failure_cleans_socket_without_retry(self):
         deadline, context, raw = (mock.Mock() for _ in range(3))
         deadline.timeout.return_value = 2

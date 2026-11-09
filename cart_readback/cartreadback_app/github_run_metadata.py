@@ -48,6 +48,10 @@ def _positive_id(value: object) -> bool:
     return type(value) is int and 0 < value <= 2**63 - 1
 
 
+def _direct_cancellation(error):
+    return isinstance(error, (KeyboardInterrupt, SystemExit, GeneratorExit))
+
+
 @dataclass(frozen=True)
 class RunEnrollment:
     """Externally enrolled identity/window; constructing it grants no authority."""
@@ -191,8 +195,14 @@ class _GitHubConnection(http.client.HTTPSConnection):
             raw.settimeout(self._deadline.timeout(3))
             self.sock = self._context.wrap_socket(raw, server_hostname=_HOST)
             self._deadline.check()
-        except BaseException:
-            raw.close()
+        except BaseException as primary:
+            try:
+                raw.close()
+            except BaseException as cleanup:
+                if _direct_cancellation(cleanup) and not _direct_cancellation(
+                    primary
+                ):
+                    raise
             raise
 
 
@@ -492,7 +502,15 @@ class GitHubRunMetadataReader:
             _require(observation == historical)
             deadline.check()
             return observation
-        except Exception:
+        except KeyboardInterrupt:
+            raise KeyboardInterrupt() from None
+        except SystemExit:
+            raise SystemExit(1) from None
+        except GeneratorExit:
+            raise GeneratorExit() from None
+        except BaseException:
+            # Groups/unexpected host exceptions are unavailable, never evidence.
+            # Do not re-emit arbitrary callback/socket/cleanup exception payloads.
             raise MetadataUnavailable() from None
 
     def _get(self, path, deadline):
@@ -572,16 +590,24 @@ class GitHubRunMetadataReader:
             headers.clear()
             primary = sys.exc_info()[1]
             cleanup_fault = None
+            cleanup_cancellation = None
             for resource in (response, connection):
                 if resource is not None:
                     try:
                         resource.close()
                     except BaseException as error:
-                        if cleanup_fault is None or not isinstance(
-                            error, Exception
-                        ):
+                        if cleanup_fault is None:
                             cleanup_fault = error
+                        if (
+                            cleanup_cancellation is None
+                            and _direct_cancellation(error)
+                        ):
+                            cleanup_cancellation = error
+            if cleanup_cancellation is not None and not _direct_cancellation(
+                primary
+            ):
+                # Preserve cancellation over an ordinary primary/cleanup error.
+                # Public read normalizes its type and removes arbitrary payloads.
+                raise cleanup_cancellation
             if primary is None and cleanup_fault is not None:
-                if not isinstance(cleanup_fault, Exception):
-                    raise cleanup_fault
                 raise MetadataUnavailable() from None

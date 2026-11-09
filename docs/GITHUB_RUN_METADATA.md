@@ -96,8 +96,17 @@ host code is not made interruptible by a socket timeout.
 Responses and connections close on success, ordinary failure or interruption.
 Cleanup attempts both resources even if one close fails. Ordinary failures expose
 only `GitHub run metadata unavailable; no retry.` No API error body, token,
-response URL or raw exception is logged/returned. Process cancellation propagates
-after cleanup. Closing a connection is not proof of remote cancellation.
+response URL or raw exception is logged/returned. After cleanup, direct
+`KeyboardInterrupt` and `GeneratorExit` propagate as fresh same-base-type
+cancellations with no arguments; direct `SystemExit` becomes `SystemExit(1)`, a
+fixed nonzero exit code. Original payloads and chained traceback display are
+suppressed. A primary direct cancellation takes precedence over cleanup faults;
+otherwise the first direct cleanup cancellation takes precedence over an
+ordinary primary failure. Grouped exceptions, including `BaseExceptionGroup`,
+and unexpected `BaseException` types become the same constant unavailable error.
+This contract does not contain a callback that independently prints or logs.
+No cancellation/error returns a completed observation. Closing a connection is
+not proof of remote cancellation.
 
 ## Explicitly unresolved integration gates
 
@@ -111,6 +120,10 @@ revalidate at its actual side-effect boundary. Private test seams, monkeypatches
 and a compromised host can fabricate observations and must never count as live
 origin evidence. This implementation is not a security boundary against its
 trusted Python process, administrator, clock or CA store.
+
+Any future activation must require a verified successful metadata observation
+and all of its separate authority gates, never shell exit status alone.
+Cancellation, a caught exception or an absent result cannot admit a later step.
 
 GitHub history is deletable and can be retained for a finite period. A one-entry
 response, even with run number/attempt 1 and a fixed workflow ID/window, cannot
