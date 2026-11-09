@@ -639,18 +639,66 @@ class UnselectedWireTest(unittest.TestCase):
         self.assertEqual(self.factories, [])
 
     def test_no_semantic_asset_reads_on_lazy_import_or_send(self):
-        for name in list(sys.modules):
-            if name == "cartreadback_app" or name.startswith(
-                "cartreadback_app."
-            ):
-                del sys.modules[name]
-        with (
-            mock.patch(
-                "builtins.open", side_effect=AssertionError("asset read")
-            ),
-            mock.patch("io.open", side_effect=AssertionError("asset read")),
-        ):
-            self.assertEqual(self.exchange(self.make()), (200, b"{}"))
+        validation = importlib.import_module("cartreadback_app.validation")
+        adapter = importlib.import_module("cartreadback_app.responses_adapter")
+        original_error, original_deadline = (
+            validation.AppError,
+            adapter.Deadline,
+        )
+        original_modules = {
+            name: module
+            for name, module in sys.modules.items()
+            if name == "cartreadback_app"
+            or name.startswith("cartreadback_app.")
+        }
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                self.connection = FakeHTTPSConnection()
+                expected = (
+                    self.assertRaises(RuntimeError)
+                    if fail
+                    else contextlib.nullcontext()
+                )
+                with expected:
+                    with mock.patch.dict(sys.modules):
+                        for name in original_modules:
+                            del sys.modules[name]
+                        with (
+                            mock.patch(
+                                "builtins.open",
+                                side_effect=AssertionError("asset read"),
+                            ),
+                            mock.patch(
+                                "io.open",
+                                side_effect=AssertionError("asset read"),
+                            ),
+                        ):
+                            self.assertEqual(
+                                self.exchange(self.make()), (200, b"{}")
+                            )
+                        if fail:
+                            raise RuntimeError("synthetic probe failure")
+                restored = {
+                    name: module
+                    for name, module in sys.modules.items()
+                    if name == "cartreadback_app"
+                    or name.startswith("cartreadback_app.")
+                }
+                self.assertEqual(restored.keys(), original_modules.keys())
+                for name, module in original_modules.items():
+                    self.assertIs(restored[name], module)
+                self.assertIs(
+                    importlib.import_module(
+                        "cartreadback_app.validation"
+                    ).AppError,
+                    original_error,
+                )
+                self.assertIs(
+                    importlib.import_module(
+                        "cartreadback_app.responses_adapter"
+                    ).Deadline,
+                    original_deadline,
+                )
 
     def test_missing_runtime_module_is_sanitized_without_effect(self):
         with mock.patch.dict(
