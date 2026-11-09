@@ -225,7 +225,7 @@ jobs:
                 if len(data) > 65536:
                     raise ValueError()
             remaining()
-            if hashlib.sha256(data).hexdigest() != "f2a4d37357097eeb4612acccf82985ea01ddd5ad3a4900772bd0ca55003085af":
+            if hashlib.sha256(data).hexdigest() != "8e5c37253f926d5fa0a56fb4a8f9b1f22dc8c960f69dd975ec5ed63bfc85a9a4":
                 raise ValueError()
             path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "cartreadback-gemini-probe.py"
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -251,5 +251,5 @@ jobs:
         PROBE_REVIEWED_SHA: ${{ inputs.reviewed_sha }}
         PROBE_WINDOW_START: ${{ inputs.window_start }}
         PROBE_WINDOW_END: ${{ inputs.window_end }}
-        PROBE_SOURCE_SHA256: f2a4d37357097eeb4612acccf82985ea01ddd5ad3a4900772bd0ca55003085af
+        PROBE_SOURCE_SHA256: 8e5c37253f926d5fa0a56fb4a8f9b1f22dc8c960f69dd975ec5ed63bfc85a9a4
       run: python "$RUNNER_TEMP/cartreadback-gemini-probe.py"

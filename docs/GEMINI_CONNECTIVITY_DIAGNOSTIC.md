@@ -7,14 +7,57 @@ commits, reproduced failures and reviews remain preserved history, not evidence
 that a provider connection occurred. Application Service, DB, prepared approvals,
 semantic assets and PayPal are unchanged.
 
-**No workflow was dispatched or credential read during implementation.** Do not
+**No workflow was dispatched or real credential read during this correction.** Do not
 run this until the operator has verified the exact request/recipient approval,
 required action-time credential-transmission approval, key-to-Free-project
 binding, current model/account eligibility, no paid fallback and zero-cost
 compute. Workflow inputs and public pricing do not establish those facts.
 Unknown means no agent dispatch.
 
-## Local run-2 candidate; NOT ACTIVATED
+## Spent run 2 and local credential compatibility correction
+
+Run [42639744339 / attempt 1](https://github.com/thzthix/cart-readback/actions/runs/42639744339)
+executed commit `29072098ffa6922265aecc08c89135ed52c984f4`. Its final receipt
+was UNKNOWN at the credential phase, before the native POST call boundary.
+Run 2 is SPENT. Run 1 remains unresolved and spent. No rerun, new dispatch,
+window renewal, run 3, credential change or provider request is authorized here.
+The run-2/attempt-1 gates below remain unchanged and cannot admit a later run.
+
+The old local alphabet `[A-Za-z0-9_-]` rejected a period. Google's current
+[Gemini key guide](https://ai.google.dev/gemini-api/docs/api-key) describes the
+migration to authorization keys. The [Cloud authentication guide](https://docs.cloud.google.com/docs/authentication/api-keys)
+confirms that authorization keys support the Gemini API, without defining a
+key-string alphabet or maximum length. A [participant reply on Google's forum](https://discuss.ai.google.dev/t/account-restricted-to-aq-prefix-keys-requesting-standard-aiza-key-restoration/170966/2)
+describes the migration to AQ authentication keys; the reply's staff status has
+not been verified. The same thread's later regex explanation is a community reply,
+not an API specification.
+
+The local correction treats the credential as opaque, preserving its exact
+value without trimming, prefix checks or normalization. It accepts nonempty
+ASCII graphic characters (0x21–0x7e), at most 4096 bytes. That cap is a local
+bounded-header defense, not a claimed Google format guarantee. Spaces, controls,
+CR/LF, DEL and non-ASCII remain rejected. This fixes a reproducible compatibility
+defect for public invented dotted credentials. It does not establish the real
+key's shape or reconstruct why run 2 failed. No real key was inspected.
+
+Credential-phase failures now add only one fixed reason enum:
+CREDENTIAL_LOOKUP_FAILED, CREDENTIAL_REJECTED, CONTEXT_REJECTED,
+DEADLINE_EXPIRED, CLAIM_STAT_FAILED, CLAIM_CHANGED,
+SOCKET_TIMEOUT_SETUP_FAILED, INTERRUPTED or UNEXPECTED_LOCAL_ERROR.
+CONTEXT_REJECTED includes the absolute window check. Other phases keep their
+existing receipts. Cleanup failure retains the reason and forces UNKNOWN.
+No raw exception, credential value, prefix, length, hash, header or body is
+reported. The unchanged request/model/caps and no-retry transport are preserved.
+These fields describe only executions of this new source, never the old run.
+
+Offline regressions use public invented dotted and long credentials, actual
+temporary claim files and an os._Environ mapping with only public fake backing.
+One test exercises the default native HTTPSConnection.connect path, an actual
+SSLSocket over an AF_UNIX socketpair, native timeout setup and header encoding.
+TLS handshaking and all sends are deliberately stopped; no external connection,
+provider response, authentication validity or model execution is tested.
+
+## Historical local run-2 proposal; now spent
 
 This local-only candidate is based on commit
 `9314c4d3d300053425dce95716967e762b981723`. Nothing was pushed or dispatched.

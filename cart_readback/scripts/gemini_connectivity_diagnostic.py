@@ -6,6 +6,7 @@ Tests use invented context, synthetic keys and fake HTTPS connections only.
 """
 
 import base64
+import enum
 import hashlib
 import http.client
 import json
@@ -28,6 +29,8 @@ MAX_INPUT_RESERVATION = 1048576
 MAX_OUTPUT_RESERVATION = 2048
 MAX_OUTPUT_TOKENS = 32
 TIMEOUT_SECONDS = 20
+# Local HTTP-header safety bound, not a provider key-format specification.
+MAX_CREDENTIAL_BYTES = 4096
 REQUEST = json.dumps(
     {
         "contents": [
@@ -49,6 +52,23 @@ REQUEST = json.dumps(
     separators=(",", ":"),
 ).encode("ascii")
 REQUEST_SHA256 = hashlib.sha256(REQUEST).hexdigest()
+
+
+class _Reason(enum.Enum):
+    CREDENTIAL_LOOKUP_FAILED = "CREDENTIAL_LOOKUP_FAILED"
+    CREDENTIAL_REJECTED = "CREDENTIAL_REJECTED"
+    CONTEXT_REJECTED = "CONTEXT_REJECTED"
+    DEADLINE_EXPIRED = "DEADLINE_EXPIRED"
+    CLAIM_STAT_FAILED = "CLAIM_STAT_FAILED"
+    CLAIM_CHANGED = "CLAIM_CHANGED"
+    SOCKET_TIMEOUT_SETUP_FAILED = "SOCKET_TIMEOUT_SETUP_FAILED"
+    INTERRUPTED = "INTERRUPTED"
+    UNEXPECTED_LOCAL_ERROR = "UNEXPECTED_LOCAL_ERROR"
+
+
+class _LocalFailure(ValueError):
+    def __init__(self, reason: _Reason):
+        self.reason = reason
 
 
 def _shape(value: object, keys: set[str]) -> bool:
@@ -303,13 +323,17 @@ def _headers(response) -> int | None:
     return int(length)
 
 
-def _failure_receipt(status, phase, http_status=None, *, cleanup_failed=False):
+def _failure_receipt(
+    status, phase, http_status=None, *, cleanup_failed=False, reason=None
+):
     """Keep only fixed local phase and an already received integer status."""
     result = {"status": status, "phase": phase}
     if http_status is not None:
         result["http_status"] = http_status
     if cleanup_failed:
         result["cleanup_failed"] = True
+    if type(reason) is _Reason:
+        result["reason"] = reason.value
     return result
 
 
@@ -330,6 +354,7 @@ def execute(
     token = None
     headers = {}
     phase, http_status = "preflight", None
+    reason = None
     result = {"status": "NOT_RUN"}
     try:
         remaining = validate_context(env, wall())
@@ -355,15 +380,22 @@ def execute(
         expires = monotonic() + min(TIMEOUT_SECONDS, remaining)
 
         def guard():
-            remaining = min(
-                validate_context(env, wall()), expires - monotonic()
-            )
-            current = path.stat(follow_symlinks=False)
-            if remaining <= 0 or (current.st_dev, current.st_ino) != (
+            try:
+                context_remaining = validate_context(env, wall())
+            except ValueError:
+                raise _LocalFailure(_Reason.CONTEXT_REJECTED) from None
+            remaining = min(context_remaining, expires - monotonic())
+            try:
+                current = path.stat(follow_symlinks=False)
+            except OSError:
+                raise _LocalFailure(_Reason.CLAIM_STAT_FAILED) from None
+            if remaining <= 0:
+                raise _LocalFailure(_Reason.DEADLINE_EXPIRED)
+            if (current.st_dev, current.st_ino) != (
                 identity.st_dev,
                 identity.st_ino,
             ):
-                raise TimeoutError()
+                raise _LocalFailure(_Reason.CLAIM_CHANGED)
             return remaining
 
         guard()
@@ -392,12 +424,16 @@ def execute(
         established_socket.settimeout(min(12, guard()))
         # The irreversible local claim and all context gates precede key access.
         phase = "credential"
-        token = env.pop("GEMINI_KEY", None)
+        try:
+            token = env.pop("GEMINI_KEY", None)
+        except Exception:
+            raise _LocalFailure(_Reason.CREDENTIAL_LOOKUP_FAILED) from None
         if (
             type(token) is not str
-            or re.fullmatch(r"[A-Za-z0-9_-]{1,256}", token) is None
+            or not 1 <= len(token) <= MAX_CREDENTIAL_BYTES
+            or any(not 33 <= ord(char) <= 126 for char in token)
         ):
-            raise ValueError()
+            raise _LocalFailure(_Reason.CREDENTIAL_REJECTED)
         headers = {
             "Host": "generativelanguage.googleapis.com",
             "x-goog-api-key": token,
@@ -407,7 +443,11 @@ def execute(
             "Content-Length": str(len(REQUEST)),
             "Connection": "close",
         }
-        established_socket.settimeout(min(12, guard()))
+        timeout = min(12, guard())
+        try:
+            established_socket.settimeout(timeout)
+        except OSError:
+            raise _LocalFailure(_Reason.SOCKET_TIMEOUT_SETUP_FAILED) from None
         # This is a local call boundary, not proof of network delivery.
         phase = "post-attempt"
         try:
@@ -461,9 +501,21 @@ def execute(
             )
         else:
             result = {"status": "RESPONSE_VALIDATED", **observation}
-    except BaseException:
+    except BaseException as error:
+        if phase == "credential":
+            reason = _Reason.UNEXPECTED_LOCAL_ERROR
+            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                reason = _Reason.INTERRUPTED
+            elif (
+                isinstance(error, _LocalFailure)
+                and type(error.reason) is _Reason
+            ):
+                reason = error.reason
         result = _failure_receipt(
-            "UNKNOWN" if claimed else "NOT_RUN", phase, http_status
+            "UNKNOWN" if claimed else "NOT_RUN",
+            phase,
+            http_status,
+            reason=reason,
         )
     finally:
         token = None
@@ -474,14 +526,22 @@ def execute(
                     resource.close()
                 except BaseException:
                     result = _failure_receipt(
-                        "UNKNOWN", phase, http_status, cleanup_failed=True
+                        "UNKNOWN",
+                        phase,
+                        http_status,
+                        cleanup_failed=True,
+                        reason=reason,
                     )
         if claim is not None:
             try:
                 os.close(claim)
             except BaseException:
                 result = _failure_receipt(
-                    "UNKNOWN", phase, http_status, cleanup_failed=True
+                    "UNKNOWN",
+                    phase,
+                    http_status,
+                    cleanup_failed=True,
+                    reason=reason,
                 )
     return result
 

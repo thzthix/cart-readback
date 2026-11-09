@@ -10,6 +10,7 @@ import os
 import pathlib
 import re
 import signal
+import socket
 import ssl
 import tempfile
 import textwrap
@@ -400,13 +401,88 @@ class ProbeTest(unittest.TestCase):
     def test_missing_or_malformed_key_burns_without_post(self):
         self.env["GEMINI_KEY"] = "invalid\nkey"
         self.assertEqual(
-            self.run_probe(), {"status": "UNKNOWN", "phase": "credential"}
+            self.run_probe(),
+            {
+                "status": "UNKNOWN",
+                "phase": "credential",
+                "reason": "CREDENTIAL_REJECTED",
+            },
         )
         self.assertEqual(self.connection.requests, [])
         self.assertEqual(self.env.borrowed, 1)
         self.assertEqual(
             self.run_probe(), {"status": "NOT_RUN", "phase": "claim"}
         )
+
+    def test_opaque_dotted_and_long_public_keys_reach_one_fake_post_verbatim(
+        self,
+    ):
+        for public_key in (
+            "AQ.synthetic-only-key",
+            "AQ." + "synthetic-" * 40,
+            "p" * probe.MAX_CREDENTIAL_BYTES,
+            "public.!#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
+        ):
+            with (
+                self.subTest(),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                # This is the old local restriction, not Google's contract.
+                self.assertIsNone(
+                    re.fullmatch(r"[A-Za-z0-9_-]{1,256}", public_key)
+                )
+                self.env = self.environment(directory)
+                self.env["GEMINI_KEY"] = public_key
+                self.connection = FakeHTTPSConnection(
+                    json.dumps(envelope()).encode()
+                )
+                result = self.run_probe()
+                self.assertEqual(result["status"], "RESPONSE_VALIDATED")
+                self.assertEqual(len(self.connection.requests), 1)
+                self.assertEqual(
+                    self.connection.requests[0][3]["x-goog-api-key"], public_key
+                )
+                self.assertNotIn(public_key, json.dumps(result))
+                self.assertNotIn("GEMINI_KEY", self.env)
+
+    def test_missing_unsafe_or_overlocalbound_keys_never_reach_post(self):
+        for public_key in (
+            None,
+            "",
+            " public",
+            "public ",
+            "public\tkey",
+            "public\r\nInjected: fixture",
+            "public\x00key",
+            "public\x1fkey",
+            "public\x7fkey",
+            "public\u00e9key",
+            "public\udcffkey",
+            "p" * (probe.MAX_CREDENTIAL_BYTES + 1),
+        ):
+            with (
+                self.subTest(),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                self.env = self.environment(directory)
+                if public_key is None:
+                    del self.env["GEMINI_KEY"]
+                else:
+                    self.env["GEMINI_KEY"] = public_key
+                self.connection = FakeHTTPSConnection()
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    result = self.run_probe()
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "UNKNOWN",
+                        "phase": "credential",
+                        "reason": "CREDENTIAL_REJECTED",
+                    },
+                )
+                self.assertEqual(self.connection.requests, [])
+                self.assertEqual(output.getvalue(), "")
 
     def test_expiry_after_connect_prevents_borrow_and_post(self):
         now = [NOW]
@@ -420,6 +496,114 @@ class ProbeTest(unittest.TestCase):
         self.assertEqual(result, {"status": "UNKNOWN", "phase": "connect"})
         self.assertEqual(self.env.borrowed, 0)
         self.assertEqual(self.connection.requests, [])
+
+    def test_credential_reasons_separate_local_failures_without_private_data(
+        self,
+    ):
+        cases = {
+            "lookup": "CREDENTIAL_LOOKUP_FAILED",
+            "rejected": "CREDENTIAL_REJECTED",
+            "context": "CONTEXT_REJECTED",
+            "window": "CONTEXT_REJECTED",
+            "deadline": "DEADLINE_EXPIRED",
+            "claim-stat": "CLAIM_STAT_FAILED",
+            "claim-identity": "CLAIM_CHANGED",
+            "socket-timeout": "SOCKET_TIMEOUT_SETUP_FAILED",
+            "interrupt": "INTERRUPTED",
+            "exit": "INTERRUPTED",
+            "unexpected": "UNEXPECTED_LOCAL_ERROR",
+        }
+        for case, expected_reason in cases.items():
+            with (
+                self.subTest(case=case),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                clock = [NOW, 100]
+                original = self.environment(directory)
+                claim = pathlib.Path(
+                    directory, "cartreadback-gemini-12345.claim"
+                )
+
+                class Env(TrackedEnv):
+                    def pop(self, key, *default):
+                        if case == "lookup":
+                            raise RuntimeError("PRIVATE_ERROR")
+                        value = super().pop(key, *default)
+                        if case == "context":
+                            self["GITHUB_REF"] = "wrong"
+                        elif case == "window":
+                            clock[0] = NOW + 101
+                        elif case == "deadline":
+                            clock[1] = 121
+                        elif case == "claim-stat":
+                            claim.rename(claim.with_suffix(".retained"))
+                        elif case == "claim-identity":
+                            claim.rename(claim.with_suffix(".retained"))
+                            claim.write_bytes(b"public replacement fixture")
+                        return value
+
+                env = Env(original)
+                if case == "rejected":
+                    env["GEMINI_KEY"] = "PRIVATE_ERROR invalid fixture"
+                conn = FakeHTTPSConnection(json.dumps(envelope()).encode())
+                calls = []
+
+                def settimeout(value):
+                    calls.append(value)
+                    if len(calls) != 2:
+                        return
+                    if case == "socket-timeout":
+                        raise OSError("PRIVATE_ERROR")
+                    if case == "interrupt":
+                        raise KeyboardInterrupt("PRIVATE_ERROR")
+                    if case == "exit":
+                        raise SystemExit("PRIVATE_ERROR")
+                    if case == "unexpected":
+                        raise RuntimeError("PRIVATE_ERROR")
+
+                conn.settimeout = settimeout
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    result = probe.execute(
+                        env,
+                        connection_factory=lambda *a, **k: conn,
+                        wall=lambda: clock[0],
+                        monotonic=lambda: clock[1],
+                    )
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "UNKNOWN",
+                        "phase": "credential",
+                        "reason": expected_reason,
+                    },
+                )
+                self.assertEqual(conn.requests, [])
+                self.assertEqual(conn.closed, 1)
+                for private in ("PRIVATE_ERROR", "synthetic-only-key"):
+                    self.assertNotIn(
+                        private, json.dumps(result) + output.getvalue()
+                    )
+
+    def test_credential_reason_survives_cleanup_failure(self):
+        self.env["GEMINI_KEY"] = "invalid fixture"
+        self.connection.close = mock.Mock(side_effect=OSError("PRIVATE_ERROR"))
+        self.assertEqual(
+            self.run_probe(),
+            {
+                "status": "UNKNOWN",
+                "phase": "credential",
+                "reason": "CREDENTIAL_REJECTED",
+                "cleanup_failed": True,
+            },
+        )
+
+    def test_failure_reason_accepts_only_fixed_enum_members(self):
+        for unsafe in ("PRIVATE_ERROR", None, object()):
+            self.assertEqual(
+                probe._failure_receipt("UNKNOWN", "credential", reason=unsafe),
+                {"status": "UNKNOWN", "phase": "credential"},
+            )
 
     def test_http_redirect_errors_fail_without_retry(self):
         for status in (201, 301, 302, 307, 308, 400, 429, 500):
@@ -600,6 +784,8 @@ class ProbeTest(unittest.TestCase):
                     "status": "UNKNOWN",
                     "phase": "body" if phase == "cleanup" else phase,
                 }
+                if phase == "credential":
+                    expected["reason"] = "CREDENTIAL_REJECTED"
                 if phase in ("body", "cleanup"):
                     expected["http_status"] = 200
                 if phase == "cleanup":
@@ -850,6 +1036,89 @@ class ProbeTest(unittest.TestCase):
                     body,
                 )
                 self.assertEqual(b"".join(conn.socket.sent).count(b"GET "), 1)
+
+
+class NativeCredentialTest(unittest.TestCase):
+    def test_default_native_connect_environ_socket_and_header_boundary(self):
+        for public_key in ("AQ.synthetic-only-key", "AQ." + "p" * 300):
+            with (
+                self.subTest(),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                values = ProbeTest.environment(None, directory)
+                values["GEMINI_KEY"] = public_key
+
+                def encode(value):
+                    return value.encode("utf-8", "surrogateescape")
+
+                def decode(value):
+                    return value.decode("utf-8", "surrogateescape")
+
+                # Public backing only. Never copy or inspect the process env.
+                env = os._Environ(
+                    {encode(k): encode(v) for k, v in values.items()},
+                    encode,
+                    decode,
+                    encode,
+                    decode,
+                )
+                left, right = socket.socketpair()
+                self.addCleanup(left.close)
+                self.addCleanup(right.close)
+                native_wrap = ssl.SSLContext.wrap_socket
+                seen = []
+
+                def wrap(context, sock, **kwargs):
+                    wrapped = native_wrap(
+                        context, sock, do_handshake_on_connect=False, **kwargs
+                    )
+                    seen.append(wrapped)
+                    return wrapped
+
+                with (
+                    mock.patch("socket.create_connection", return_value=left),
+                    mock.patch.object(socket.socket, "setsockopt"),
+                    mock.patch.object(ssl.SSLContext, "wrap_socket", wrap),
+                    mock.patch.object(
+                        socket.socket,
+                        "connect",
+                        side_effect=AssertionError(
+                            "external connect forbidden"
+                        ),
+                    ),
+                    mock.patch.object(
+                        socket.socket,
+                        "connect_ex",
+                        side_effect=AssertionError(
+                            "external connect forbidden"
+                        ),
+                    ),
+                    mock.patch.object(os, "unsetenv"),
+                    mock.patch.object(
+                        http.client.HTTPSConnection,
+                        "send",
+                        side_effect=RuntimeError("public stop before send"),
+                    ) as send,
+                ):
+                    result = probe.execute(
+                        env, wall=lambda: NOW, monotonic=lambda: 100
+                    )
+                self.assertEqual(
+                    result, {"status": "UNKNOWN", "phase": "post-attempt"}
+                )
+                self.assertEqual(len(seen), 1)
+                self.assertIsInstance(seen[0], ssl.SSLSocket)
+                # Native request/header encoding completed before this stop.
+                self.assertEqual(send.call_count, 1)
+                wire = send.call_args.args[0]
+                self.assertEqual(wire.count(b"POST "), 1)
+                self.assertIn(
+                    b"x-goog-api-key: " + public_key.encode() + b"\r\n", wire
+                )
+                self.assertNotIn("GEMINI_KEY", env)
+                self.assertEqual(
+                    len(list(pathlib.Path(directory).glob("*.claim"))), 1
+                )
 
 
 if __name__ == "__main__":
