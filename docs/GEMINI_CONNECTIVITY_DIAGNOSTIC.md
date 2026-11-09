@@ -77,7 +77,10 @@ It checks the remaining absolute/monotonic deadline before and after I/O. Accept
 headers are bounded and strictly framed; response body is at most 16 KiB.
 
 Only enum status, exact validated model and bounded integer usage are emitted,
-after synchronous cleanup. Text, responseId, headers, raw errors, project data
+after synchronous cleanup. Optional omitted thought usage is zero only when the
+reported total exactly agrees. Optional TEXT-only modality counts must match
+aggregates; a bounded valid-base64 thoughtSignature is discarded. Unreviewed
+fields fail closed. Text, responseId, headers, raw errors, project data
 and key are never printed. RESPONSE_VALIDATED means this response satisfied the
 local wire schema, not semantic quality, application integration, verified Free
 eligibility or actual zero charge. Non-200, malformed/wrong-model/late/ambiguous

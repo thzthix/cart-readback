@@ -118,6 +118,32 @@ class FakeHTTPSConnection:
         self.closed += 1
 
 
+class NativeFakeSocket:
+    def __init__(self, wire):
+        self.wire, self.sent = wire, []
+
+    def makefile(self, *args):
+        return io.BytesIO(self.wire)
+
+    def settimeout(self, value):
+        self.timeout = value
+
+    def sendall(self, data):
+        self.sent.append(bytes(data))
+
+    def close(self):
+        pass
+
+
+class NativeFakeConnection(http.client.HTTPConnection):
+    def __init__(self, wire):
+        super().__init__("generativelanguage.googleapis.com")
+        self.socket = NativeFakeSocket(wire)
+
+    def connect(self):
+        self.sock = self.socket
+
+
 class ProbeTest(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -477,6 +503,158 @@ class ProbeTest(unittest.TestCase):
                 self.assertEqual(conn.closed, 1)
                 if success:
                     self.assertEqual(target.read_bytes(), PATH.read_bytes())
+
+    def test_reviewed_optional_usage_and_signature_fields(self):
+        value = envelope()
+        del value["usageMetadata"]["thoughtsTokenCount"]
+        value["usageMetadata"]["totalTokenCount"] = 14
+        value["usageMetadata"]["promptTokensDetails"] = [
+            {"modality": "TEXT", "tokenCount": 12}
+        ]
+        value["usageMetadata"]["candidatesTokensDetails"] = [
+            {"modality": "TEXT", "tokenCount": 2}
+        ]
+        value["candidates"][0]["content"]["parts"][0]["thoughtSignature"] = (
+            "c3ludGhldGlj"
+        )
+        accepted = probe._safe_observation(200, json.dumps(value).encode())
+        self.assertEqual(accepted["output_tokens"], 2)
+        self.assertNotIn("c3ludGhldGlj", json.dumps(accepted))
+        mutations = [
+            lambda v: v["usageMetadata"].update(totalTokenCount=15),
+            lambda v: v["usageMetadata"]["promptTokensDetails"][0].update(
+                modality="IMAGE"
+            ),
+            lambda v: v["usageMetadata"]["candidatesTokensDetails"][0].update(
+                tokenCount=True
+            ),
+            lambda v: v["candidates"][0]["content"]["parts"][0].update(
+                thoughtSignature="invalid!"
+            ),
+            lambda v: v["usageMetadata"].update(unreviewed=0),
+        ]
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                changed = json.loads(json.dumps(value))
+                mutate(changed)
+                self.assertIsNone(
+                    probe._safe_observation(200, json.dumps(changed).encode())
+                )
+
+    def test_native_stdlib_close_keepalive_chunked_and_partial_framing(self):
+        body = json.dumps(envelope()).encode()
+        variants = [
+            (
+                b"Content-Length: "
+                + str(len(body)).encode()
+                + b"\r\nConnection: close\r\n",
+                body,
+                True,
+            ),
+            (
+                b"Content-Length: "
+                + str(len(body)).encode()
+                + b"\r\nConnection: keep-alive\r\n",
+                body,
+                True,
+            ),
+            (
+                b"Transfer-Encoding: chunked\r\nConnection: close\r\n",
+                hex(len(body))[2:].encode() + b"\r\n" + body + b"\r\n0\r\n\r\n",
+                True,
+            ),
+            (
+                b"Content-Length: "
+                + str(len(body) + 1).encode()
+                + b"\r\nConnection: close\r\n",
+                body,
+                False,
+            ),
+            (
+                b"Transfer-Encoding: chunked \r\nConnection: close\r\n",
+                b"2\r\n{}\r\n0\r\n\r\n",
+                False,
+            ),
+            (
+                b"Transfer-Encoding: chunked\r\nConnection: close\r\n",
+                b"5\r\nabc",
+                False,
+            ),
+        ]
+        for headers, content, valid in variants:
+            with (
+                self.subTest(headers=headers),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                self.env = self.environment(directory)
+                wire = (
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    + headers
+                    + b"\r\n"
+                    + content
+                )
+                conn = NativeFakeConnection(wire)
+                result = probe.execute(
+                    self.env,
+                    connection_factory=lambda *a, **k: conn,
+                    wall=lambda: NOW,
+                    monotonic=lambda: 100,
+                )
+                self.assertEqual(
+                    result["status"],
+                    "RESPONSE_VALIDATED" if valid else "UNKNOWN",
+                )
+                self.assertEqual(b"".join(conn.socket.sent).count(b"POST "), 1)
+
+    def test_inline_fetch_with_native_close_and_chunked_response(self):
+        workflow = yaml.load(
+            (ROOT / probe.WORKFLOW_PATH).read_text(), Loader=yaml.BaseLoader
+        )
+        run = workflow["jobs"]["gemini-connectivity"]["steps"][0]["run"]
+        code = "\n".join(run.splitlines()[1:-1])
+        body = PATH.read_bytes()
+        for chunked in (False, True):
+            with (
+                self.subTest(chunked=chunked),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                headers = (
+                    b"Transfer-Encoding: chunked\r\n"
+                    if chunked
+                    else b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                )
+                data = (
+                    hex(len(body))[2:].encode()
+                    + b"\r\n"
+                    + body
+                    + b"\r\n0\r\n\r\n"
+                    if chunked
+                    else body
+                )
+                conn = NativeFakeConnection(
+                    b"HTTP/1.1 200 OK\r\nConnection: close\r\n"
+                    + headers
+                    + b"\r\n"
+                    + data
+                )
+                env = self.environment(directory)
+                del env["GEMINI_KEY"]
+                env["GITHUB_TOKEN"] = "synthetic-builtin-token"
+                with (
+                    mock.patch.dict(os.environ, env, clear=True),
+                    mock.patch.object(
+                        http.client, "HTTPSConnection", return_value=conn
+                    ),
+                    mock.patch("time.time", return_value=NOW),
+                ):
+                    exec(compile(code, "workflow-fetch", "exec"), {})
+                self.assertEqual(
+                    pathlib.Path(
+                        directory, "cartreadback-gemini-probe.py"
+                    ).read_bytes(),
+                    body,
+                )
+                self.assertEqual(b"".join(conn.socket.sent).count(b"GET "), 1)
 
 
 if __name__ == "__main__":

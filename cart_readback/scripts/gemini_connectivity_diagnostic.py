@@ -5,6 +5,7 @@ operator must establish those facts before the sole manual workflow dispatch.
 Tests use invented context, synthetic keys and fake HTTPS connections only.
 """
 
+import base64
 import hashlib
 import http.client
 import json
@@ -106,23 +107,47 @@ def _safe_observation(status: int, body: bytes) -> dict | None:
     if data["modelVersion"] != MODEL:
         return None
     usage, candidates = data["usageMetadata"], data["candidates"]
-    keys = {
+    required_usage = {
         "promptTokenCount",
         "candidatesTokenCount",
-        "thoughtsTokenCount",
         "totalTokenCount",
     }
-    if not _shape(usage, keys) or not all(_integer(v) for v in usage.values()):
+    allowed_usage = required_usage | {
+        "thoughtsTokenCount",
+        "promptTokensDetails",
+        "candidatesTokensDetails",
+    }
+    if (
+        type(usage) is not dict
+        or not required_usage <= usage.keys()
+        or not usage.keys() <= allowed_usage
+    ):
         return None
-    prompt, answer, thoughts, total = (
+    prompt, answer, total = (
         usage[k]
-        for k in (
-            "promptTokenCount",
-            "candidatesTokenCount",
-            "thoughtsTokenCount",
-            "totalTokenCount",
-        )
+        for k in ("promptTokenCount", "candidatesTokenCount", "totalTokenCount")
     )
+    thoughts = usage.get("thoughtsTokenCount", 0)
+    if not all(_integer(v) for v in (prompt, answer, thoughts, total)):
+        return None
+    for field, count in (
+        ("promptTokensDetails", prompt),
+        ("candidatesTokensDetails", answer),
+    ):
+        if field in usage:
+            details = usage[field]
+            if (
+                type(details) is not list
+                or len(details) != 1
+                or not _shape(details[0], {"modality", "tokenCount"})
+            ):
+                return None
+            if (
+                details[0]["modality"] != "TEXT"
+                or not _integer(details[0]["tokenCount"])
+                or details[0]["tokenCount"] != count
+            ):
+                return None
     if not (
         0 < prompt <= MAX_INPUT_RESERVATION
         and 0 < answer
@@ -148,11 +173,21 @@ def _safe_observation(status: int, body: bytes) -> dict | None:
         content["role"] != "model"
         or type(parts) is not list
         or len(parts) != 1
-        or not _shape(parts[0], {"text"})
+        or type(parts[0]) is not dict
+        or not {"text"} <= parts[0].keys() <= {"text", "thoughtSignature"}
         or type(parts[0]["text"]) is not str
         or not 0 < len(parts[0]["text"]) <= 1024
     ):
         return None
+    if "thoughtSignature" in parts[0]:
+        signature = parts[0]["thoughtSignature"]
+        if type(signature) is not str or not 1 <= len(signature) <= 8192:
+            return None
+        try:
+            if not 0 < len(base64.b64decode(signature, validate=True)) <= 4096:
+                return None
+        except ValueError:
+            return None
     # Validate text shape but never return, log or interpret it as semantics.
     return {
         "model": MODEL,
@@ -234,6 +269,8 @@ def _headers(response) -> int | None:
         }:
             if name in values:
                 raise ValueError()
+            if name == "transfer-encoding" and value != value.strip():
+                raise ValueError()
             values[name] = value.strip().lower()
     if (
         re.fullmatch(
@@ -249,6 +286,10 @@ def _headers(response) -> int | None:
         values.get("transfer-encoding"),
         values.get("content-length"),
     )
+    if isinstance(response, http.client.HTTPResponse) and response.chunked != (
+        transfer is not None
+    ):
+        raise ValueError()
     if transfer is not None and (transfer != "chunked" or length is not None):
         raise ValueError()
     if transfer is None and length is None:
@@ -335,7 +376,8 @@ def execute(
         connection.auto_open = 0
         guard()
         connection.connect()
-        connection.sock.settimeout(min(12, guard()))
+        established_socket = connection.sock
+        established_socket.settimeout(min(12, guard()))
         # The irreversible local claim and all context gates precede key access.
         token = env.pop("GEMINI_KEY", None)
         if (
@@ -352,7 +394,7 @@ def execute(
             "Content-Length": str(len(REQUEST)),
             "Connection": "close",
         }
-        connection.sock.settimeout(min(12, guard()))
+        established_socket.settimeout(min(12, guard()))
         try:
             connection.request(
                 "POST",
@@ -364,7 +406,7 @@ def execute(
         finally:
             token = None
             headers.clear()
-        connection.sock.settimeout(min(12, guard()))
+        established_socket.settimeout(min(12, guard()))
         response = connection.getresponse()
         guard()
         if (
@@ -376,7 +418,12 @@ def execute(
         expected = _headers(response)
         raw = bytearray()
         while True:
-            connection.sock.settimeout(min(12, guard()))
+            if (
+                isinstance(response, http.client.HTTPResponse)
+                and response.isclosed()
+            ):
+                break
+            established_socket.settimeout(min(12, guard()))
             chunk = response.read1(min(8192, 16385 - len(raw)))
             guard()
             if type(chunk) is not bytes or len(raw) + len(chunk) > 16384:

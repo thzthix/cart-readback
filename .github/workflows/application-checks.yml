@@ -197,7 +197,8 @@ jobs:
             connection.set_debuglevel(0)
             connection.auto_open = 0
             connection.connect()
-            connection.sock.settimeout(remaining())
+            established_socket = connection.sock
+            established_socket.settimeout(remaining())
             token = os.environ.pop("GITHUB_TOKEN")
             headers = {"Authorization": "Bearer " + token,
                        "Accept": "application/vnd.github.raw+json",
@@ -208,13 +209,15 @@ jobs:
             finally:
                 token = None
                 headers.clear()
-            connection.sock.settimeout(remaining())
+            established_socket.settimeout(remaining())
             response = connection.getresponse()
             if response.status != 200:
                 raise ValueError()
             data = bytearray()
             while True:
-                connection.sock.settimeout(remaining())
+                if isinstance(response, http.client.HTTPResponse) and response.isclosed():
+                    break
+                established_socket.settimeout(remaining())
                 chunk = response.read1(min(8192, 65537 - len(data)))
                 if not chunk:
                     break
@@ -222,7 +225,7 @@ jobs:
                 if len(data) > 65536:
                     raise ValueError()
             remaining()
-            if hashlib.sha256(data).hexdigest() != "819065368eb4841526415455d9f83dc0afaf94d18d2d23cb450ba0a125e89667":
+            if hashlib.sha256(data).hexdigest() != "7fbd3f8c5375e32f342ce601f3d1ed23cc43f485df35ef40340b1613ea3164d1":
                 raise ValueError()
             path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "cartreadback-gemini-probe.py"
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -248,5 +251,5 @@ jobs:
         PROBE_REVIEWED_SHA: ${{ inputs.reviewed_sha }}
         PROBE_WINDOW_START: ${{ inputs.window_start }}
         PROBE_WINDOW_END: ${{ inputs.window_end }}
-        PROBE_SOURCE_SHA256: 819065368eb4841526415455d9f83dc0afaf94d18d2d23cb450ba0a125e89667
+        PROBE_SOURCE_SHA256: 7fbd3f8c5375e32f342ce601f3d1ed23cc43f485df35ef40340b1613ea3164d1
       run: python "$RUNNER_TEMP/cartreadback-gemini-probe.py"
