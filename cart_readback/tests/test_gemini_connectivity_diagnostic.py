@@ -8,13 +8,13 @@ import io
 import json
 import os
 import pathlib
+import re
 import signal
 import ssl
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
-
-import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PATH = ROOT / "cart_readback/scripts/gemini_connectivity_diagnostic.py"
@@ -22,6 +22,29 @@ SPEC = importlib.util.spec_from_file_location("diagnostic", PATH)
 probe = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(probe)
 NOW = 1700000100
+
+
+def workflow_parts():
+    """Extract only this reviewed literal block, without a YAML dependency."""
+    source = (ROOT / probe.WORKFLOW_PATH).read_text()
+    marker = "\n  gemini-connectivity:\n"
+    if source.count(marker) != 1:
+        raise AssertionError("unexpected diagnostic block")
+    job = source.split(marker)[1]
+    final_marker = "    - name: One guarded Google POST; no retry\n"
+    if job.count(final_marker) != 1:
+        raise AssertionError("unexpected final step")
+    fetch, final = job.split(final_marker)
+    begin, end = "        python - <<'PYTHON'\n", "        PYTHON\n"
+    if fetch.count(begin) != 1 or fetch.count(end) != 1:
+        raise AssertionError("unexpected fetch heredoc")
+    code = textwrap.dedent(fetch.split(begin)[1].split(end)[0])
+    pin = re.findall(
+        r"^        PROBE_SOURCE_SHA256: ([0-9a-f]{64})$", final, re.MULTILINE
+    )
+    if len(pin) != 1:
+        raise AssertionError("unexpected source pin")
+    return source, job, fetch, final, code, pin[0]
 
 
 class TrackedEnv(dict):
@@ -438,42 +461,26 @@ class ProbeTest(unittest.TestCase):
         self.assertIs(signal.getsignal(signal.SIGTERM), before)
 
     def test_workflow_only_final_step_has_google_key(self):
-        workflow = yaml.load(
-            (ROOT / probe.WORKFLOW_PATH).read_text(), Loader=yaml.BaseLoader
-        )
-        self.assertEqual(set(workflow["on"]), {"workflow_dispatch"})
-        self.assertEqual(workflow["permissions"], {"contents": "read"})
-        job = workflow["jobs"]["gemini-connectivity"]
-        self.assertEqual(job["timeout-minutes"], "2")
-        self.assertEqual(
-            job["concurrency"],
-            {
-                "group": "cartreadback-gemini-connectivity-one-shot",
-                "cancel-in-progress": "false",
-            },
-        )
-        self.assertEqual(len(job["steps"]), 2)
-        fetch, final = job["steps"]
-        self.assertNotIn("GEMINI_KEY", fetch["env"])
-        self.assertNotIn("GITHUB_TOKEN", final["env"])
-        self.assertEqual(
-            final["env"]["GEMINI_KEY"], "${{ secrets.GEMINI_KEY }}"
-        )
-        self.assertEqual(
-            final["env"]["PROBE_SOURCE_SHA256"],
-            hashlib.sha256(PATH.read_bytes()).hexdigest(),
-        )
-        self.assertNotIn("uses:", yaml.safe_dump(job))
+        source, job, fetch, final, code, pin = workflow_parts()
+        self.assertIn("\non:\n  workflow_dispatch:\n", source)
+        self.assertNotIn("\n  push:", source)
+        self.assertNotIn("\n  pull_request:", source)
+        self.assertIn("\npermissions:\n  contents: read\n", source)
+        self.assertIn("    timeout-minutes: 2\n", job)
         self.assertIn(
-            hashlib.sha256(PATH.read_bytes()).hexdigest(), fetch["run"]
+            "      group: cartreadback-gemini-connectivity-one-shot\n      cancel-in-progress: false\n",
+            job,
         )
+        self.assertEqual(job.count("    - name:"), 2)
+        self.assertNotIn("GEMINI_KEY", fetch)
+        self.assertNotIn("GITHUB_TOKEN", final)
+        self.assertIn("        GEMINI_KEY: ${{ secrets.GEMINI_KEY }}\n", final)
+        self.assertEqual(pin, hashlib.sha256(PATH.read_bytes()).hexdigest())
+        self.assertNotIn("uses:", job)
+        self.assertIn(pin, code)
 
     def test_pinned_fetch_good_and_fail_closed(self):
-        workflow = yaml.load(
-            (ROOT / probe.WORKFLOW_PATH).read_text(), Loader=yaml.BaseLoader
-        )
-        script = workflow["jobs"]["gemini-connectivity"]["steps"][0]["run"]
-        code = "\n".join(script.splitlines()[1:-1])
+        code = workflow_parts()[4]
         cases = [
             (200, PATH.read_bytes(), True),
             (302, b"redirect", False),
@@ -614,11 +621,7 @@ class ProbeTest(unittest.TestCase):
                 self.assertEqual(b"".join(conn.socket.sent).count(b"POST "), 1)
 
     def test_inline_fetch_with_native_close_and_chunked_response(self):
-        workflow = yaml.load(
-            (ROOT / probe.WORKFLOW_PATH).read_text(), Loader=yaml.BaseLoader
-        )
-        run = workflow["jobs"]["gemini-connectivity"]["steps"][0]["run"]
-        code = "\n".join(run.splitlines()[1:-1])
+        code = workflow_parts()[4]
         body = PATH.read_bytes()
         for chunked in (False, True):
             with (
