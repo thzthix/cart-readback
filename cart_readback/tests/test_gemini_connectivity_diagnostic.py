@@ -584,6 +584,32 @@ class UnselectedWireTest(unittest.TestCase):
         self.assertEqual(self.borrows, 0)
         self.assertEqual(self.connection.requests, [])
 
+    def test_explicit_factory_never_evaluates_truthiness_or_uses_default(self):
+        for raises in (False, True):
+            with self.subTest(raises=raises):
+                self.connection = FakeHTTPSConnection()
+                wire = self.make()
+                original = wire._factory
+
+                class ExplicitFactory:
+                    def __bool__(self):
+                        if raises:
+                            raise SystemExit("PRIVATE_SENTINEL")
+                        return False
+
+                    def __call__(self, *args, **kwargs):
+                        return original(*args, **kwargs)
+
+                wire._factory = ExplicitFactory()
+                with mock.patch(
+                    "cartreadback_app.gemini_http.unselected_gemini_connection",
+                    side_effect=AssertionError(
+                        "default must remain unselected"
+                    ),
+                ) as default:
+                    self.assertEqual(self.exchange(wire), (200, b"{}"))
+                    default.assert_not_called()
+
     def test_factory_borrow_read_and_close_failures_are_sanitized(self):
         for failure in ("factory", "borrow", "read", "close"):
             with self.subTest(failure=failure):

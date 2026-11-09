@@ -161,7 +161,9 @@ class UnselectedHTTPSWire:
                 return self._guard(**kwargs)
 
             transport = GeminiHTTPTransport(
-                self._factory or unselected_gemini_connection,
+                self._factory
+                if self._factory is not None
+                else unselected_gemini_connection,
                 self._borrow,
                 guard,
             )
