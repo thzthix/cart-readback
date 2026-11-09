@@ -436,8 +436,9 @@ def execute(
         observation = _safe_observation(200, bytes(raw))
         guard()
         if observation is None:
-            raise ValueError()
-        result = {"status": "RESPONSE_VALIDATED", **observation}
+            result = {"status": "HTTP_200_UNVALIDATED", "http_status": 200}
+        else:
+            result = {"status": "RESPONSE_VALIDATED", **observation}
     except BaseException:
         result = {"status": "UNKNOWN" if claimed else "NOT_RUN"}
     finally:

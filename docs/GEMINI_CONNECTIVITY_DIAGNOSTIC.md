@@ -80,11 +80,15 @@ Only enum status, exact validated model and bounded integer usage are emitted,
 after synchronous cleanup. Optional omitted thought usage is zero only when the
 reported total exactly agrees. Optional TEXT-only modality counts must match
 aggregates; a bounded valid-base64 thoughtSignature is discarded. Unreviewed
-fields fail closed. Text, responseId, headers, raw errors, project data
+fields do not obtain validated model/usage. A complete bounded, correctly framed
+HTTP 200 with unsupported schema emits only HTTP_200_UNVALIDATED/http_status 200,
+with no model, usage or text claim; it exits nonzero and is not inference success.
+Framing, truncation, timeout and cleanup failures remain UNKNOWN without that
+contact receipt. Text, responseId, headers, raw errors, project data
 and key are never printed. RESPONSE_VALIDATED means this response satisfied the
 local wire schema, not semantic quality, application integration, verified Free
-eligibility or actual zero charge. Non-200, malformed/wrong-model/late/ambiguous
-responses and interrupted or failed cleanup are UNKNOWN; no automatic retry.
+eligibility or actual zero charge. Non-200, late/ambiguous transport and interrupted or failed cleanup are UNKNOWN;
+unsupported schema receives only the non-success contact receipt above. No retry.
 A missing final receipt is never success and must be treated as UNKNOWN.
 
 The 20-second monotonic admission deadline cannot prove hard OS/DNS/socket or

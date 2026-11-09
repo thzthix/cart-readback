@@ -340,7 +340,9 @@ class ProbeTest(unittest.TestCase):
                 self.assertEqual(len(self.connection.requests), 1)
                 self.assertEqual(self.connection.closed, 1)
 
-    def test_malformed_model_usage_and_response_bounds_fail(self):
+    def test_unvalidated_schema_is_contact_only_and_oversize_stays_unknown(
+        self,
+    ):
         bodies = [
             b"PRIVATE_ERROR",
             b"x" * 16385,
@@ -363,7 +365,12 @@ class ProbeTest(unittest.TestCase):
             ):
                 self.env = self.environment(directory)
                 self.connection = FakeHTTPSConnection(body)
-                self.assertEqual(self.run_probe(), {"status": "UNKNOWN"})
+                expected = (
+                    {"status": "UNKNOWN"}
+                    if len(body) > 16384
+                    else {"status": "HTTP_200_UNVALIDATED", "http_status": 200}
+                )
+                self.assertEqual(self.run_probe(), expected)
 
     def test_cancel_read_cleanup_and_factory_failures_are_sanitized(self):
         for failure in ("read", "close", "factory"):
