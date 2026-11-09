@@ -253,12 +253,16 @@ class ProbeTest(unittest.TestCase):
         self.assertEqual(
             len(list(pathlib.Path(self.directory.name).glob("*.claim"))), 1
         )
-        self.assertEqual(self.run_probe(), {"status": "NOT_RUN"})
+        self.assertEqual(
+            self.run_probe(), {"status": "NOT_RUN", "phase": "claim"}
+        )
         self.assertEqual(len(self.factories), 1)
 
     def test_all_context_mismatches_block_before_key_or_factory(self):
         mutations = [(k, "wrong") for k in probe.EXPECTED_CONTEXT]
         mutations += [
+            ("GITHUB_RUN_NUMBER", "2"),
+            ("GITHUB_RUN_ATTEMPT", "2"),
             ("GITHUB_SHA", "b" * 40),
             ("GITHUB_WORKFLOW_SHA", "b" * 40),
             ("PROBE_REVIEWED_SHA", "a;bad"),
@@ -272,7 +276,10 @@ class ProbeTest(unittest.TestCase):
             with self.subTest(key=key):
                 self.env = self.environment(self.directory.name)
                 self.env[key] = value
-                self.assertEqual(self.run_probe(), {"status": "NOT_RUN"})
+                self.assertEqual(
+                    self.run_probe(),
+                    {"status": "NOT_RUN", "phase": "preflight"},
+                )
                 self.assertEqual(self.env.borrowed, 0)
                 self.assertEqual(self.factories, [])
 
@@ -333,10 +340,14 @@ class ProbeTest(unittest.TestCase):
 
     def test_missing_or_malformed_key_burns_without_post(self):
         self.env["GEMINI_KEY"] = "invalid\nkey"
-        self.assertEqual(self.run_probe(), {"status": "UNKNOWN"})
+        self.assertEqual(
+            self.run_probe(), {"status": "UNKNOWN", "phase": "credential"}
+        )
         self.assertEqual(self.connection.requests, [])
         self.assertEqual(self.env.borrowed, 1)
-        self.assertEqual(self.run_probe(), {"status": "NOT_RUN"})
+        self.assertEqual(
+            self.run_probe(), {"status": "NOT_RUN", "phase": "claim"}
+        )
 
     def test_expiry_after_connect_prevents_borrow_and_post(self):
         now = [NOW]
@@ -347,7 +358,7 @@ class ProbeTest(unittest.TestCase):
             wall=lambda: now[0],
             monotonic=lambda: 100,
         )
-        self.assertEqual(result, {"status": "UNKNOWN"})
+        self.assertEqual(result, {"status": "UNKNOWN", "phase": "connect"})
         self.assertEqual(self.env.borrowed, 0)
         self.assertEqual(self.connection.requests, [])
 
@@ -359,7 +370,14 @@ class ProbeTest(unittest.TestCase):
             ):
                 self.env = self.environment(directory)
                 self.connection = FakeHTTPSConnection(b"PRIVATE_ERROR", status)
-                self.assertEqual(self.run_probe(), {"status": "UNKNOWN"})
+                self.assertEqual(
+                    self.run_probe(),
+                    {
+                        "status": "UNKNOWN",
+                        "phase": "headers",
+                        "http_status": status,
+                    },
+                )
                 self.assertEqual(len(self.connection.requests), 1)
                 self.assertEqual(self.connection.closed, 1)
 
@@ -389,9 +407,17 @@ class ProbeTest(unittest.TestCase):
                 self.env = self.environment(directory)
                 self.connection = FakeHTTPSConnection(body)
                 expected = (
-                    {"status": "UNKNOWN"}
+                    {
+                        "status": "UNKNOWN",
+                        "phase": "headers",
+                        "http_status": 200,
+                    }
                     if len(body) > 16384
-                    else {"status": "HTTP_200_UNVALIDATED", "http_status": 200}
+                    else {
+                        "status": "HTTP_200_UNVALIDATED",
+                        "phase": "body",
+                        "http_status": 200,
+                    }
                 )
                 self.assertEqual(self.run_probe(), expected)
 
@@ -417,7 +443,20 @@ class ProbeTest(unittest.TestCase):
                         wall=lambda: NOW,
                         monotonic=lambda: 100,
                     ),
-                    {"status": "UNKNOWN"},
+                    (
+                        {"status": "UNKNOWN", "phase": "connect"}
+                        if failure == "factory"
+                        else {
+                            "status": "UNKNOWN",
+                            "phase": "body",
+                            "http_status": 200,
+                            **(
+                                {"cleanup_failed": True}
+                                if failure == "close"
+                                else {}
+                            ),
+                        }
+                    ),
                 )
 
     def test_late_read_never_becomes_success(self):
@@ -428,7 +467,7 @@ class ProbeTest(unittest.TestCase):
             wall=lambda: NOW,
             monotonic=lambda: next(ticks),
         )
-        self.assertEqual(result, {"status": "UNKNOWN"})
+        self.assertEqual(result["status"], "UNKNOWN")
 
     def test_main_sanitizes_signal_and_restores_handler(self):
         before = signal.getsignal(signal.SIGTERM)
@@ -457,8 +496,95 @@ class ProbeTest(unittest.TestCase):
                 ),
             ):
                 self.assertEqual(probe.main(), 2)
-        self.assertEqual(json.loads(output.getvalue()), {"status": "UNKNOWN"})
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {"status": "UNKNOWN", "phase": "headers"},
+        )
         self.assertIs(signal.getsignal(signal.SIGTERM), before)
+
+    def test_failure_receipts_distinguish_safe_phases_and_cleanup(self):
+        def fail(*args, **kwargs):
+            raise SystemExit("PRIVATE_TEXT synthetic-only-key PRIVATE_ERROR")
+
+        for phase in (
+            "connect",
+            "credential",
+            "post-attempt",
+            "headers",
+            "body",
+            "cleanup",
+        ):
+            with (
+                self.subTest(phase=phase),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                self.env = self.environment(directory)
+                self.connection = FakeHTTPSConnection(
+                    json.dumps(envelope()).encode()
+                )
+                if phase == "connect":
+                    self.connection.connect = fail
+                elif phase == "credential":
+                    self.env["GEMINI_KEY"] = "PRIVATE_ERROR invalid key"
+                elif phase == "post-attempt":
+                    self.connection.request = fail
+                elif phase == "headers":
+                    self.connection.getresponse = fail
+                elif phase == "body":
+                    self.connection.failure = "read"
+                else:
+                    self.connection.failure = "close"
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    result = self.run_probe()
+                expected = {
+                    "status": "UNKNOWN",
+                    "phase": "body" if phase == "cleanup" else phase,
+                }
+                if phase in ("body", "cleanup"):
+                    expected["http_status"] = 200
+                if phase == "cleanup":
+                    expected["cleanup_failed"] = True
+                self.assertEqual(result, expected)
+                for private in (
+                    "PRIVATE_TEXT",
+                    "PRIVATE_ERROR",
+                    "synthetic-only-key",
+                ):
+                    self.assertNotIn(
+                        private, json.dumps(result) + output.getvalue()
+                    )
+                self.assertNotIn("model", result)
+                self.assertNotIn("input_tokens", result)
+
+    def test_only_exact_received_http_status_survives_failure(self):
+        for status in (True, 200.0, "200", 0, 999, 429):
+            with (
+                self.subTest(status=status),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                self.env = self.environment(directory)
+                self.connection = FakeHTTPSConnection(b"PRIVATE_ERROR", status)
+                expected = {"status": "UNKNOWN", "phase": "headers"}
+                if status == 429:
+                    expected["http_status"] = 429
+                self.assertEqual(self.run_probe(), expected)
+
+    def test_main_unavailable_fallback_is_sanitized(self):
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                probe,
+                "execute",
+                side_effect=SystemExit("PRIVATE_ERROR synthetic-only-key"),
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(probe.main(), 2)
+        self.assertEqual(
+            json.loads(output.getvalue()),
+            {"status": "UNKNOWN", "phase": "unavailable"},
+        )
 
     def test_workflow_only_final_step_has_google_key(self):
         source, job, fetch, final, code, pin = workflow_parts()

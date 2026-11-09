@@ -14,7 +14,42 @@ binding, current model/account eligibility, no paid fallback and zero-cost
 compute. Workflow inputs and public pricing do not establish those facts.
 Unknown means no agent dispatch.
 
-## Minimal operator path
+## Spent executed baseline and future-only observability
+
+The one authorized attempt is SPENT: [run 42617340271, attempt 1](https://github.com/thzthix/cart-readback/actions/runs/42617340271)
+executed commit `5783fb87199acc6de3f31291ff94dc2c80f626c5`. Source fetch succeeded;
+the probe returned UNKNOWN/exit 2 and the fixture job was skipped. The generic
+receipt cannot establish whether zero or one POST began, a response arrived, or
+cleanup failed after a valid response. This patch cannot reconstruct that past
+outcome or claim a successful connection.
+
+Failure receipts now retain only a fixed local phase: preflight, claim, connect,
+credential, post-attempt, headers, body, or unavailable for the outer fallback.
+A phase marks the local stage being attempted, not successful completion.
+In particular, post-attempt is set before the native request call and proves
+neither remote delivery nor acceptance. An already received exact integer HTTP
+status (100–599, never bool) survives later validation/cleanup failure; it does not
+establish a complete body, model or usage. Cleanup faults force UNKNOWN and drop
+model/usage while preserving the prior phase/status with cleanup_failed:true.
+No exception text, body/header data, credential facts, lengths or hashes are
+added to failure output. These fields improve FUTURE diagnostics only.
+
+The first-run/attempt/window/no-reset guards and exact request remain unchanged.
+There is no retry, rerun, new window/key/model/branch/workflow, counter reset or
+renewed provider authority. Do not dispatch this spent route again. The operator
+path below is historical, not permission to try the observability patch live.
+
+## Separate unresolved compatibility concern
+
+The [Gemini 3.5 migration guide](https://ai.google.dev/gemini-api/docs/generate-content/whats-new-gemini-3.5)
+says to remove candidate_count for 3.x, while the generic reference still lists
+candidateCount with default 1. The executed canonical body included candidateCount
+1. This documentation conflict is NOT proof that 1 was rejected or the cause of
+the UNKNOWN outcome. The observability patch deliberately leaves that payload
+unchanged. Any later compatibility change requires a separate explicit decision;
+it would not authorize a second request on this spent route.
+
+## Historical operator path; route is spent
 
 1. Review the exact final draft commit and source hashes. In the existing
    registered **Offline application checks** manual workflow, select branch

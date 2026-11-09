@@ -304,6 +304,16 @@ def _headers(response) -> int | None:
     return int(length)
 
 
+def _failure_receipt(status, phase, http_status=None, *, cleanup_failed=False):
+    """Keep only fixed local phase and an already received integer status."""
+    result = {"status": status, "phase": phase}
+    if http_status is not None:
+        result["http_status"] = http_status
+    if cleanup_failed:
+        result["cleanup_failed"] = True
+    return result
+
+
 def execute(
     env: dict,
     *,
@@ -320,6 +330,7 @@ def execute(
     claimed = False
     token = None
     headers = {}
+    phase, http_status = "preflight", None
     result = {"status": "NOT_RUN"}
     try:
         remaining = validate_context(env, wall())
@@ -336,6 +347,7 @@ def execute(
         path = directory / (
             "cartreadback-gemini-" + env["GITHUB_RUN_ID"] + ".claim"
         )
+        phase = "claim"
         claim = os.open(
             path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
         )
@@ -356,6 +368,7 @@ def execute(
             return remaining
 
         guard()
+        phase = "connect"
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.load_default_certs(ssl.Purpose.SERVER_AUTH)
         context.keylog_filename = None
@@ -379,6 +392,7 @@ def execute(
         established_socket = connection.sock
         established_socket.settimeout(min(12, guard()))
         # The irreversible local claim and all context gates precede key access.
+        phase = "credential"
         token = env.pop("GEMINI_KEY", None)
         if (
             type(token) is not str
@@ -395,6 +409,8 @@ def execute(
             "Connection": "close",
         }
         established_socket.settimeout(min(12, guard()))
+        # This is a local call boundary, not proof of network delivery.
+        phase = "post-attempt"
         try:
             connection.request(
                 "POST",
@@ -406,8 +422,12 @@ def execute(
         finally:
             token = None
             headers.clear()
+        phase = "headers"
         established_socket.settimeout(min(12, guard()))
         response = connection.getresponse()
+        received_status = response.status
+        if type(received_status) is int and 100 <= received_status <= 599:
+            http_status = received_status
         guard()
         if (
             type(response.status) is not int
@@ -416,6 +436,7 @@ def execute(
         ):
             raise ValueError()
         expected = _headers(response)
+        phase = "body"
         raw = bytearray()
         while True:
             if (
@@ -436,11 +457,15 @@ def execute(
         observation = _safe_observation(200, bytes(raw))
         guard()
         if observation is None:
-            result = {"status": "HTTP_200_UNVALIDATED", "http_status": 200}
+            result = _failure_receipt(
+                "HTTP_200_UNVALIDATED", phase, http_status
+            )
         else:
             result = {"status": "RESPONSE_VALIDATED", **observation}
     except BaseException:
-        result = {"status": "UNKNOWN" if claimed else "NOT_RUN"}
+        result = _failure_receipt(
+            "UNKNOWN" if claimed else "NOT_RUN", phase, http_status
+        )
     finally:
         token = None
         headers.clear()
@@ -449,12 +474,16 @@ def execute(
                 try:
                     resource.close()
                 except BaseException:
-                    result = {"status": "UNKNOWN"}
+                    result = _failure_receipt(
+                        "UNKNOWN", phase, http_status, cleanup_failed=True
+                    )
         if claim is not None:
             try:
                 os.close(claim)
             except BaseException:
-                result = {"status": "UNKNOWN"}
+                result = _failure_receipt(
+                    "UNKNOWN", phase, http_status, cleanup_failed=True
+                )
     return result
 
 
@@ -469,7 +498,7 @@ def main() -> int:
     try:
         result = execute(os.environ)
     except BaseException:
-        result = {"status": "UNKNOWN"}
+        result = _failure_receipt("UNKNOWN", "unavailable")
     finally:
         signal.signal(signal.SIGTERM, previous)
     print(json.dumps(result, sort_keys=True), flush=True)
