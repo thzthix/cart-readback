@@ -5,7 +5,7 @@ The trusted operator authorizes the sole manual dispatch and its compute use.
 Tests use invented context, synthetic keys and fake HTTPS connections only.
 """
 
-import base64
+import decimal
 import enum
 import hashlib
 import http.client
@@ -25,7 +25,7 @@ ENDPOINT = "https://generativelanguage.googleapis.com" + REQUEST_PATH
 WORKFLOW_PATH = ".github/workflows/application-checks.yml"
 MAX_INPUT_RESERVATION = 1048576
 MAX_OUTPUT_RESERVATION = 2048
-MAX_OUTPUT_TOKENS = 32
+MAX_OUTPUT_TOKENS = 256
 TIMEOUT_SECONDS = 20
 # Local HTTP-header safety bound, not a provider key-format specification.
 MAX_CREDENTIAL_BYTES = 4096
@@ -100,132 +100,289 @@ def _reject_constant(value: str) -> None:
     raise ValueError("nonfinite")
 
 
-def _safe_observation(status: int, body: bytes) -> dict | None:
+class _ResponseReason(enum.Enum):
+    JSON_INVALID = "JSON_INVALID"
+    RESPONSE_SHAPE = "RESPONSE_SHAPE"
+    MODEL_VERSION_UNSUPPORTED = "MODEL_VERSION_UNSUPPORTED"
+    USAGE_MISSING = "USAGE_MISSING"
+    USAGE_INVALID = "USAGE_INVALID"
+    USAGE_INCONSISTENT = "USAGE_INCONSISTENT"
+    OUTPUT_LIMIT_EXCEEDED = "OUTPUT_LIMIT_EXCEEDED"
+    NO_GENERATED_TOKENS = "NO_GENERATED_TOKENS"
+    CANDIDATE_SHAPE = "CANDIDATE_SHAPE"
+    FINISH_REASON_UNSUPPORTED = "FINISH_REASON_UNSUPPORTED"
+    CONTENT_SHAPE = "CONTENT_SHAPE"
+    UNREQUESTED_PART = "UNREQUESTED_PART"
+    TEXT_MISSING = "TEXT_MISSING"
+
+
+# Fixed public protobuf FinishReason values; unknown values are never echoed.
+_FINISH_REASONS = {
+    0: "FINISH_REASON_UNSPECIFIED",
+    1: "STOP",
+    2: "MAX_TOKENS",
+    3: "SAFETY",
+    4: "RECITATION",
+    5: "OTHER",
+    6: "LANGUAGE",
+    7: "BLOCKLIST",
+    8: "PROHIBITED_CONTENT",
+    9: "SPII",
+    10: "MALFORMED_FUNCTION_CALL",
+    11: "IMAGE_SAFETY",
+    12: "UNEXPECTED_TOOL_CALL",
+    13: "TOO_MANY_TOOL_CALLS",
+    14: "IMAGE_PROHIBITED_CONTENT",
+    15: "IMAGE_OTHER",
+    16: "NO_IMAGE",
+    17: "IMAGE_RECITATION",
+}
+_MAX_OBSERVED_OUTPUT = 65536
+
+
+def _count(value, maximum):
+    """Read bounded ProtoJSON integer forms; an unset scalar defaults to zero."""
+    if value is None:
+        return 0
+    if type(value) is int:
+        return value if 0 <= value <= maximum else None
+    if type(value) not in (str, float, decimal.Decimal):
+        return None
+    if type(value) is str and (
+        len(value) > 64
+        or re.fullmatch(
+            r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?", value
+        )
+        is None
+    ):
+        return None
+    try:
+        number = decimal.Decimal(str(value))
+        if (
+            not number.is_finite()
+            or not 0 <= number <= maximum
+            or number != number.to_integral_value()
+        ):
+            return None
+        return int(number)
+    except decimal.InvalidOperation:
+        return None
+
+
+def _model_version(value):
+    if type(value) is str and re.fullmatch(
+        re.escape(MODEL) + r"(?:-[0-9]{1,8}(?:[.-][0-9]{1,8}){0,3})?", value
+    ):
+        return value
+    return None
+
+
+def _finish_reason(value):
+    if value is None:
+        return _FINISH_REASONS[0]
+    if type(value) is int:
+        return _FINISH_REASONS.get(value)
+    if type(value) is str and value in _FINISH_REASONS.values():
+        return value
+    return None
+
+
+def _has_text(content):
+    if content is None:
+        return False
+    if type(content) is not dict:
+        return None
+    parts = content.get("parts")
+    if parts is None:
+        return False
+    if type(parts) is not list or len(parts) > 32:
+        return None
+    uncertain = False
+    for part in parts:
+        if type(part) is not dict:
+            uncertain = True
+            continue
+        text, thought = part.get("text"), part.get("thought")
+        if type(text) is str and text and (thought is None or thought is False):
+            return True
+        if (text is not None and type(text) is not str) or (
+            thought is not None and type(thought) is not bool
+        ):
+            uncertain = True
+    return None if uncertain else False
+
+
+def _details_match(value, count, maximum):
+    if value is None or value == []:
+        return True
+    if type(value) is not list or len(value) > 16:
+        return False
+    total = 0
+    for item in value:
+        if type(item) is not dict or item.get("modality") != "TEXT":
+            return False
+        amount = _count(item.get("tokenCount"), maximum)
+        if amount is None:
+            return False
+        total += amount
+    return total == count
+
+
+def _inspect_response(status, body):
+    """Separate bounded reported facts from the stricter generation admission."""
+    facts = {}
+
+    def reject(reason):
+        return None, reason, facts
+
     if type(status) is not int or status != 200:
-        return None
+        return reject(_ResponseReason.RESPONSE_SHAPE)
     if type(body) is not bytes or not 0 < len(body) <= 16384:
-        return None
+        return reject(_ResponseReason.JSON_INVALID)
     try:
         data = json.loads(
             body.decode("utf-8"),
             object_pairs_hook=_unique_pairs,
             parse_constant=_reject_constant,
+            parse_float=decimal.Decimal,
         )
-    except (ValueError, UnicodeError, RecursionError):
-        return None
-    required = {"modelVersion", "usageMetadata", "candidates"}
-    if type(data) is not dict or not required <= data.keys():
-        return None
-    if not data.keys() <= required | {"responseId"}:
-        return None
-    if "responseId" in data and (
-        type(data["responseId"]) is not str
-        or re.fullmatch(r"[A-Za-z0-9._~+/-]{1,256}={0,2}", data["responseId"])
-        is None
-    ):
-        return None
-    version = data["modelVersion"]
-    # Same stable family only; unknown naming schemes remain unvalidated.
-    if (
-        type(version) is not str
-        or re.fullmatch(
-            re.escape(MODEL) + r"(?:-[0-9]{1,8}(?:[.-][0-9]{1,8}){0,3})?",
-            version,
-        )
-        is None
-    ):
-        return None
-    usage, candidates = data["usageMetadata"], data["candidates"]
-    required_usage = {
-        "promptTokenCount",
-        "candidatesTokenCount",
-        "totalTokenCount",
-    }
-    allowed_usage = required_usage | {
-        "thoughtsTokenCount",
-        "promptTokensDetails",
-        "candidatesTokensDetails",
-    }
-    if (
-        type(usage) is not dict
-        or not required_usage <= usage.keys()
-        or not usage.keys() <= allowed_usage
-    ):
-        return None
-    prompt, answer, total = (
-        usage[k]
-        for k in ("promptTokenCount", "candidatesTokenCount", "totalTokenCount")
+    except (ValueError, UnicodeError, RecursionError, decimal.InvalidOperation):
+        return reject(_ResponseReason.JSON_INVALID)
+    if type(data) is not dict:
+        return reject(_ResponseReason.RESPONSE_SHAPE)
+
+    version = _model_version(data.get("modelVersion"))
+    if version is not None:
+        facts["model_version"] = version
+    else:
+        facts["model_category"] = "UNSUPPORTED"
+    usage = data.get("usageMetadata")
+    counts = {}
+    fields = (
+        ("promptTokenCount", "input_tokens", MAX_INPUT_RESERVATION),
+        ("candidatesTokenCount", "answer_tokens", _MAX_OBSERVED_OUTPUT),
+        ("thoughtsTokenCount", "thought_tokens", _MAX_OBSERVED_OUTPUT),
+        (
+            "totalTokenCount",
+            "total_tokens",
+            MAX_INPUT_RESERVATION + _MAX_OBSERVED_OUTPUT,
+        ),
     )
-    thoughts = usage.get("thoughtsTokenCount", 0)
-    if not all(_integer(v) for v in (prompt, answer, thoughts, total)):
-        return None
-    for field, count in (
-        ("promptTokensDetails", prompt),
-        ("candidatesTokensDetails", answer),
-    ):
-        if field in usage:
-            details = usage[field]
-            if (
-                type(details) is not list
-                or len(details) != 1
-                or not _shape(details[0], {"modality", "tokenCount"})
-            ):
-                return None
-            if (
-                details[0]["modality"] != "TEXT"
-                or not _integer(details[0]["tokenCount"])
-                or details[0]["tokenCount"] != count
-            ):
-                return None
-    if not (
-        0 < prompt <= MAX_INPUT_RESERVATION
-        and 0 < answer
-        and answer + thoughts <= MAX_OUTPUT_TOKENS
-        and total == prompt + answer + thoughts
-    ):
-        return None
-    if type(candidates) is not list or len(candidates) != 1:
-        return None
-    candidate = candidates[0]
-    if not _shape(candidate, {"content", "finishReason", "index"}):
-        return None
+    if type(usage) is dict:
+        counts = {
+            name: _count(usage.get(field), limit)
+            for field, name, limit in fields
+        }
+        facts["usage"] = {
+            name: value for name, value in counts.items() if value is not None
+        }
+    candidates = data.get("candidates")
+    candidate = (
+        candidates[0]
+        if type(candidates) is list
+        and len(candidates) == 1
+        and type(candidates[0]) is dict
+        else None
+    )
+    finish = None
+    has_text = None
+    if candidate is not None:
+        finish = _finish_reason(candidate.get("finishReason"))
+        if finish is not None:
+            facts["finish_reason"] = finish
+        else:
+            facts["finish_category"] = "UNSUPPORTED"
+        has_text = _has_text(candidate.get("content"))
+        if type(has_text) is bool:
+            facts["has_text"] = has_text
+    elif candidates is None or candidates == []:
+        facts["has_text"] = False
+        facts["finish_category"] = "NO_CANDIDATE"
+
+    if version is None:
+        return reject(_ResponseReason.MODEL_VERSION_UNSUPPORTED)
+    if type(usage) is not dict:
+        return reject(_ResponseReason.USAGE_MISSING)
+    if any(value is None for value in counts.values()):
+        return reject(_ResponseReason.USAGE_INVALID)
+    prompt, answer, thoughts, total = (
+        counts[name]
+        for name in (
+            "input_tokens",
+            "answer_tokens",
+            "thought_tokens",
+            "total_tokens",
+        )
+    )
+    cached = _count(usage.get("cachedContentTokenCount"), MAX_INPUT_RESERVATION)
+    tools = _count(usage.get("toolUsePromptTokenCount"), MAX_INPUT_RESERVATION)
     if (
-        type(candidate["index"]) is not int
-        or candidate["index"] != 0
-        or type(candidate["finishReason"]) is not str
-        or candidate["finishReason"] not in {"STOP", "MAX_TOKENS"}
-        or not _shape(candidate["content"], {"role", "parts"})
+        prompt <= 0
+        or total != prompt + answer + thoughts
+        or cached is None
+        or cached > prompt
+        or tools != 0
+        or not _details_match(
+            usage.get("promptTokensDetails"), prompt, MAX_INPUT_RESERVATION
+        )
+        or not _details_match(
+            usage.get("candidatesTokensDetails"), answer, _MAX_OBSERVED_OUTPUT
+        )
     ):
-        return None
-    content = candidate["content"]
-    parts = content["parts"]
-    if (
-        content["role"] != "model"
-        or type(parts) is not list
-        or len(parts) != 1
-        or type(parts[0]) is not dict
-        or not {"text"} <= parts[0].keys() <= {"text", "thoughtSignature"}
-        or type(parts[0]["text"]) is not str
-        or not 0 < len(parts[0]["text"]) <= 1024
+        return reject(_ResponseReason.USAGE_INCONSISTENT)
+    if answer + thoughts > MAX_OUTPUT_TOKENS:
+        return reject(_ResponseReason.OUTPUT_LIMIT_EXCEEDED)
+    if answer + thoughts == 0:
+        return reject(_ResponseReason.NO_GENERATED_TOKENS)
+    if candidate is None or _count(candidate.get("index"), 0) != 0:
+        return reject(_ResponseReason.CANDIDATE_SHAPE)
+    if finish not in {"STOP", "MAX_TOKENS"}:
+        return reject(_ResponseReason.FINISH_REASON_UNSUPPORTED)
+    content = candidate.get("content")
+    if content is None:
+        content = {}
+    if type(content) is not dict or content.get("role") not in (
+        None,
+        "",
+        "model",
     ):
-        return None
-    if "thoughtSignature" in parts[0]:
-        signature = parts[0]["thoughtSignature"]
-        if type(signature) is not str or not 1 <= len(signature) <= 8192:
-            return None
-        try:
-            if not 0 < len(base64.b64decode(signature, validate=True)) <= 4096:
-                return None
-        except ValueError:
-            return None
-    # Validate text shape but never return, log or interpret it as semantics.
-    return {
+        return reject(_ResponseReason.CONTENT_SHAPE)
+    parts = content.get("parts")
+    if parts is None:
+        parts = []
+    if type(parts) is not list or len(parts) > 32:
+        return reject(_ResponseReason.CONTENT_SHAPE)
+    for part in parts:
+        if type(part) is not dict:
+            return reject(_ResponseReason.CONTENT_SHAPE)
+        if not part.keys() <= {"text", "thought", "thoughtSignature"}:
+            return reject(_ResponseReason.UNREQUESTED_PART)
+        if (
+            part.get("text") is not None
+            and type(part["text"]) is not str
+            or part.get("thought") is not None
+            and type(part["thought"]) is not bool
+            or part.get("thoughtSignature") is not None
+            and type(part["thoughtSignature"]) is not str
+        ):
+            return reject(_ResponseReason.CONTENT_SHAPE)
+    if finish == "STOP" and (answer <= 0 or has_text is not True):
+        return reject(_ResponseReason.TEXT_MISSING)
+    observation = {
         "model": version,
         "input_tokens": prompt,
         "output_tokens": answer + thoughts,
         "total_tokens": total,
-        "finish_reason": candidate["finishReason"],
+        "answer_tokens": answer,
+        "thought_tokens": thoughts,
+        "finish_reason": finish,
+        "has_text": has_text is True,
     }
+    return observation, None, facts
+
+
+def _safe_observation(status, body):
+    return _inspect_response(status, body)[0]
 
 
 REPOSITORY = "thzthix/cart-readback"
@@ -239,7 +396,7 @@ EXPECTED_CONTEXT = {
     "GITHUB_EVENT_NAME": "workflow_dispatch",
     "GITHUB_REF": REF,
     "GITHUB_WORKFLOW_REF": REPOSITORY + "/" + WORKFLOW_PATH + "@" + REF,
-    "GITHUB_RUN_NUMBER": "4",
+    "GITHUB_RUN_NUMBER": "5",
     "GITHUB_RUN_ATTEMPT": "1",
     "GITHUB_SERVER_URL": "https://github.com",
     "GITHUB_API_URL": "https://api.github.com",
@@ -367,6 +524,8 @@ def execute(
     headers = {}
     phase, http_status = "preflight", None
     reason = None
+    response_reason = None
+    observed_facts = {}
     result = {"status": "NOT_RUN"}
     try:
         remaining = validate_context(env, wall())
@@ -505,7 +664,9 @@ def execute(
             raw.extend(chunk)
         if expected is not None and len(raw) != expected:
             raise ValueError()
-        observation = _safe_observation(200, bytes(raw))
+        observation, response_reason, observed_facts = _inspect_response(
+            200, bytes(raw)
+        )
         guard()
         if observation is None:
             result = _failure_receipt(
@@ -562,6 +723,13 @@ def execute(
                     cleanup_failed=True,
                     reason=reason,
                 )
+    if type(response_reason) is _ResponseReason:
+        result["response_reason"] = response_reason.value
+    if observed_facts and result["status"] in {
+        "UNKNOWN",
+        "HTTP_200_UNVALIDATED",
+    }:
+        result["observed"] = observed_facts
     return result
 
 

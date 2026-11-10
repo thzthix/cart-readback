@@ -82,6 +82,20 @@ def envelope():
     }
 
 
+def observed_envelope():
+    return {
+        "model_version": probe.MODEL,
+        "usage": {
+            "input_tokens": 12,
+            "answer_tokens": 2,
+            "thought_tokens": 1,
+            "total_tokens": 15,
+        },
+        "finish_reason": "STOP",
+        "has_text": True,
+    }
+
+
 class FakeHTTPSConnection:
     def __init__(self, body=b"{}", status=200):
         self.body = body
@@ -230,6 +244,9 @@ class ProbeTest(unittest.TestCase):
                 "output_tokens": 3,
                 "total_tokens": 15,
                 "finish_reason": "STOP",
+                "answer_tokens": 2,
+                "thought_tokens": 1,
+                "has_text": True,
             },
         )
         self.assertNotIn("PRIVATE_TEXT", json.dumps(result) + output.getvalue())
@@ -266,7 +283,8 @@ class ProbeTest(unittest.TestCase):
             ("GITHUB_RUN_NUMBER", "1"),
             ("GITHUB_RUN_NUMBER", "2"),
             ("GITHUB_RUN_NUMBER", "3"),
-            ("GITHUB_RUN_NUMBER", "5"),
+            ("GITHUB_RUN_NUMBER", "4"),
+            ("GITHUB_RUN_NUMBER", "6"),
             ("GITHUB_RUN_ATTEMPT", "2"),
             ("GITHUB_SHA", "b" * 40),
             ("GITHUB_WORKFLOW_SHA", "b" * 40),
@@ -288,23 +306,24 @@ class ProbeTest(unittest.TestCase):
                 self.assertEqual(self.env.borrowed, 0)
                 self.assertEqual(self.factories, [])
 
-    def test_only_new_run_four_attempt_one_has_a_local_slot(self):
-        self.assertEqual(probe.EXPECTED_CONTEXT["GITHUB_RUN_NUMBER"], "4")
+    def test_only_new_run_five_attempt_one_has_a_local_slot(self):
+        self.assertEqual(probe.EXPECTED_CONTEXT["GITHUB_RUN_NUMBER"], "5")
         self.assertEqual(probe.EXPECTED_CONTEXT["GITHUB_RUN_ATTEMPT"], "1")
         job = workflow_parts()[1]
         self.assertIn(
-            "&& github.run_number == 4 && github.run_attempt == 1 }}",
+            "&& github.run_number == 5 && github.run_attempt == 1 }}",
             job,
         )
         self.assertNotIn("github.run_number == 1", job)
         self.assertNotIn("github.run_number == 2", job)
         self.assertNotIn("github.run_number == 3", job)
+        self.assertNotIn("github.run_number == 4", job)
         config = json.loads(probe.REQUEST)["generationConfig"]
         self.assertEqual(
             config,
             {
                 "temperature": 0,
-                "maxOutputTokens": 32,
+                "maxOutputTokens": 256,
                 "thinkingConfig": {"thinkingLevel": "MINIMAL"},
             },
         )
@@ -318,10 +337,12 @@ class ProbeTest(unittest.TestCase):
             ("2", "2"),
             ("3", "1"),
             ("3", "2"),
+            ("4", "1"),
             ("4", "2"),
-            ("5", "1"),
-            ("04", "1"),
-            ("4", "01"),
+            ("5", "2"),
+            ("6", "1"),
+            ("05", "1"),
+            ("5", "01"),
         ):
             with (
                 self.subTest(number=number, attempt=attempt),
@@ -352,14 +373,15 @@ class ProbeTest(unittest.TestCase):
                     ).exists()
                 )
 
-    def test_fourth_slot_is_new_and_never_replays_old_or_later_attempts(self):
+    def test_fifth_slot_is_new_and_never_replays_old_or_later_attempts(self):
         for number, attempt in (
             ("1", "1"),
             ("2", "1"),
             ("3", "1"),
             ("4", "1"),
-            ("4", "2"),
             ("5", "1"),
+            ("5", "2"),
+            ("6", "1"),
         ):
             with (
                 self.subTest(number=number, attempt=attempt),
@@ -376,7 +398,7 @@ class ProbeTest(unittest.TestCase):
                     wall=lambda: NOW,
                     monotonic=lambda: 100,
                 )
-                admitted = (number, attempt) == ("4", "1")
+                admitted = (number, attempt) == ("5", "1")
                 self.assertEqual(
                     result["status"],
                     "RESPONSE_VALIDATED" if admitted else "NOT_RUN",
@@ -396,7 +418,7 @@ class ProbeTest(unittest.TestCase):
         )
         self.assertEqual(
             probe.REQUEST_BODY_SHA256,
-            "b62b017f7a20d56124b384ba406bcc2f31b9da13b7ae240bb3fa7f765bf03fca",
+            "ab74cc1cff7aa2621c18d24d3827a9ecb465edafe698648a63593101a91eadb9",
         )
         self.assertEqual(probe.METHOD, "POST")
         self.assertEqual(
@@ -405,7 +427,7 @@ class ProbeTest(unittest.TestCase):
         )
         self.assertEqual(
             probe.REQUEST_SHA256,
-            "24431960c0b8e1b692586d5ecbd7a27e48b94e45105f0a77251d019d7b44f66a",
+            "25afd36c58e4b28fb79900ec7b5c42bf39c5d893120c03be57b61355b81d84a9",
         )
         self.assertEqual(probe.MAX_INPUT_RESERVATION, 1048576)
         self.assertEqual(probe.MAX_OUTPUT_RESERVATION, 2048)
@@ -681,40 +703,49 @@ class ProbeTest(unittest.TestCase):
         self,
     ):
         bodies = [
-            b"PRIVATE_ERROR",
-            b"x" * 16385,
-            b'{"a":1,"a":2}',
-            b'{"a":NaN}',
+            (b"PRIVATE_ERROR", "JSON_INVALID", {}),
+            (b"x" * 16385, None, {}),
+            (b'{"a":1,"a":2}', "JSON_INVALID", {}),
+            (b'{"a":NaN}', "JSON_INVALID", {}),
         ]
-        for mutate in (
-            lambda x: x.update(modelVersion="wrong"),
-            lambda x: x["usageMetadata"].update(totalTokenCount=1),
-            lambda x: x["usageMetadata"].update(promptTokenCount=True),
-            lambda x: x["usageMetadata"].update(thoughtsTokenCount=40),
+        for field, value, reason in (
+            ("modelVersion", "wrong", "MODEL_VERSION_UNSUPPORTED"),
+            ("totalTokenCount", 1, "USAGE_INCONSISTENT"),
+            ("promptTokenCount", True, "USAGE_INVALID"),
+            ("thoughtsTokenCount", 40, "USAGE_INCONSISTENT"),
         ):
-            value = envelope()
-            mutate(value)
-            bodies.append(json.dumps(value).encode())
-        for body in bodies:
-            with (
-                self.subTest(size=len(body)),
-                tempfile.TemporaryDirectory() as directory,
-            ):
+            data, facts = envelope(), observed_envelope()
+            if field == "modelVersion":
+                data[field] = value
+                del facts["model_version"]
+                facts["model_category"] = "UNSUPPORTED"
+            else:
+                data["usageMetadata"][field] = value
+                name = {
+                    "totalTokenCount": "total_tokens",
+                    "promptTokenCount": "input_tokens",
+                    "thoughtsTokenCount": "thought_tokens",
+                }[field]
+                if type(value) is bool:
+                    del facts["usage"][name]
+                else:
+                    facts["usage"][name] = value
+            bodies.append((json.dumps(data).encode(), reason, facts))
+        for body, reason, facts in bodies:
+            with self.subTest(), tempfile.TemporaryDirectory() as directory:
                 self.env = self.environment(directory)
                 self.connection = FakeHTTPSConnection(body)
-                expected = (
-                    {
-                        "status": "UNKNOWN",
-                        "phase": "headers",
-                        "http_status": 200,
-                    }
-                    if len(body) > 16384
-                    else {
-                        "status": "HTTP_200_UNVALIDATED",
-                        "phase": "body",
-                        "http_status": 200,
-                    }
-                )
+                expected = {
+                    "status": "UNKNOWN"
+                    if reason is None
+                    else "HTTP_200_UNVALIDATED",
+                    "phase": "headers" if reason is None else "body",
+                    "http_status": 200,
+                }
+                if reason is not None:
+                    expected["response_reason"] = reason
+                if facts:
+                    expected["observed"] = facts
                 self.assertEqual(self.run_probe(), expected)
 
     def test_cancel_read_cleanup_and_factory_failures_are_sanitized(self):
@@ -747,7 +778,15 @@ class ProbeTest(unittest.TestCase):
                             "phase": "body",
                             "http_status": 200,
                             **(
-                                {"cleanup_failed": True}
+                                {
+                                    "cleanup_failed": True,
+                                    "response_reason": "MODEL_VERSION_UNSUPPORTED",
+                                    "observed": {
+                                        "model_category": "UNSUPPORTED",
+                                        "has_text": False,
+                                        "finish_category": "NO_CANDIDATE",
+                                    },
+                                }
                                 if failure == "close"
                                 else {}
                             ),
@@ -843,6 +882,7 @@ class ProbeTest(unittest.TestCase):
                     expected["http_status"] = 200
                 if phase == "cleanup":
                     expected["cleanup_failed"] = True
+                    expected["observed"] = observed_envelope()
                 self.assertEqual(result, expected)
                 for private in (
                     "PRIVATE_TEXT",
@@ -967,9 +1007,8 @@ class ProbeTest(unittest.TestCase):
                 tokenCount=True
             ),
             lambda v: v["candidates"][0]["content"]["parts"][0].update(
-                thoughtSignature="invalid!"
+                thoughtSignature=True
             ),
-            lambda v: v["usageMetadata"].update(unreviewed=0),
         ]
         for mutate in mutations:
             with self.subTest(mutate=mutate):
@@ -1032,6 +1071,9 @@ class ProbeTest(unittest.TestCase):
                 "output_tokens": 3,
                 "total_tokens": 15,
                 "finish_reason": "MAX_TOKENS",
+                "answer_tokens": 2,
+                "thought_tokens": 1,
+                "has_text": True,
             },
         )
         self.assertEqual(len(self.connection.requests), 1)
@@ -1041,6 +1083,152 @@ class ProbeTest(unittest.TestCase):
             self.assertIsNone(
                 probe._safe_observation(200, json.dumps(value).encode())
             )
+
+    def response_fixture(self, value):
+        with tempfile.TemporaryDirectory() as directory:
+            self.env = self.environment(directory)
+            self.connection = FakeHTTPSConnection(json.dumps(value).encode())
+            result = self.run_probe()
+            self.assertEqual(len(self.connection.requests), 1)
+            self.assertNotIn("PRIVATE", json.dumps(result))
+            return result
+
+    def test_protojson_defaults_and_documented_optional_metadata(self):
+        values = []
+        value = envelope()
+        del value["candidates"][0]["index"]
+        values.append(value)
+        value = envelope()
+        value["candidates"][0]["avgLogprobs"] = -0.1
+        values.append(value)
+        value = envelope()
+        value["promptFeedback"] = {"safetyRatings": []}
+        values.append(value)
+        value = envelope()
+        value["usageMetadata"]["cachedContentTokenCount"] = 0
+        value["usageMetadata"]["toolUsePromptTokenCount"] = 0
+        values.append(value)
+        value = envelope()
+        value["candidates"][0]["content"]["parts"].append(
+            {"text": "PRIVATE_MORE"}
+        )
+        values.append(value)
+        value = envelope()
+        value["responseId"] = "PRIVATE opaque id / \u2603"
+        value["candidates"][0]["content"]["parts"][0].update(
+            thought=False, thoughtSignature="PRIVATE opaque signature"
+        )
+        values.append(value)
+        value = envelope()
+        del value["usageMetadata"]["thoughtsTokenCount"]
+        value["usageMetadata"]["totalTokenCount"] = 14
+        del value["candidates"][0]["content"]["role"]
+        values.append(value)
+        value = envelope()
+        value["usageMetadata"].update(
+            promptTokenCount="1.2e1",
+            candidatesTokenCount="2",
+            thoughtsTokenCount=1.0,
+        )
+        value["candidates"][0]["index"] = None
+        value["candidates"][0]["finishReason"] = 1
+        values.append(value)
+        for value in values:
+            with self.subTest():
+                result = self.response_fixture(value)
+                self.assertEqual(result["status"], "RESPONSE_VALIDATED")
+                self.assertEqual(result["model"], probe.MODEL)
+                self.assertIs(result["has_text"], True)
+
+    def test_thought_only_token_limit_preserves_default_zero_counts(self):
+        value = envelope()
+        value["usageMetadata"] = {
+            "promptTokenCount": 12,
+            "thoughtsTokenCount": 32,
+            "totalTokenCount": 44,
+            "candidatesTokensDetails": [],
+        }
+        value["candidates"] = [{"finishReason": "MAX_TOKENS"}]
+        result = self.response_fixture(value)
+        self.assertEqual(result["status"], "GENERATION_PARTIAL_VALIDATED")
+        self.assertEqual(result["answer_tokens"], 0)
+        self.assertEqual(result["thought_tokens"], 32)
+        self.assertIs(result["has_text"], False)
+        value["candidates"][0]["content"] = {
+            "parts": [{"thought": True, "text": "PRIVATE_THOUGHT"}]
+        }
+        self.assertEqual(
+            self.response_fixture(value)["status"],
+            "GENERATION_PARTIAL_VALIDATED",
+        )
+        value["candidates"][0]["finishReason"] = "STOP"
+        result = self.response_fixture(value)
+        self.assertEqual(result["status"], "HTTP_200_UNVALIDATED")
+        self.assertEqual(result["response_reason"], "TEXT_MISSING")
+        self.assertEqual(result["observed"]["usage"]["answer_tokens"], 0)
+        self.assertIs(result["observed"]["has_text"], False)
+        value["candidates"] = [{"finishReason": "MAX_TOKENS"}]
+        value["usageMetadata"] = {"promptTokenCount": 12, "totalTokenCount": 12}
+        result = self.response_fixture(value)
+        self.assertEqual(result["response_reason"], "NO_GENERATED_TOKENS")
+        self.assertNotIn("model", result)
+
+    def test_parse_failure_facts_are_independent_bounded_and_sanitized(self):
+        value = envelope()
+        value["usageMetadata"].update(
+            candidatesTokenCount=1, thoughtsTokenCount=300, totalTokenCount=313
+        )
+        result = self.response_fixture(value)
+        self.assertEqual(result["response_reason"], "OUTPUT_LIMIT_EXCEEDED")
+        self.assertEqual(result["observed"]["usage"]["thought_tokens"], 300)
+        self.assertNotIn("model", result)
+        value = envelope()
+        value["modelVersion"] = "gemini-3.8-flash"
+        result = self.response_fixture(value)
+        self.assertEqual(result["response_reason"], "MODEL_VERSION_UNSUPPORTED")
+        self.assertNotIn("gemini-3.8-flash", json.dumps(result))
+        self.assertEqual(
+            result["observed"]["usage"], observed_envelope()["usage"]
+        )
+        value = envelope()
+        value["usageMetadata"]["promptTokenCount"] = "PRIVATE_NUMBER"
+        result = self.response_fixture(value)
+        self.assertEqual(result["response_reason"], "USAGE_INVALID")
+        self.assertNotIn("input_tokens", result["observed"]["usage"])
+        value = envelope()
+        value["candidates"][0]["finishReason"] = "PRIVATE_FINISH"
+        result = self.response_fixture(value)
+        self.assertEqual(result["response_reason"], "FINISH_REASON_UNSUPPORTED")
+        self.assertEqual(result["observed"]["finish_category"], "UNSUPPORTED")
+        value = envelope()
+        value["candidates"][0]["content"]["parts"] = [
+            {"functionCall": {"name": "PRIVATE_TOOL"}}
+        ]
+        result = self.response_fixture(value)
+        self.assertEqual(result["response_reason"], "UNREQUESTED_PART")
+        self.assertIs(result["observed"]["has_text"], False)
+        value = envelope()
+        value["usageMetadata"]["thoughtsTokenCount"] = 65537
+        result = self.response_fixture(value)
+        self.assertEqual(result["response_reason"], "USAGE_INVALID")
+        self.assertNotIn("thought_tokens", result["observed"]["usage"])
+
+    def test_protojson_integer_forms_reject_unbounded_or_noninteger_data(self):
+        for value in (None, 0, "0", 0.0):
+            self.assertEqual(probe._count(value, 100), 0)
+        for value in (12, "12", 12.0, "1.2e1"):
+            self.assertEqual(probe._count(value, 100), 12)
+        for value in (
+            True,
+            -1,
+            1.5,
+            "1.5",
+            "1e9999",
+            float("inf"),
+            "PRIVATE_VALUE",
+            "1" * 65,
+        ):
+            self.assertIsNone(probe._count(value, 100))
 
     def test_native_stdlib_close_keepalive_chunked_and_partial_framing(self):
         body = json.dumps(envelope()).encode()

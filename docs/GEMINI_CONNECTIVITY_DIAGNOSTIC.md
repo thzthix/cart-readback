@@ -1,4 +1,102 @@
-# One-call synthetic generation check, not app or PayPal integration
+# One-call generation check with contract-compatible safe receipts
+
+This local run-5 proposal is based on preserved commit
+`8e330d42e5780d819183f6d6d6fbd5a763f998b7`. No publication, workflow dispatch,
+real key read or provider request occurred during this preparation.
+
+## Run 4 remains unresolved and spent
+
+Run [42784377677](https://github.com/thzthix/cart-readback/actions/runs/42784377677)
+at 8e330d42 returned HTTP 200 / body / HTTP_200_UNVALIDATED and exit 2.
+Its raw body, version, usage and finish reason were not retained. It does not
+prove successful generation, and its exact rejection cause cannot be recovered.
+Do not replay that run or infer its private response from public fixtures.
+
+## Concrete parser contract corrections
+
+The [ProtoJSON contract](https://protobuf.dev/programming-guides/json/) permits
+omitted default-zero scalar values and empty repeated values; integer fields can
+use the documented numeric/string forms. Google's [official proto](https://github.com/googleapis/googleapis/blob/master/google/ai/generativelanguage/v1beta/generative_service.proto)
+defines candidate index and usage counts as int32 fields. The
+[GenerateContent contract](https://ai.google.dev/api/generate-content) includes
+optional response/candidate metadata and repeated Content Parts.
+
+Public fake regressions prove that the old consumer rejected omitted index 0,
+documented avgLogprobs and promptFeedback, cachedContentTokenCount 0, repeated
+text Parts, and MAX_TOKENS with omitted zero answer count/no visible text.
+These are concrete consumer defects, not proof of run 4's actual cause.
+
+The new consumer defaults unset index/count scalars to zero only within present
+objects, accepts bounded exact integer ProtoJSON representations, and ignores
+unused bounded response/candidate/usage metadata. Empty/default arrays are
+accepted. Opaque response identifiers and thought-signature strings are discarded
+without an invented alphabet or cryptographic-validation claim. Text Parts can
+carry the documented thought flag/signature metadata. One candidate is still
+required; function/media/code Parts and other unrequested payloads are rejected.
+Model-family admission, strict response framing and the 16 KiB body limit remain.
+
+STOP is fully validated only with visible non-thought text and consistent,
+positive generation usage. MAX_TOKENS may validate as a partial response without
+visible text when the admitted model and consistent positive answer/thought usage
+prove reported generation work. Partial receipts remain nonzero/no-retry. A
+zero-output response is not promoted to generation success. Answer and thought
+counts plus has_text are explicit. has_text means usable visible/non-thought
+text, never the text itself.
+
+## Safe facts survive a later admission failure
+
+HTTP_200_UNVALIDATED now has one fixed response_reason, such as JSON_INVALID,
+MODEL_VERSION_UNSUPPORTED, USAGE_INVALID, USAGE_INCONSISTENT,
+OUTPUT_LIMIT_EXCEEDED, CANDIDATE_SHAPE, FINISH_REASON_UNSUPPORTED,
+UNREQUESTED_PART or TEXT_MISSING. No exception/provider message is emitted.
+
+An observed object retains only independently sanitized facts: an admitted public
+3.5-flash-lite version pattern, bounded interpreted usage counters, a known
+protobuf finish enum/category, and has_text when determinable. These observations
+are not a generation-admission verdict or an invoice. Missing zero count fields
+inside present usage metadata are interpreted as protobuf defaults, not claimed
+to have been explicitly returned. Each counter is bounded independently; an
+inconsistent total or over-request output can remain a fact while admission
+fails. Output-counter observations are capped at the published 65,536-token
+model ceiling; full admission still enforces this request's 256-token limit.
+Unknown model strings are never echoed or accepted: only a fixed unsupported
+category is retained. Cleanup failure preserves safe observed facts while forcing
+UNKNOWN and dropping accepted-model/usage claims. Non-200 behavior is unchanged:
+fail before body admission and retain numeric HTTP status only.
+
+No raw generated/thought text, response ID, signature, arbitrary model/reason
+string, headers, provider/error body, credential-related value/hash/length/prefix
+or project identifier is printed. No general or configurable telemetry is added.
+
+## One proposed next request, not a replay
+
+Only run 5 / attempt 1 is proposed. Runs 1–4, run 6 and later attempts are denied.
+The prior metadata success and all failures remain preserved. Recheck exact head
+and complete history before a separately released dispatch. Every result,
+including failure, UNKNOWN, cancellation or skipping, consumes this slot; never
+retry, reset history or renew a consumed window.
+
+The model/provider/key/47-character public phrase stay unchanged. The sole POST
+uses temperature 0, MINIMAL thinking, candidateCount omitted and a modest
+maxOutputTokens increase from 32 to 256. A tiny thinking budget can legitimately
+leave no visible MAX_TOKENS text; that is possible, not proven for run 4.
+No tools, user data, protected prompts, evaluation assets, count/list/metadata
+call, model/provider fallback or second request is added.
+
+Body SHA-256: `ab74cc1cff7aa2621c18d24d3827a9ecb465edafe698648a63593101a91eadb9`.
+The fixed method/path/body-hash ASCII descriptor has SHA-256 `25afd36c58e4b28fb79900ec7b5c42bf39c5d893120c03be57b61355b81d84a9`.
+Public Standard pricing remains USD 0.30/million input and USD 2.50/million output
+including thinking, with a listed Free tier. At that paid reference, 256 output
+tokens correspond to USD 0.00064 before any input charge; this is not a billing
+cap, fresh account-Free verification or zero-invoice guarantee. No new paid-only
+model/access condition, paid fallback, permission or billing change is introduced.
+Current account/billing facts are not inferred from the metadata or HTTP 200.
+
+Opaque-key handling, TLS, source/context/owner identity, claim, deadlines,
+600-second window bound and single native POST/no-retry transport are unchanged.
+The following sections preserve earlier proposals and evidence as history, not
+instructions to reactivate their spent slots.
+
 
 The owner continued after the successful model-metadata authentication check.
 This run-4 candidate is based on current reviewed commit

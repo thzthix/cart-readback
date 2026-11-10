@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Manual mode; any run consumes the separately approved run-4 slot
+        description: Manual mode; any run consumes the separately approved run-5 slot
         type: choice
         options:
         - offline-fixture
@@ -19,7 +19,7 @@ on:
         description: Absolute UTC epoch seconds; maximum 600-second window
         type: string
       window_end:
-        description: Absolute UTC expiry; never renewable for the run-4 slot
+        description: Absolute UTC expiry; never renewable for the run-5 slot
         type: string
 
 permissions:
@@ -124,7 +124,7 @@ jobs:
         run: git diff --exit-code
 
   gemini-connectivity:
-    if: ${{ inputs.mode == 'gemini-connectivity' && github.repository_id == '1443556432' && github.repository_owner_id == '95135403' && github.actor_id == '95135403' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/feat/64-disabled-connectivity-diagnostic' && github.run_number == 4 && github.run_attempt == 1 }}
+    if: ${{ inputs.mode == 'gemini-connectivity' && github.repository_id == '1443556432' && github.repository_owner_id == '95135403' && github.actor_id == '95135403' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/feat/64-disabled-connectivity-diagnostic' && github.run_number == 5 && github.run_attempt == 1 }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     concurrency:
@@ -162,7 +162,7 @@ jobs:
                 "GITHUB_EVENT_NAME": "workflow_dispatch",
                 "GITHUB_REF": "refs/heads/feat/64-disabled-connectivity-diagnostic",
                 "GITHUB_WORKFLOW_REF": "thzthix/cart-readback/.github/workflows/application-checks.yml@refs/heads/feat/64-disabled-connectivity-diagnostic",
-                "GITHUB_RUN_NUMBER": "4", "GITHUB_RUN_ATTEMPT": "1",
+                "GITHUB_RUN_NUMBER": "5", "GITHUB_RUN_ATTEMPT": "1",
                 "GITHUB_SERVER_URL": "https://github.com",
                 "GITHUB_API_URL": "https://api.github.com",
                 "PROBE_MODE": "gemini-connectivity",
@@ -225,7 +225,7 @@ jobs:
                 if len(data) > 65536:
                     raise ValueError()
             remaining()
-            if hashlib.sha256(data).hexdigest() != "63f70d552803e668ca01da01915fd2112d9020af477c9b6be6f07463cba3d790":
+            if hashlib.sha256(data).hexdigest() != "10e9d6be966fa89113433921efacecd9b8bffd9ef70df0400a4d613682c734d0":
                 raise ValueError()
             path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "cartreadback-gemini-probe.py"
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -251,5 +251,5 @@ jobs:
         PROBE_REVIEWED_SHA: ${{ inputs.reviewed_sha }}
         PROBE_WINDOW_START: ${{ inputs.window_start }}
         PROBE_WINDOW_END: ${{ inputs.window_end }}
-        PROBE_SOURCE_SHA256: 63f70d552803e668ca01da01915fd2112d9020af477c9b6be6f07463cba3d790
+        PROBE_SOURCE_SHA256: 10e9d6be966fa89113433921efacecd9b8bffd9ef70df0400a4d613682c734d0
       run: python "$RUNNER_TEMP/cartreadback-gemini-probe.py"
