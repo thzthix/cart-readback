@@ -1,4 +1,84 @@
-# One-call model-metadata check, not inference
+# One-call synthetic generation check, not app or PayPal integration
+
+The owner continued after the successful model-metadata authentication check.
+This run-4 candidate is based on current reviewed commit
+`2992e61a17ba1e82d741f72c422d4563d0d02f6f`. It is local and inactive pending
+independent review and parent release. No real credential, provider request,
+workflow dispatch or protected prompt/evaluation material was accessed here.
+
+## Fixed generation request
+
+One POST only to
+`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent`.
+The sole public text is `Synthetic connectivity diagnostic. Reply READY.`
+The exact 202-byte canonical JSON body sets temperature 0, maxOutputTokens 32,
+and thinkingLevel MINIMAL, with candidateCount omitted. No user data, tools,
+files, caching, grounding, count/list call, second metadata GET, alternative
+model/provider or retry is added. Existing GEMINI_KEY remains step-only and is
+sent only in the existing x-goog-api-key header.
+
+Body SHA-256: `b62b017f7a20d56124b384ba406bcc2f31b9da13b7ae240bb3fa7f765bf03fca`.
+The method + space + path + newline + body-hash ASCII descriptor has SHA-256
+`24431960c0b8e1b692586d5ecbd7a27e48b94e45105f0a77251d019d7b44f66a`.
+The source pin binds that fixed method/path/body and all admission checks.
+
+## Actual response version, bounded usage and partial completion
+
+The [GenerateContentResponse reference](https://ai.google.dev/api/generate-content)
+defines modelVersion as the version used to generate the response. It is not
+required to echo the requested alias. The local acceptance policy admits the
+fixed gemini-3.5-flash-lite family name or a bounded numeric stable revision
+suffix (numeric groups of at most 8 digits separated by dots/hyphens, at most
+4 groups). This is a local conservative policy, not Google's universal naming
+contract. Preview/experimental tags, other SKUs/families and unknown formats stay
+unvalidated; no fallback request is made. A validated receipt reports the actual
+accepted version, not a substituted alias.
+
+RESPONSE_VALIDATED requires bounded HTTP 200 framing, the existing strict
+single-candidate/text shape, exact integer usage consistency and answer plus
+thinking usage at most 32, with finish_reason STOP. Text and response identifiers
+are omitted. A matching fully validated response with finish_reason MAX_TOKENS
+instead emits GENERATION_PARTIAL_VALIDATED with the same bounded model/usage
+fields and fixed finish reason. It exits nonzero to distinguish incomplete
+output, but is a validated partial generation, not an authentication failure.
+No retry is permitted. Empty/unsupported candidate schema stays
+HTTP_200_UNVALIDATED without model/usage claims; it does not establish a bad key.
+These are wire/usage checks, not proof of semantic quality or app integration.
+
+## Cost facts and one new slot
+
+The current [public pricing page](https://ai.google.dev/gemini-api/docs/pricing)
+still lists Gemini 3.5 Flash-Lite Standard Free-tier input/output as free of
+charge; its paid reference is USD 0.30 per million input tokens and USD 2.50 per
+million output tokens including thinking. The [model page](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite)
+labels it stable. No new paid-only condition was found. Account Free eligibility
+and an actual zero invoice were not freshly verified, and metadata success is
+not evidence of generation eligibility or billing. The request is fixed/tiny
+and asks for only 32 output tokens; no paid fallback or billing/permission change
+is authorized. Published prices are references, not a remotely enforced spending
+cap or an invoice. Input usage is known only if returned and validated.
+
+Fresh complete history contains exactly three runs for workflow 405198760.
+Run 3 [42781048877](https://github.com/thzthix/cart-readback/actions/runs/42781048877)
+succeeded at 2992e61a with the metadata-only receipt; preserve it without replay.
+Run 1 remains UNKNOWN with zero or one POST possible. Run 2 stopped before its
+native POST call. All three slots remain untouched and spent.
+
+The job, inline fetch and probe now admit only run 4 / attempt 1. Old slots,
+run 5 and later attempts are rejected. Recheck the exact branch head and complete
+history before any released dispatch. Any error, UNKNOWN, cancellation, timeout,
+skipping or offline-mode run consumes the slot. Stop after the result; never
+rerun, renew a consumed window, reset history or advance the fence automatically.
+Verified native TLS, strict framing/16 KiB body limit, disabled debug/key logging,
+opaque-key 4096-byte graphic-ASCII defense, fixed safe failure reasons,
+owner/repository/actor/revision/source binding, exclusive claim, at-most
+600-second window and one-request/no-retry behavior remain unchanged.
+
+## Preserved metadata check and earlier generation history
+
+The remaining sections are historical records, not instructions to replay the
+spent metadata or earlier generation routes.
+
 
 This local run-3 proposal responds to the owner's new request to recheck the
 re-saved GitHub Secret. It is based on reviewed commit
