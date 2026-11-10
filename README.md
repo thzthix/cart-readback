@@ -7,7 +7,34 @@ already has: language layout and an included cable. It preserves what the source
 supports, conflicts with, or does not state.
 
 > **Local fixture server, buyer review UI and offline evaluation tooling.
-> Genuine AI and PayPal sandbox are UNCONNECTED.**
+> The default buyer UI and payments remain fixture-only.**
+
+## Current integration status — November 10, 2026
+
+The private, opt-in Google path has verified [model authentication](https://github.com/thzthix/cart-readback/actions/runs/42781048877)
+and [a short real generation](https://github.com/thzthix/cart-readback/actions/runs/42789711469).
+These are not a working buyer checkout. The [third real application sample](https://github.com/thzthix/cart-readback/actions/runs/42806039011)
+received HTTP 200 with known provider usage, but rejected the proposal with
+`RULE_SPAN_QUOTE` and ended `APP_INCOMPLETE`. Its quotations were not repaired.
+[PR84](https://github.com/thzthix/cart-readback/pull/84) adds bounded source-span
+hints under `cartreadback-prompt-v3-span-hints`; their effect on actual model
+output is not yet verified. The fourth application sample has not run at this
+checkpoint. Earlier UNKNOWN and invalid outcomes remain separate history.
+
+Native viewer rendering/keyboard behavior and real PayPal Sandbox integration
+remain unverified. A local browser probe encountered connection failure and then
+a browser URL-policy refusal; no tunnel or alternate protocol bypass was used.
+The quickstart below runs fixtures, not the Google path. Real host execution
+requires separately reviewed host inputs and a private credential pipe; there is
+no main-branch manual-key launcher or one-command live viewer. See
+[GEMINI_SERVICE](docs/GEMINI_SERVICE.md) and
+[the same-lifetime viewer contract](docs/GEMINI_RESULT_VIEWER_V1.md).
+Do not put Secret values in chat, logs or repository files. No new developer
+account, public deployment, open-source publication or contest submission is
+established by these results.
+
+Older issue-specific implementation evidence below is historical unless stated
+otherwise; it does not replace the current status above.
 
 Start with the [project brief](PROJECT_BRIEF.md), [API contract](cart_readback/API_CONTRACT.md),
 [architecture](cart_readback/ARCHITECTURE_ADR.md) or [contributing guide](CONTRIBUTING.md).
@@ -61,8 +88,8 @@ the preserved small editorial buying desk and its evidence limits.
   No replacement payment or automatic capture retry clears uncertainty. A buyer
   cancellation return records intent only; it never voids or replaces an order.
 
-**All catalog data, proposals and payment responses are synthetic fixtures.
-No genuine model call, PayPal call or money movement occurs.** Analysis and
+**In the default fixture server, catalog data, proposals and payment responses
+are synthetic; no genuine model call, PayPal call or money movement occurs.** Analysis and
 payment provider modes are labelled separately. Injected fabricated PayPal wire
 responses are not fixture-model evidence or a connected checkout. Real adapter
 interfaces are disabled and have no live fallback. This is a local/demo server,
@@ -232,7 +259,12 @@ results, the versioned tooling/manifest migration and reviewed string-policy/
 report corrections. Dataset, gold and frozen prompt bytes remain unchanged;
 this is not a new quality experiment.
 
-## Manual application-check workflow
+## Historical offline application-check workflow setup
+
+This section records the original fixture-check setup, not the later controlled
+Gemini diagnostic or app-sample workflow. Do not copy its old draft/permission or
+no-Secret claims onto current workflow revisions or use it to replay a spent
+provider sample. Current real-run evidence is listed at the top.
 
 [`Offline application checks`](.github/workflows/application-checks.yml) prepares
 one Ubuntu 24.04 job for Python 3.11 and Node 22. It is **manual-only**, with no
@@ -369,7 +401,8 @@ invoice. Free mode reserves zero USD while consuming full call/token capacity. F
 UNKNOWN with no retry, refund or automatic renewal. Tests use only fabricated
 wires and synthetic keys; they do not establish real account eligibility,
 pricing, TLS/provider acceptance, paid usage, semantic quality or buyer benefit.
-No actual Gemini credential setup or provider call has been performed.
+No actual Gemini credential setup or provider call was performed in that
+original bridge implementation; current opt-in observations are listed above.
 
 ## Evidence and remaining gates
 
@@ -414,3 +447,4 @@ a separate opt-in, review-only loopback viewer for the original single approved
 Gemini analysis, held in the same Service lifetime. It does not enable ordinary
 UI-driven inference or checkout. Its local opener and provider action retain
 separate authorization; all development checks use fabricated wires only.
+
