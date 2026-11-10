@@ -1,12 +1,12 @@
 {
-  "prompt_version": "cartreadback-prompt-v2-wire",
+  "prompt_version": "cartreadback-prompt-v3-span-hints",
   "wire_schema_version": "cartreadback-wire-shape-v1",
   "local_schema_sha256": "7a49011e3042d3371bdea11aae201ff4a8d8a2fd5cda4fcd67b23bcf31c7fb57",
   "artifact_sha256": {
     "arm-A-system.txt": "0520aa08492b4545f77fbbc220d43f02a0b8e87f0addbbbc5e25062a5c0df0f4",
     "arm-B-system.txt": "15842a35103ef7e93626d46071be688a3ccd0fc9f56342057c269b9841023a20",
     "arm-C-system.txt": "e885ecf52c44917a6d4ccddee10aca0141f1523318ac612deb57b0a195585b8c",
-    "readback-user-template.txt": "3c82c1ef73c1caf306bf078d37a4e27f54153cdd6ce7ef0d99a38202aec137cc",
+    "readback-user-template.txt": "4a82528b7de52d02322b9cdc9fc1d0ea69dbf2e63fc0a7fe69b699e837c4ee43",
     "schema.json": "2084cff2a8fca9ed5f429cad14ee4be726823cd6f72b0138ab1276ed87caf74a"
   }
 }

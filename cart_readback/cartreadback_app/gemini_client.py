@@ -12,6 +12,7 @@ import re
 from dataclasses import asdict, dataclass
 from types import MappingProxyType
 
+from cartreadback_app.evidence_spans import evidence_span_hints
 from cartreadback_app.inference import proposal_rejection, rejection_rule
 from cartreadback_app.inference_config import load_bundle
 from cartreadback_app.provider_json import PARSER_VERSION, strict_provider_json
@@ -317,34 +318,47 @@ class GeminiClient:
             **inputs,
             "response_language": self.config.response_language,
         }
-        before, rest = self.bundle.user_template.split("{{request_json}}")
-        middle, after = rest.split("{{output_schema_json}}")
-        user = (
-            before
-            + canonical(request_input)
-            + middle
-            + self.bundle.wire_schema_json
-            + after
-        )
-        body = canonical(
-            {
-                "systemInstruction": {"parts": [{"text": self.bundle.system}]},
-                "contents": [{"role": "user", "parts": [{"text": user}]}],
-                "generationConfig": {
-                    "candidateCount": 1,
-                    "maxOutputTokens": MAX_OUTPUT_TOKENS,
-                    "responseMimeType": "application/json",
-                    "responseJsonSchema": json.loads(
-                        self.bundle.wire_schema_json
-                    ),
-                    "thinkingConfig": (
-                        {"thinkingBudget": 0}
-                        if self.config.model == MODEL
-                        else {"thinkingLevel": "MINIMAL"}
-                    ),
-                },
-            }
-        ).encode("utf-8")
+
+        def encode_request():
+            before, rest = self.bundle.user_template.split("{{request_json}}")
+            middle, after = rest.split("{{output_schema_json}}")
+            user = (
+                before
+                + canonical(request_input)
+                + middle
+                + self.bundle.wire_schema_json
+                + after
+            )
+            return canonical(
+                {
+                    "systemInstruction": {
+                        "parts": [{"text": self.bundle.system}]
+                    },
+                    "contents": [{"role": "user", "parts": [{"text": user}]}],
+                    "generationConfig": {
+                        "candidateCount": 1,
+                        "maxOutputTokens": MAX_OUTPUT_TOKENS,
+                        "responseMimeType": "application/json",
+                        "responseJsonSchema": json.loads(
+                            self.bundle.wire_schema_json
+                        ),
+                        "thinkingConfig": (
+                            {"thinkingBudget": 0}
+                            if self.config.model == MODEL
+                            else {"thinkingLevel": "MINIMAL"}
+                        ),
+                    },
+                }
+            ).encode("utf-8")
+
+        hints = evidence_span_hints(inputs["source"])
+        if hints is not None:
+            request_input["evidence_span_hints"] = hints
+        body = encode_request()
+        if len(body) > MAX_REQUEST_BYTES and hints is not None:
+            # Optional request data only; never a provider retry or output repair.
+            del request_input["evidence_span_hints"]
+            body = encode_request()
         if len(body) > MAX_REQUEST_BYTES:
             raise unavailable("MODEL_BUDGET_EXCEEDED")
         return PreparedGeminiRequest(

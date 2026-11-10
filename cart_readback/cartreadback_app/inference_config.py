@@ -13,7 +13,7 @@ ENDPOINT = "https://api.openai.com/v1/responses"
 MODEL = "gpt-6-luna"
 ADAPTER_VERSION = "responses-offline-wire-v3-budget-fence"
 MANIFEST_SHA256 = (
-    "5960e0e6e078e4defc5b00ad7afb73bc6dcd0a202811b6b11e9fa8e09ad4832b"
+    "f274051fa4c140256d90fe15fb0d35ecee415dab0a5c7e17908758499f032105"
 )
 LOCAL_SCHEMA_SHA256 = (
     "7a49011e3042d3371bdea11aae201ff4a8d8a2fd5cda4fcd67b23bcf31c7fb57"
@@ -79,7 +79,7 @@ class PromptBundle:
 
 
 def load_bundle() -> PromptBundle:
-    """Load only shipped v2 assets and verify frozen local schema unchanged."""
+    """Load only shipped manifest-bound assets and verify frozen local schema unchanged."""
     root = Path(__file__).resolve().parents[1] / "prompts"
     try:
         manifest_bytes = (root / "v2-wire/manifest.json").read_bytes()
