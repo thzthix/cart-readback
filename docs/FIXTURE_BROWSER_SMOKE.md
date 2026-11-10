@@ -1,6 +1,6 @@
 # Public fixture UI render smoke (#90)
 
-## Prepared, not executed
+## Scope and verification limits
 
 This separate manual-only workflow is a **render-only public synthetic fixture**.
 It does not open the authenticated Gemini Service viewer, reuse an analysis
@@ -142,3 +142,79 @@ Ruff executable with the repository config; no installation is required here.
 - [Stable WebDriver recommendation](https://www.w3.org/TR/2018/REC-webdriver1-20180605/)
 - [CI same-job server pattern](https://playwright.dev/docs/test-webserver) (no Playwright dependency)
 - [Pinned official upload-artifact commit](https://github.com/actions/upload-artifact/commit/330a01c490aca151604b8cf639adc76d48f6c5d4)
+
+## Private diagnostic candidate: finite failure stages
+
+This local-only observability proposal does not authorize publication or another
+hosted run. The prior failed hosted render's cause remains unknown; new source
+cannot reconstruct an unavailable old receipt or prove browser compatibility.
+
+Once the receipt directory exists, `diagnostics.version=1` records only fixed
+stage/scenario/status/category enums. `primary_failure` is the first failed
+non-cleanup stage; later cleanup failures cannot overwrite it. `cleanup` records
+separate outcomes for session, owned process group, profile, server shutdown,
+server close/join and temporary-directory cleanup. A cleanup-only failure leaves
+`primary_failure` null but has a failed cleanup entry and overall failed status.
+`last_stage` is merely the last entered stage, often cleanup, not the root cause.
+
+Stages distinguish setup, server setup/readiness, driver start/readiness,
+session creation/configuration, navigation, render readiness, measurement,
+PNG retrieval/validation and PNG write. Categories are a closed type mapping:
+`check_failed` (unknown checks), fixed internal `check_<code>` values such as
+`check_version`, `check_session`, `check_webdriver`, `check_png`, and `timeout`, `io_error`, `protocol_error`, `invalid_data`,
+`unexpected_exception`, `unexpected_base_exception`, or `cancelled`. They do
+not include exception text/args/type names, arbitrary W3C error strings, paths,
+URLs, session IDs or browser logs. No detailed provider or Chrome error is
+inferred from a broad category.
+
+All failures still propagate from `run()` after separately attempted cleanup;
+primary and cleanup facts survive in the receipt even if Python's propagating
+exception is replaced by a later cleanup exception. The CLI emits a fixed failure marker plus a bounded diagnostic summary
+and exits nonzero for ordinary errors, unexpected BaseException,
+KeyboardInterrupt and SystemExit; no raw traceback/message is emitted by it.
+Forced/uncertain process cleanup still prevents a successful receipt. A partial
+run may retain previously verified public PNGs while remaining failed overall.
+
+Preflight failures before `run()` or failure creating/writing the receipt itself
+cannot promise a durable diagnostic receipt. Hard OS cancellation and detached
+processes retain the earlier limitations. Stage reporting is not a guarantee of
+cleanup completion or a workaround for the original rendering failure.
+
+Local regression coverage retains all original 20 tests, with a precise
+session-ID/private-sentinel assertion replacing the overbroad prohibition of
+the word `session` (now a safe stage label). Additional injected tests cover
+primary plus multiple cleanup failures, one PNG before a later scenario fails,
+write/setup failures, hostile exception strings and safe cancellation exits.
+Only the two helper hashes change in the workflow; source pins, fetch/run
+guards, browser flags, HTTP routes/timeouts and render assertions are unchanged.
+
+Failed runs also emit one `PUBLIC_FIXTURE_FAILURE_SUMMARY` JSON line to job
+stdout so artifact availability is not required to read the safe diagnosis.
+Only allowlisted primary stage/category/scenario, failed cleanup-stage enums,
+a 0–4 saved-PNG count and `receipt_write` status are included. Missing primary
+failure is `unavailable`, not an invented cause. Receipt-write failure emits
+`receipt_write: failed` from the in-memory diagnostic state and remains nonzero.
+No raw receipt, version payload, exception, URL or session identifier is printed.
+
+
+Receipt publication is staged outside the fixed artifact upload paths: complete
+serialization/write/close precedes atomic replacement of `receipt.json`. A
+write or replacement failure triggers bounded invalidation of the final and
+staging paths, safe stdout `receipt_write: failed`, and nonzero completion.
+Failure to invalidate is separately `receipt_invalidation: failed`, without raw
+filesystem errors. Atomic operations can fail after taking effect, and deleting
+or overwriting can also fail; no absolute filesystem guarantee is asserted.
+
+Consequently a successful check receipt has `checks_status: passed`,
+`status: pending_job_conclusion`, and `job_conclusion_required: true`, never a
+standalone overall `passed`. Even a residual file after ambiguous replacement
+cannot certify the run. Read the receipt together with the matching workflow
+SHA, artifact/run metadata and actual successful job conclusion. Failed checks
+or cleanup remain failed, with `checks_status: not_confirmed`. Individual earlier
+PNG checks can still have passed in a partial run.
+
+Historical observation correction: the original failed hosted run reported one
+uploaded file and its compressed size. The ZIP content was not readable, so its
+filename and the number of saved PNGs were not verified. Actual pixels observed
+remain zero; saved PNG count is unknown, not proven zero. New injected unit-test
+PNG counts are separate synthetic test observations, not evidence about that run.
