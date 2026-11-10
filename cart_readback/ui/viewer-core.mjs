@@ -7,7 +7,7 @@ const exact = (v, keys) => v !== null && typeof v === 'object' && !Array.isArray
 const text = (v, max = 16000) => typeof v === 'string' && v.length > 0 && Array.from(v).length <= max;
 const fail = () => { throw new Error('Unsupported or inconsistent review data. No action is available.'); };
 const DIAGNOSTIC_STAGES = new Set(['preconnect', 'guard', 'connect', 'credential', 'request', 'status', 'body', 'cleanup', 'exchange', 'exchange-validation']);
-const DIAGNOSTIC_CATEGORIES = new Set(['MODEL_TIMEOUT', 'MODEL_UNAVAILABLE', 'GEMINI_CAPACITY_BLOCKED', 'GEMINI_RUN_BLOCKED', 'UNEXPECTED_FAILURE', 'MODEL_OUTCOME_UNKNOWN', 'MODEL_REFUSED', 'MODEL_INCOMPLETE', 'INVALID_PROPOSAL', 'STALE_SNAPSHOT']);
+const DIAGNOSTIC_CATEGORIES = new Set(['MODEL_TIMEOUT', 'MODEL_UNAVAILABLE', 'GEMINI_CAPACITY_BLOCKED', 'GEMINI_RUN_BLOCKED', 'UNEXPECTED_FAILURE', 'MODEL_OUTCOME_UNKNOWN', 'MODEL_REFUSED', 'MODEL_INCOMPLETE', 'INVALID_PROPOSAL', 'STALE_SNAPSHOT', 'RULE_CANDIDATE_INDEX', 'RULE_CONDITION_REFERENCE', 'RULE_CONTENT', 'RULE_COUNT', 'RULE_ENVELOPE_JSON', 'RULE_EVIDENCE_ARRAY', 'RULE_EVIDENCE_REQUIRED', 'RULE_EXPLANATION', 'RULE_MODEL_VERSION', 'RULE_ORDER', 'RULE_OUTPUT_JSON', 'RULE_PART', 'RULE_PARTS', 'RULE_PREPARED_REQUEST', 'RULE_RESPONSE_ID', 'RULE_RESULT_FIELDS', 'RULE_RESULT_STATUS', 'RULE_ROOT_FIELDS', 'RULE_SIGNATURE', 'RULE_SPAN_END', 'RULE_SPAN_FIELDS', 'RULE_SPAN_QUOTE', 'RULE_SPAN_QUOTE_FORMAT', 'RULE_SPAN_SOURCE', 'RULE_SPAN_START', 'RULE_UNCLASSIFIED']);
 function validateDiagnostic(checkout) {
   const d = checkout.analysis_diagnostic;
   if (checkout.state !== 'ANALYSIS_BLOCKED' || !exact(d, ['stage', 'category', 'http_status'])
