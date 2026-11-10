@@ -38,6 +38,10 @@ from cartreadback_app.gemini_capacity import (
     initialize_gemini_capacity,
     recover_gemini_capacity,
 )
+from cartreadback_app.gemini_http import (
+    gemini_failure_diagnostic,
+    safe_gemini_diagnostic,
+)
 from cartreadback_app.gemini_runtime import GeminiAnalysisRuntime
 from cartreadback_app.genuine_gemini import GenuineGeminiAdapter
 from cartreadback_app.genuine_responses import (
@@ -333,6 +337,9 @@ class Service:
                 }
             )
         )
+        diagnostic = safe_gemini_diagnostic(checkout.get("analysis_diagnostic"))
+        if diagnostic is not None:
+            public["analysis_diagnostic"] = diagnostic
         if checkout["model"].get("execution_mode") in (
             "genuine-context-capacity",
             "genuine-gemini-capacity",
@@ -1818,7 +1825,9 @@ class Service:
         except (AppError, ValueError, TypeError, KeyError):
             return False
 
-    def _block_context_checkout(self, connection, reservation, error_code):
+    def _block_context_checkout(
+        self, connection, reservation, error_code, diagnostic=None
+    ):
         row = connection.execute(
             "SELECT 1 FROM sessions WHERE sid = ?", (reservation["sid"],)
         ).fetchone()
@@ -1840,10 +1849,15 @@ class Service:
             confirmation_id=None,
             consent=None,
         )
+        safe = safe_gemini_diagnostic(diagnostic)
+        if safe is not None and reservation["strategy"] == "gemini-capacity-v1":
+            checkout["analysis_diagnostic"] = safe
         self._write_review(connection, session)
         self._save(connection, session, "context_analysis_blocked")
 
-    def _mark_context_unknown(self, connection, reservation, claim, error_code):
+    def _mark_context_unknown(
+        self, connection, reservation, claim, error_code, diagnostic=None
+    ):
         row = connection.execute(
             "SELECT * FROM analysis_operations WHERE operation_id = ?",
             (reservation["operation_id"],),
@@ -1862,7 +1876,9 @@ class Service:
             "UPDATE analysis_operations SET status = 'UNKNOWN', error_code = ?, observed_at = ? WHERE operation_id = ?",
             (error_code, self.clock().isoformat(), reservation["operation_id"]),
         )
-        self._block_context_checkout(connection, reservation, error_code)
+        self._block_context_checkout(
+            connection, reservation, error_code, diagnostic
+        )
 
     def _guard_gemini(self, reservation, adapter, prepared, claim, deadline):
         # This short transaction has committed and closed before the transport
@@ -1972,6 +1988,7 @@ class Service:
                             connection, reservation, claim, "STALE_SNAPSHOT"
                         )
                         return
+                diagnostic = None
                 try:
                     if strategy is _GEMINI:
 
@@ -1985,7 +2002,9 @@ class Service:
                         )
                     else:
                         exchange = adapter.exchange(prepared, claim, deadline)
-                except BaseException:
+                except BaseException as error:
+                    if strategy is _GEMINI:
+                        diagnostic = gemini_failure_diagnostic(error)
                     # This dedicated worker owns interruption as uncertainty,
                     # not cancellation. The synchronous exchange has exited its
                     # cleanup before this catch; never leak provider exceptions
@@ -2004,6 +2023,7 @@ class Service:
                         exchange,
                         time.monotonic() >= deadline.expires_at,
                         deadline.expires_at,
+                        diagnostic=diagnostic,
                     )
                     pending = connection.execute(
                         "SELECT status FROM analysis_operations WHERE operation_id = ?",
@@ -2061,6 +2081,7 @@ class Service:
         exchange,
         late=False,
         deadline_at=None,
+        diagnostic=None,
     ):
         strategy = _capacity_strategy(reservation["strategy"])
         row = connection.execute(
@@ -2091,7 +2112,11 @@ class Service:
         prior_unknown = row["status"] == "UNKNOWN"
         if exchange is None:
             self._mark_context_unknown(
-                connection, reservation, claim, "MODEL_OUTCOME_UNKNOWN"
+                connection,
+                reservation,
+                claim,
+                "MODEL_OUTCOME_UNKNOWN",
+                diagnostic,
             )
             return
         expected_kind = (
@@ -2156,17 +2181,31 @@ class Service:
                 claim.claim_token,
             ),
         )
+        if strategy is _GEMINI:
+            diagnostic = safe_gemini_diagnostic(
+                {
+                    "stage": "exchange-validation",
+                    "category": error_code or "STALE_SNAPSHOT",
+                    "http_status": 200,
+                }
+            )
         if prior_unknown or late or not fresh:
             self._block_context_checkout(
-                connection, reservation, error_code or "STALE_SNAPSHOT"
+                connection,
+                reservation,
+                error_code or "STALE_SNAPSHOT",
+                diagnostic,
             )
             return
         if error_code:
-            self._block_context_checkout(connection, reservation, error_code)
+            self._block_context_checkout(
+                connection, reservation, error_code, diagnostic
+            )
             return
         session = self._session(connection, reservation["sid"])
         checkout = session["checkout"]
         checkout.pop("analysis_error", None)
+        checkout.pop("analysis_diagnostic", None)
         checkout.update(state="REVIEW_REQUIRED", results=results)
         checkout["snapshot_hash"] = digest(
             {

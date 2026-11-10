@@ -28,6 +28,99 @@ _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 _KEY = re.compile(r"[!-~]{1,4096}")
 
 
+_DIAGNOSTIC_STAGES = frozenset(
+    {
+        "preconnect",
+        "guard",
+        "connect",
+        "credential",
+        "request",
+        "status",
+        "body",
+        "cleanup",
+        "exchange",
+        "exchange-validation",
+    }
+)
+_DIAGNOSTIC_CATEGORIES = frozenset(
+    {
+        "MODEL_TIMEOUT",
+        "MODEL_UNAVAILABLE",
+        "GEMINI_CAPACITY_BLOCKED",
+        "GEMINI_RUN_BLOCKED",
+        "UNEXPECTED_FAILURE",
+        "MODEL_OUTCOME_UNKNOWN",
+        "MODEL_REFUSED",
+        "MODEL_INCOMPLETE",
+        "INVALID_PROPOSAL",
+        "STALE_SNAPSHOT",
+    }
+)
+
+
+def safe_gemini_diagnostic(value):
+    """Rebuild fixed literals only; diagnostics never change accounting."""
+    if type(value) is not dict or set(value) != {
+        "stage",
+        "category",
+        "http_status",
+    }:
+        return None
+    stage, category, status = (
+        value["stage"],
+        value["category"],
+        value["http_status"],
+    )
+    if (
+        type(stage) is not str
+        or stage not in _DIAGNOSTIC_STAGES
+        or type(category) is not str
+        or category not in _DIAGNOSTIC_CATEGORIES
+        or not (status is None or type(status) is int and 100 <= status <= 599)
+    ):
+        return None
+    return {
+        "stage": next(item for item in _DIAGNOSTIC_STAGES if item == stage),
+        "category": next(
+            item for item in _DIAGNOSTIC_CATEGORIES if item == category
+        ),
+        "http_status": status,
+    }
+
+
+class GeminiTransportFailure(AppError):
+    """Fixed safe diagnostic, never provider text or proof of delivery."""
+
+    def __init__(self, stage, category, status=None):
+        """Retain only bounded known observation fields."""
+        super().__init__(
+            "MODEL_TIMEOUT"
+            if category == "MODEL_TIMEOUT"
+            else "MODEL_UNAVAILABLE",
+            "Gemini transport unavailable.",
+            503,
+        )
+        self.diagnostic = safe_gemini_diagnostic(
+            {"stage": stage, "category": category, "http_status": status}
+        )
+
+
+def gemini_failure_diagnostic(error):
+    """Project a transport failure or a generic pre-transport exchange failure."""
+    if type(error) is GeminiTransportFailure:
+        result = safe_gemini_diagnostic(error.diagnostic)
+        if result is not None:
+            return result
+    code = error.code if type(error) is AppError else None
+    return {
+        "stage": "exchange",
+        "category": code
+        if type(code) is str and code in _DIAGNOSTIC_CATEGORIES
+        else "UNEXPECTED_FAILURE",
+        "http_status": None,
+    }
+
+
 def _expected_length(response):
     """Validate bounded JSON framing without assuming an OpenAI request header."""
     raw = response.getheaders()
@@ -96,10 +189,11 @@ def _expected_length(response):
 class _DeadlineReader:
     """Refresh the host guard and remaining timeout before every bounded recv."""
 
-    def __init__(self, reader, before_read):
+    def __init__(self, reader, before_read, status_observer=None):
         self._reader = reader
         self._before_read = before_read
         self._pending = bytearray()
+        self._status_observer = status_observer
 
     def __getattr__(self, name):
         return getattr(self._reader, name)
@@ -136,7 +230,15 @@ class _DeadlineReader:
                 self._pending[:0] = chunk[newline + 1 :]
                 break
             raw.extend(chunk)
-        return bytes(raw)
+        value = bytes(raw)
+        if self._status_observer is not None:
+            observe, self._status_observer = self._status_observer, None
+            match = re.fullmatch(
+                rb"HTTP/1\.1 ([1-5][0-9]{2}) [\x20-\x7e]{0,1024}\r\n", value
+            )
+            if match is not None:
+                observe(int(match[1]))
+        return value
 
 
 def unselected_gemini_connection(host, port, *, timeout, context):
@@ -182,8 +284,11 @@ class GeminiHTTPTransport:
                 raise unavailable()
             self._used = True
         connection = response = established_socket = None
+        stage, http_status = "preconnect", None
 
         def check():
+            nonlocal stage
+            prior, stage = stage, "guard"
             deadline.remaining()
             # No secret or network effect may occur before the host rechecks.
             if (
@@ -192,12 +297,17 @@ class GeminiHTTPTransport:
             ):
                 raise unavailable()
             deadline.remaining()
+            stage = prior
 
         def read_timeout():
             check()
             if established_socket is None:
                 raise unavailable()
             established_socket.settimeout(deadline.read_timeout())
+
+        def observe_status(value):
+            nonlocal http_status
+            http_status = value
 
         try:
             check()
@@ -217,15 +327,17 @@ class GeminiHTTPTransport:
                 def __init__(self, *args, **kwargs):
                     super().__init__(*args, **kwargs)
                     self.fp._reader = _DeadlineReader(
-                        self.fp._reader, read_timeout
+                        self.fp._reader, read_timeout, observe_status
                     )
 
             connection.response_class = GuardedResponse
             connection.auto_open = 0
             check()
+            stage = "connect"
             connection.connect()
             established_socket = connection.sock
             read_timeout()
+            stage = "credential"
             token = self._borrow(deadline=deadline)
             headers = {}
             try:
@@ -241,6 +353,7 @@ class GeminiHTTPTransport:
                     "Connection": "close",
                 }
                 read_timeout()
+                stage = "request"
                 connection.request(
                     "POST",
                     ENDPOINT_PATHS[endpoint],
@@ -252,6 +365,7 @@ class GeminiHTTPTransport:
                 token = None
                 headers.clear()
             read_timeout()
+            stage = "status"
             response = connection.getresponse()
             check()
             if (
@@ -266,6 +380,7 @@ class GeminiHTTPTransport:
                 or response.version != 11
             ):
                 raise unavailable()
+            stage = "body"
             expected = _expected_length(response)
             raw = bytearray()
             while True:
@@ -295,9 +410,17 @@ class GeminiHTTPTransport:
                 or isinstance(error, AppError)
                 and error.code == "MODEL_TIMEOUT"
             )
-            raise unavailable(
-                "MODEL_TIMEOUT" if timeout else "MODEL_UNAVAILABLE"
-            ) from None
+            category = (
+                "MODEL_TIMEOUT"
+                if timeout
+                else (
+                    error.code
+                    if type(error) is AppError
+                    and error.code in _DIAGNOSTIC_CATEGORIES
+                    else "UNEXPECTED_FAILURE"
+                )
+            )
+            raise GeminiTransportFailure(stage, category, http_status) from None
         finally:
             # Keep connection lifetime synchronous, including cleanup after a
             # deadline. Closing cannot prove that remote billing was cancelled.
@@ -318,4 +441,6 @@ class GeminiHTTPTransport:
             if primary is None and interruption is not None:
                 raise interruption
             if primary is None and cleanup_fault:
-                raise unavailable() from None
+                raise GeminiTransportFailure(
+                    "cleanup", "MODEL_UNAVAILABLE", http_status
+                ) from None
