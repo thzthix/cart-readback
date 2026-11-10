@@ -32,7 +32,7 @@ def workflow_parts():
     if source.count(marker) != 1:
         raise AssertionError("unexpected diagnostic block")
     job = source.split(marker)[1]
-    final_marker = "    - name: One guarded Google POST; no retry\n"
+    final_marker = "    - name: One guarded Google metadata GET; no retry\n"
     if job.count(final_marker) != 1:
         raise AssertionError("unexpected final step")
     fetch, final = job.split(final_marker)
@@ -61,24 +61,13 @@ class TrackedEnv(dict):
 
 def envelope():
     return {
-        "modelVersion": probe.MODEL,
-        "responseId": "synthetic_id",
-        "usageMetadata": {
-            "promptTokenCount": 12,
-            "candidatesTokenCount": 2,
-            "thoughtsTokenCount": 1,
-            "totalTokenCount": 15,
-        },
-        "candidates": [
-            {
-                "content": {
-                    "role": "model",
-                    "parts": [{"text": "PRIVATE_TEXT"}],
-                },
-                "finishReason": "STOP",
-                "index": 0,
-            }
-        ],
+        "name": "models/" + probe.MODEL,
+        "baseModelId": probe.MODEL,
+        "version": "synthetic",
+        "description": "PRIVATE_TEXT",
+        "supportedGenerationMethods": ["generateContent", "countTokens"],
+        "inputTokenLimit": 1048576,
+        "outputTokenLimit": 2048,
     }
 
 
@@ -217,18 +206,15 @@ class ProbeTest(unittest.TestCase):
             **kwargs,
         )
 
-    def test_exact_one_post_claim_and_sanitized_receipt(self):
+    def test_exact_one_metadata_get_claim_and_sanitized_receipt(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             result = self.run_probe()
         self.assertEqual(
             result,
             {
-                "status": "RESPONSE_VALIDATED",
+                "status": "MODEL_METADATA_VALIDATED",
                 "model": probe.MODEL,
-                "input_tokens": 12,
-                "output_tokens": 3,
-                "total_tokens": 15,
             },
         )
         self.assertNotIn("PRIVATE_TEXT", json.dumps(result) + output.getvalue())
@@ -238,8 +224,8 @@ class ProbeTest(unittest.TestCase):
         self.assertEqual(
             self.connection.requests[0][:3],
             (
-                "POST",
-                "/v1beta/models/gemini-3.5-flash-lite:generateContent",
+                "GET",
+                "/v1beta/models/gemini-3.5-flash-lite",
                 probe.REQUEST,
             ),
         )
@@ -263,7 +249,8 @@ class ProbeTest(unittest.TestCase):
         mutations = [(k, "wrong") for k in probe.EXPECTED_CONTEXT]
         mutations += [
             ("GITHUB_RUN_NUMBER", "1"),
-            ("GITHUB_RUN_NUMBER", "3"),
+            ("GITHUB_RUN_NUMBER", "2"),
+            ("GITHUB_RUN_NUMBER", "4"),
             ("GITHUB_RUN_ATTEMPT", "2"),
             ("GITHUB_SHA", "b" * 40),
             ("GITHUB_WORKFLOW_SHA", "b" * 40),
@@ -285,34 +272,32 @@ class ProbeTest(unittest.TestCase):
                 self.assertEqual(self.env.borrowed, 0)
                 self.assertEqual(self.factories, [])
 
-    def test_only_new_run_two_attempt_one_has_a_local_slot(self):
-        self.assertEqual(probe.EXPECTED_CONTEXT["GITHUB_RUN_NUMBER"], "2")
+    def test_only_new_run_three_attempt_one_has_a_local_slot(self):
+        self.assertEqual(probe.EXPECTED_CONTEXT["GITHUB_RUN_NUMBER"], "3")
         self.assertEqual(probe.EXPECTED_CONTEXT["GITHUB_RUN_ATTEMPT"], "1")
         job = workflow_parts()[1]
         self.assertIn(
-            "&& github.run_number == 2 && github.run_attempt == 1 }}",
+            "&& github.run_number == 3 && github.run_attempt == 1 }}",
             job,
         )
         self.assertNotIn("github.run_number == 1", job)
-        config = json.loads(probe.REQUEST)["generationConfig"]
-        self.assertEqual(
-            config,
-            {
-                "temperature": 0,
-                "maxOutputTokens": 32,
-                "thinkingConfig": {"thinkingLevel": "MINIMAL"},
-            },
-        )
+        self.assertNotIn("github.run_number == 2", job)
+        self.assertEqual(probe.METHOD, "GET")
+        self.assertEqual(probe.REQUEST_PATH, "/v1beta/models/" + probe.MODEL)
+        self.assertEqual(probe.REQUEST, b"")
+        self.assertNotIn(":generateContent", probe.ENDPOINT)
 
     def test_fetch_rejects_spent_and_other_slots_before_token_or_io(self):
         code = workflow_parts()[4]
         for number, attempt in (
             ("1", "1"),
             ("1", "2"),
+            ("2", "1"),
             ("2", "2"),
-            ("3", "1"),
-            ("02", "1"),
-            ("2", "01"),
+            ("3", "2"),
+            ("4", "1"),
+            ("03", "1"),
+            ("3", "01"),
         ):
             with (
                 self.subTest(number=number, attempt=attempt),
@@ -343,6 +328,40 @@ class ProbeTest(unittest.TestCase):
                     ).exists()
                 )
 
+    def test_third_slot_is_new_and_never_replays_old_or_later_attempts(self):
+        for number, attempt in (
+            ("1", "1"),
+            ("2", "1"),
+            ("3", "1"),
+            ("3", "2"),
+            ("4", "1"),
+        ):
+            with (
+                self.subTest(number=number, attempt=attempt),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                env = self.environment(directory)
+                env["GITHUB_RUN_NUMBER"] = number
+                env["GITHUB_RUN_ATTEMPT"] = attempt
+                conn = FakeHTTPSConnection(json.dumps(envelope()).encode())
+                factory = mock.Mock(return_value=conn)
+                result = probe.execute(
+                    env,
+                    connection_factory=factory,
+                    wall=lambda: NOW,
+                    monotonic=lambda: 100,
+                )
+                admitted = (number, attempt) == ("3", "1")
+                self.assertEqual(
+                    result["status"],
+                    "MODEL_METADATA_VALIDATED" if admitted else "NOT_RUN",
+                )
+                self.assertEqual(factory.call_count, int(admitted))
+                self.assertEqual(env.borrowed, int(admitted))
+                self.assertEqual(len(conn.requests), int(admitted))
+                if not admitted:
+                    self.assertEqual(result["phase"], "preflight")
+
     def test_identity_constants_and_request_digest(self):
         self.assertEqual(
             probe.EXPECTED_CONTEXT["GITHUB_REPOSITORY_ID"], "1443556432"
@@ -352,10 +371,12 @@ class ProbeTest(unittest.TestCase):
         )
         self.assertEqual(
             probe.REQUEST_SHA256,
-            "b62b017f7a20d56124b384ba406bcc2f31b9da13b7ae240bb3fa7f765bf03fca",
+            "85f267f4987afd2fccad05c00f08425b509e26487604eed6e1780f27999cd344",
         )
-        self.assertEqual(probe.MAX_INPUT_RESERVATION, 1048576)
-        self.assertEqual(probe.MAX_OUTPUT_RESERVATION, 2048)
+        self.assertEqual(
+            probe.REQUEST_BODY_SHA256,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
 
     def test_fixed_tls_and_no_ambient_proxy_key_or_keylog(self):
         with mock.patch.dict(
@@ -366,7 +387,9 @@ class ProbeTest(unittest.TestCase):
                 "GEMINI_API_KEY": "alternate-not-used",
             },
         ):
-            self.assertEqual(self.run_probe()["status"], "RESPONSE_VALIDATED")
+            self.assertEqual(
+                self.run_probe()["status"], "MODEL_METADATA_VALIDATED"
+            )
         host, port, args = self.factories[0]
         self.assertEqual(
             (host, port), ("generativelanguage.googleapis.com", 443)
@@ -396,9 +419,9 @@ class ProbeTest(unittest.TestCase):
             wall=lambda: NOW,
             monotonic=lambda: 100,
         )
-        self.assertEqual(result["status"], "RESPONSE_VALIDATED")
+        self.assertEqual(result["status"], "MODEL_METADATA_VALIDATED")
 
-    def test_missing_or_malformed_key_burns_without_post(self):
+    def test_missing_or_malformed_key_burns_without_request(self):
         self.env["GEMINI_KEY"] = "invalid\nkey"
         self.assertEqual(
             self.run_probe(),
@@ -414,7 +437,7 @@ class ProbeTest(unittest.TestCase):
             self.run_probe(), {"status": "NOT_RUN", "phase": "claim"}
         )
 
-    def test_opaque_dotted_and_long_public_keys_reach_one_fake_post_verbatim(
+    def test_opaque_dotted_and_long_public_keys_reach_one_fake_get_verbatim(
         self,
     ):
         for public_key in (
@@ -437,7 +460,7 @@ class ProbeTest(unittest.TestCase):
                     json.dumps(envelope()).encode()
                 )
                 result = self.run_probe()
-                self.assertEqual(result["status"], "RESPONSE_VALIDATED")
+                self.assertEqual(result["status"], "MODEL_METADATA_VALIDATED")
                 self.assertEqual(len(self.connection.requests), 1)
                 self.assertEqual(
                     self.connection.requests[0][3]["x-goog-api-key"], public_key
@@ -445,7 +468,7 @@ class ProbeTest(unittest.TestCase):
                 self.assertNotIn(public_key, json.dumps(result))
                 self.assertNotIn("GEMINI_KEY", self.env)
 
-    def test_missing_unsafe_or_overlocalbound_keys_never_reach_post(self):
+    def test_missing_unsafe_or_overlocalbound_keys_never_reach_request(self):
         for public_key in (
             None,
             "",
@@ -484,7 +507,7 @@ class ProbeTest(unittest.TestCase):
                 self.assertEqual(self.connection.requests, [])
                 self.assertEqual(output.getvalue(), "")
 
-    def test_expiry_after_connect_prevents_borrow_and_post(self):
+    def test_expiry_after_connect_prevents_borrow_and_request(self):
         now = [NOW]
         self.connection.connect = lambda: now.__setitem__(0, NOW + 101)
         result = probe.execute(
@@ -634,10 +657,10 @@ class ProbeTest(unittest.TestCase):
             b'{"a":NaN}',
         ]
         for mutate in (
-            lambda x: x.update(modelVersion="wrong"),
-            lambda x: x["usageMetadata"].update(totalTokenCount=1),
-            lambda x: x["usageMetadata"].update(promptTokenCount=True),
-            lambda x: x["usageMetadata"].update(thoughtsTokenCount=40),
+            lambda x: x.update(name="models/wrong"),
+            lambda x: x.update(name=True),
+            lambda x: x.update(name=None),
+            lambda x: x.pop("name"),
         ):
             value = envelope()
             mutate(value)
@@ -752,7 +775,7 @@ class ProbeTest(unittest.TestCase):
         for phase in (
             "connect",
             "credential",
-            "post-attempt",
+            "request-attempt",
             "headers",
             "body",
             "cleanup",
@@ -769,7 +792,7 @@ class ProbeTest(unittest.TestCase):
                     self.connection.connect = fail
                 elif phase == "credential":
                     self.env["GEMINI_KEY"] = "PRIVATE_ERROR invalid key"
-                elif phase == "post-attempt":
+                elif phase == "request-attempt":
                     self.connection.request = fail
                 elif phase == "headers":
                     self.connection.getresponse = fail
@@ -889,42 +912,20 @@ class ProbeTest(unittest.TestCase):
                 if success:
                     self.assertEqual(target.read_bytes(), PATH.read_bytes())
 
-    def test_reviewed_optional_usage_and_signature_fields(self):
+    def test_metadata_output_is_name_only_not_usage_or_generation_access(self):
         value = envelope()
-        del value["usageMetadata"]["thoughtsTokenCount"]
-        value["usageMetadata"]["totalTokenCount"] = 14
-        value["usageMetadata"]["promptTokensDetails"] = [
-            {"modality": "TEXT", "tokenCount": 12}
-        ]
-        value["usageMetadata"]["candidatesTokensDetails"] = [
-            {"modality": "TEXT", "tokenCount": 2}
-        ]
-        value["candidates"][0]["content"]["parts"][0]["thoughtSignature"] = (
-            "c3ludGhldGlj"
+        value["usageMetadata"] = {"promptTokenCount": 999}
+        value["privateData"] = "PRIVATE_ERROR"
+        self.assertEqual(
+            probe._safe_observation(200, json.dumps(value).encode()),
+            {"model": probe.MODEL},
         )
-        accepted = probe._safe_observation(200, json.dumps(value).encode())
-        self.assertEqual(accepted["output_tokens"], 2)
-        self.assertNotIn("c3ludGhldGlj", json.dumps(accepted))
-        mutations = [
-            lambda v: v["usageMetadata"].update(totalTokenCount=15),
-            lambda v: v["usageMetadata"]["promptTokensDetails"][0].update(
-                modality="IMAGE"
-            ),
-            lambda v: v["usageMetadata"]["candidatesTokensDetails"][0].update(
-                tokenCount=True
-            ),
-            lambda v: v["candidates"][0]["content"]["parts"][0].update(
-                thoughtSignature="invalid!"
-            ),
-            lambda v: v["usageMetadata"].update(unreviewed=0),
-        ]
-        for mutate in mutations:
-            with self.subTest(mutate=mutate):
-                changed = json.loads(json.dumps(value))
-                mutate(changed)
-                self.assertIsNone(
-                    probe._safe_observation(200, json.dumps(changed).encode())
-                )
+        for status in (True, 200.0, "200", 201, 400):
+            self.assertIsNone(
+                probe._safe_observation(status, json.dumps(envelope()).encode())
+            )
+        for body in (b"[]", b"null", b"", b"x" * 16385):
+            self.assertIsNone(probe._safe_observation(200, body))
 
     def test_native_stdlib_close_keepalive_chunked_and_partial_framing(self):
         body = json.dumps(envelope()).encode()
@@ -987,9 +988,9 @@ class ProbeTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     result["status"],
-                    "RESPONSE_VALIDATED" if valid else "UNKNOWN",
+                    "MODEL_METADATA_VALIDATED" if valid else "UNKNOWN",
                 )
-                self.assertEqual(b"".join(conn.socket.sent).count(b"POST "), 1)
+                self.assertEqual(b"".join(conn.socket.sent).count(b"GET "), 1)
 
     def test_inline_fetch_with_native_close_and_chunked_response(self):
         code = workflow_parts()[4]
@@ -1104,14 +1105,14 @@ class NativeCredentialTest(unittest.TestCase):
                         env, wall=lambda: NOW, monotonic=lambda: 100
                     )
                 self.assertEqual(
-                    result, {"status": "UNKNOWN", "phase": "post-attempt"}
+                    result, {"status": "UNKNOWN", "phase": "request-attempt"}
                 )
                 self.assertEqual(len(seen), 1)
                 self.assertIsInstance(seen[0], ssl.SSLSocket)
                 # Native request/header encoding completed before this stop.
                 self.assertEqual(send.call_count, 1)
                 wire = send.call_args.args[0]
-                self.assertEqual(wire.count(b"POST "), 1)
+                self.assertEqual(wire.count(b"GET "), 1)
                 self.assertIn(
                     b"x-goog-api-key: " + public_key.encode() + b"\r\n", wire
                 )

@@ -1,11 +1,10 @@
-"""One fixed Google connectivity POST, only in the reviewed hosted branch job.
+"""One fixed Google model-metadata GET in the reviewed hosted branch job.
 
-This script does not verify Free eligibility, billing or user consent. The trusted
-operator must establish those facts before the sole manual workflow dispatch.
+This script checks model metadata, not inference, Free eligibility or billing.
+The trusted operator authorizes the sole manual dispatch and its compute use.
 Tests use invented context, synthetic keys and fake HTTPS connections only.
 """
 
-import base64
 import enum
 import hashlib
 import http.client
@@ -19,39 +18,19 @@ import ssl
 import time
 
 MODEL = "gemini-3.5-flash-lite"
-ENDPOINT = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    + MODEL
-    + ":generateContent"
-)
+METHOD = "GET"
+REQUEST_PATH = "/v1beta/models/" + MODEL
+ENDPOINT = "https://generativelanguage.googleapis.com" + REQUEST_PATH
 WORKFLOW_PATH = ".github/workflows/application-checks.yml"
-MAX_INPUT_RESERVATION = 1048576
-MAX_OUTPUT_RESERVATION = 2048
-MAX_OUTPUT_TOKENS = 32
 TIMEOUT_SECONDS = 20
 # Local HTTP-header safety bound, not a provider key-format specification.
 MAX_CREDENTIAL_BYTES = 4096
-REQUEST = json.dumps(
-    {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {"text": "Synthetic connectivity diagnostic. Reply READY."}
-                ],
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0,
-            "maxOutputTokens": MAX_OUTPUT_TOKENS,
-            "thinkingConfig": {"thinkingLevel": "MINIMAL"},
-        },
-    },
-    ensure_ascii=True,
-    sort_keys=True,
-    separators=(",", ":"),
-).encode("ascii")
-REQUEST_SHA256 = hashlib.sha256(REQUEST).hexdigest()
+REQUEST = b""
+REQUEST_BODY_SHA256 = hashlib.sha256(REQUEST).hexdigest()
+# Canonical fixed method/path/body digest; the source pin binds these constants.
+REQUEST_SHA256 = hashlib.sha256(
+    (METHOD + " " + REQUEST_PATH + "\n" + REQUEST_BODY_SHA256).encode("ascii")
+).hexdigest()
 
 
 class _Reason(enum.Enum):
@@ -69,14 +48,6 @@ class _Reason(enum.Enum):
 class _LocalFailure(ValueError):
     def __init__(self, reason: _Reason):
         self.reason = reason
-
-
-def _shape(value: object, keys: set[str]) -> bool:
-    return type(value) is dict and value.keys() == keys
-
-
-def _integer(value: object, minimum: int = 0) -> bool:
-    return type(value) is int and value >= minimum
 
 
 def _digest(value: object, length: int = 64) -> bool:
@@ -112,108 +83,10 @@ def _safe_observation(status: int, body: bytes) -> dict | None:
         )
     except (ValueError, UnicodeError, RecursionError):
         return None
-    required = {"modelVersion", "usageMetadata", "candidates"}
-    if type(data) is not dict or not required <= data.keys():
+    if type(data) is not dict or data.get("name") != "models/" + MODEL:
         return None
-    if not data.keys() <= required | {"responseId"}:
-        return None
-    if "responseId" in data and (
-        type(data["responseId"]) is not str
-        or re.fullmatch(r"[A-Za-z0-9._~+/-]{1,256}={0,2}", data["responseId"])
-        is None
-    ):
-        return None
-    if data["modelVersion"] != MODEL:
-        return None
-    usage, candidates = data["usageMetadata"], data["candidates"]
-    required_usage = {
-        "promptTokenCount",
-        "candidatesTokenCount",
-        "totalTokenCount",
-    }
-    allowed_usage = required_usage | {
-        "thoughtsTokenCount",
-        "promptTokensDetails",
-        "candidatesTokensDetails",
-    }
-    if (
-        type(usage) is not dict
-        or not required_usage <= usage.keys()
-        or not usage.keys() <= allowed_usage
-    ):
-        return None
-    prompt, answer, total = (
-        usage[k]
-        for k in ("promptTokenCount", "candidatesTokenCount", "totalTokenCount")
-    )
-    thoughts = usage.get("thoughtsTokenCount", 0)
-    if not all(_integer(v) for v in (prompt, answer, thoughts, total)):
-        return None
-    for field, count in (
-        ("promptTokensDetails", prompt),
-        ("candidatesTokensDetails", answer),
-    ):
-        if field in usage:
-            details = usage[field]
-            if (
-                type(details) is not list
-                or len(details) != 1
-                or not _shape(details[0], {"modality", "tokenCount"})
-            ):
-                return None
-            if (
-                details[0]["modality"] != "TEXT"
-                or not _integer(details[0]["tokenCount"])
-                or details[0]["tokenCount"] != count
-            ):
-                return None
-    if not (
-        0 < prompt <= MAX_INPUT_RESERVATION
-        and 0 < answer
-        and answer + thoughts <= MAX_OUTPUT_TOKENS
-        and total == prompt + answer + thoughts
-    ):
-        return None
-    if type(candidates) is not list or len(candidates) != 1:
-        return None
-    candidate = candidates[0]
-    if not _shape(candidate, {"content", "finishReason", "index"}):
-        return None
-    if (
-        type(candidate["index"]) is not int
-        or candidate["index"] != 0
-        or candidate["finishReason"] != "STOP"
-        or not _shape(candidate["content"], {"role", "parts"})
-    ):
-        return None
-    content = candidate["content"]
-    parts = content["parts"]
-    if (
-        content["role"] != "model"
-        or type(parts) is not list
-        or len(parts) != 1
-        or type(parts[0]) is not dict
-        or not {"text"} <= parts[0].keys() <= {"text", "thoughtSignature"}
-        or type(parts[0]["text"]) is not str
-        or not 0 < len(parts[0]["text"]) <= 1024
-    ):
-        return None
-    if "thoughtSignature" in parts[0]:
-        signature = parts[0]["thoughtSignature"]
-        if type(signature) is not str or not 1 <= len(signature) <= 8192:
-            return None
-        try:
-            if not 0 < len(base64.b64decode(signature, validate=True)) <= 4096:
-                return None
-        except ValueError:
-            return None
-    # Validate text shape but never return, log or interpret it as semantics.
-    return {
-        "model": MODEL,
-        "input_tokens": prompt,
-        "output_tokens": answer + thoughts,
-        "total_tokens": total,
-    }
+    # Other bounded metadata stays private and grants no generation-access claim.
+    return {"model": MODEL}
 
 
 REPOSITORY = "thzthix/cart-readback"
@@ -227,7 +100,7 @@ EXPECTED_CONTEXT = {
     "GITHUB_EVENT_NAME": "workflow_dispatch",
     "GITHUB_REF": REF,
     "GITHUB_WORKFLOW_REF": REPOSITORY + "/" + WORKFLOW_PATH + "@" + REF,
-    "GITHUB_RUN_NUMBER": "2",
+    "GITHUB_RUN_NUMBER": "3",
     "GITHUB_RUN_ATTEMPT": "1",
     "GITHUB_SERVER_URL": "https://github.com",
     "GITHUB_API_URL": "https://api.github.com",
@@ -437,7 +310,6 @@ def execute(
         headers = {
             "Host": "generativelanguage.googleapis.com",
             "x-goog-api-key": token,
-            "Content-Type": "application/json",
             "Accept": "application/json",
             "Accept-Encoding": "identity",
             "Content-Length": str(len(REQUEST)),
@@ -449,11 +321,11 @@ def execute(
         except OSError:
             raise _LocalFailure(_Reason.SOCKET_TIMEOUT_SETUP_FAILED) from None
         # This is a local call boundary, not proof of network delivery.
-        phase = "post-attempt"
+        phase = "request-attempt"
         try:
             connection.request(
-                "POST",
-                "/v1beta/models/" + MODEL + ":generateContent",
+                METHOD,
+                REQUEST_PATH,
                 body=REQUEST,
                 headers=headers,
                 encode_chunked=False,
@@ -500,7 +372,7 @@ def execute(
                 "HTTP_200_UNVALIDATED", phase, http_status
             )
         else:
-            result = {"status": "RESPONSE_VALIDATED", **observation}
+            result = {"status": "MODEL_METADATA_VALIDATED", **observation}
     except BaseException as error:
         if phase == "credential":
             reason = _Reason.UNEXPECTED_LOCAL_ERROR
@@ -561,7 +433,7 @@ def main() -> int:
     finally:
         signal.signal(signal.SIGTERM, previous)
     print(json.dumps(result, sort_keys=True), flush=True)
-    return 0 if result["status"] == "RESPONSE_VALIDATED" else 2
+    return 0 if result["status"] == "MODEL_METADATA_VALIDATED" else 2
 
 
 if __name__ == "__main__":

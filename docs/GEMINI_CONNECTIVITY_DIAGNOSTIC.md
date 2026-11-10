@@ -1,4 +1,71 @@
-# One-call branch diagnostic, not application integration
+# One-call model-metadata check, not inference
+
+This local run-3 proposal responds to the owner's new request to recheck the
+re-saved GitHub Secret. It is based on reviewed commit
+`53d04ef010dcc0710ea5671d14310c6c9688bdeb`. **It has not been published,
+dispatched or executed, and no real key value has been inspected.**
+
+## Fixed metadata request and narrow result
+
+Use only GET `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite`,
+with an empty body (`b""`) and the existing step-only `GEMINI_KEY` supplied only
+in `x-goog-api-key`. No prompt, JSON generation payload, inference, list/count
+request, POST, fallback or second provider request is made. Google's
+[models.get reference](https://ai.google.dev/api/models) specifies a GET returning
+Model metadata and an empty request body. The [key guide](https://ai.google.dev/gemini-api/docs/api-key)
+describes authentication. These sources do not establish a separate $0 invoice
+guarantee for this check, Free eligibility or generation access.
+
+Body SHA-256: `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+Canonical request descriptor is the ASCII method, one space, exact request path,
+one newline, then the body SHA-256. Its SHA-256 is
+`85f267f4987afd2fccad05c00f08425b509e26487604eed6e1780f27999cd344`.
+The independently reviewed source pin binds the fixed method/path/body constants.
+
+The only success receipt is MODEL_METADATA_VALIDATED plus the fixed public model
+name. It requires HTTP 200, the existing bounded/strict framing, at most 16 KiB of
+valid UTF-8 JSON without duplicate keys or literal NaN/Infinity numeric constants,
+and exact required `name` `models/gemini-3.5-flash-lite`. Other bounded metadata
+fields are discarded without interpreting their values. It does not
+report usage, token counts, returned descriptions or supported methods, and does
+not claim successful inference, generation permission, available quota or billing
+status. Unsupported metadata emits the existing non-success HTTP_200_UNVALIDATED
+receipt. Non-200 responses stop before body admission, retaining only exact
+numeric HTTP status and the local phase. No provider message/details are emitted.
+The `request-attempt` phase marks the local call boundary, not remote acceptance.
+
+## One new slot, preserved prior history
+
+Current complete read-only repository history contains exactly two runs for
+workflow 405198760: run 42617340271, number 1 / attempt 1; and run 42639744339,
+number 2 / attempt 1. Both remain untouched and spent. Run 1 stays UNKNOWN with
+zero or one POST possible. At its exact 29072098 source, run 2 stopped at
+credential/UNKNOWN before the native POST call and attempted no native POST.
+
+The job, inline fetch and probe admit only run 3 / attempt 1. Recheck the exact
+branch head and complete workflow history immediately before a released dispatch.
+Stop on a later run or material mismatch. Any failure, cancellation, skipping,
+timeout, UNKNOWN or offline-mode run consumes this slot. No retry, rerun, new
+window after consumption, counter reset or further fence advance is permitted.
+The unused local run-3 generation POST proposal was retired without publication
+or execution; this fixed metadata GET replaces it, not GET followed by POST.
+
+Verified TLS, disabled debug/key logging, no ambient proxy or alternate key,
+verbatim bounded opaque-key handling, fixed safe credential-failure reasons,
+owner/repository/actor/revision/source bindings, exclusive claim, at-most
+600-second absolute window and no-retry transport remain unchanged. The current
+opaque-header defense remains nonempty graphic ASCII with a local 4096-byte cap,
+not a Google key-format guarantee. No key value/hash/length/prefix/fragment is
+read during preparation. No additional account authority or persistent access
+is created. Source publication and dispatch remain held for parent release and
+independent review; no current Free-tier or inference-cost assumption is used.
+
+## Preserved historical generation diagnostic
+
+The remaining sections record the older generation path and spent attempts,
+including their original request hashes and approval conditions. They do not
+activate or describe the current metadata request above.
+
 
 Issue #64 / draft PR #65 now prepares the shortest actual hosted connectivity
 path. Earlier fake-only APIs (`OfflineDiagnostic`, fabricated grants/enrollment
