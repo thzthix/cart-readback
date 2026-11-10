@@ -17,9 +17,19 @@ These are not a working buyer checkout. The [third real application sample](http
 received HTTP 200 with known provider usage, but rejected the proposal with
 `RULE_SPAN_QUOTE` and ended `APP_INCOMPLETE`. Its quotations were not repaired.
 [PR84](https://github.com/thzthix/cart-readback/pull/84) adds bounded source-span
-hints under `cartreadback-prompt-v3-span-hints`; their effect on actual model
-output is not yet verified. The fourth application sample has not run at this
-checkpoint. Earlier UNKNOWN and invalid outcomes remain separate history.
+hints under `cartreadback-prompt-v3-span-hints`. The [fourth application sample](https://github.com/thzthix/cart-readback/actions/runs/42812292573)
+completed successfully on November 10 at 12:02 UTC, attempt 1, workflow head
+`128a8f3e90a13b55ac4870fef90467c9e47f36d8`, with production source
+`8ba9e9623db4ee094d3245615417b7511b8d0e33`. Its safe receipt reports
+`APP_ANALYSIS_VALIDATED`, model `gemini-3.5-flash-lite`, attempted dispatch,
+known accounting, observed provider usage and two `match` results; payment was
+fixture-only. This was one approved public synthetic keyboard case with two
+fixed conditions, accepted by the schema and exact-evidence validators, with
+no retry. It does not establish general model accuracy, semantic entailment,
+buyer benefit, native rendering, PayPal acceptance or a zero-charge invoice.
+The isolated causal benefit of hints is not established. Earlier UNKNOWN and
+invalid outcomes remain separate history; the original bad coordinates are
+still unknown and were not repaired or reinterpreted.
 
 Native viewer rendering/keyboard behavior and real PayPal Sandbox integration
 remain unverified. A local browser probe encountered connection failure and then

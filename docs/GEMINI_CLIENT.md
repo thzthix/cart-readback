@@ -8,7 +8,7 @@ provider call. The [separate host-only Service bridge](GEMINI_SERVICE.md) now
 selects these modules through durable authorization and a two-stage runner.
 The default app/HTTP/UI remain fixture-only. The original implementation
 evidence below used fabricated responses. For subsequent real authentication,
-generation and rejected application samples, see the dated
+generation and limited application observations, see the dated
 [current status](../README.md#current-integration-status--november-10-2026).
 A validated transport/usage observation is not an accepted proposal or working
 PayPal checkout.
@@ -23,7 +23,8 @@ source text only: at most 16 exact source-ID/codepoint-start/end/quote entries,
 with at most 1,000 codepoints per quote, within 8 KiB of canonical UTF-8 JSON. Hints label no semantic match/conflict
 status. Request-size fallback occurs before dispatch, never as a retry. The
 output schema and exact evidence validation remain strict: no quote repair or
-conversion of invalid output to success. Actual model improvement is unverified.
+conversion of invalid output to success. General model improvement or the
+isolated causal benefit of hints remains unverified.
 Two exact endpoints are
 allowlisted, one for the explicitly selected model:
 
