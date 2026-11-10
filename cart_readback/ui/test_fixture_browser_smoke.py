@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import http.client
+import io
 import json
 import os
 import struct
@@ -422,9 +423,39 @@ class FixtureTests(unittest.TestCase):
             )
             self.assertEqual(
                 receipt["status"],
-                "passed" if fail is None else "failed",
+                "pending_job_conclusion" if fail is None else "failed",
             )
-            self.assertNotIn("session", json.dumps(receipt))
+            self.assertNotIn("sessionId", json.dumps(receipt))
+            self.assertNotIn("RAW_PRIVATE_SENTINEL", json.dumps(receipt))
+            self.assertIs(receipt["job_conclusion_required"], True)
+            self.assertEqual(
+                receipt["checks_status"],
+                "passed" if fail is None else "not_confirmed",
+            )
+            expected = {
+                "health": "server_readiness",
+                "spawn": "driver_start",
+                "ready": "driver_readiness",
+                "create": "session",
+                "/url": "navigation",
+                "/execute/sync": "render",
+                "geometry": "measurement",
+                "/screenshot": "png",
+                "png": "png",
+                "write": "write",
+            }
+            primary = receipt["diagnostics"]["primary_failure"]
+            if fail in expected:
+                self.assertEqual(primary["stage"], expected[fail])
+            else:
+                self.assertIsNone(primary)
+            if fail in ("close", "hang"):
+                self.assertTrue(
+                    any(
+                        item["status"] == "failed"
+                        for item in receipt["diagnostics"]["cleanup"]
+                    )
+                )
         self.assertIn("shutdown", events)
         self.assertIn("server_close", events)
         for env in envs:
@@ -550,6 +581,390 @@ class FixtureTests(unittest.TestCase):
             value["result"]["x"] = x
             with self.subTest(x=x), self.assertRaises(smoke.SmokeFailure):
                 smoke.check_measure(value, 320, False)
+
+    def test_diagnostic_categories_never_read_adversarial_text(self):
+        class HostileError(Exception):
+            def __str__(self):
+                raise AssertionError("exception string accessed")
+
+        class HostileBase(BaseException):
+            pass
+
+        cases = [
+            (smoke.SmokeFailure("RAW_PRIVATE_SENTINEL"), "check_failed"),
+            (TimeoutError("RAW_PRIVATE_SENTINEL"), "timeout"),
+            (OSError("RAW_PRIVATE_SENTINEL"), "io_error"),
+            (
+                http.client.HTTPException("RAW_PRIVATE_SENTINEL"),
+                "protocol_error",
+            ),
+            (ValueError("RAW_PRIVATE_SENTINEL"), "invalid_data"),
+            (HostileError(), "unexpected_exception"),
+            (HostileBase("RAW_PRIVATE_SENTINEL"), "unexpected_base_exception"),
+            (KeyboardInterrupt("RAW_PRIVATE_SENTINEL"), "cancelled"),
+            (SystemExit("RAW_PRIVATE_SENTINEL"), "cancelled"),
+        ]
+        for error, expected in cases:
+            receipt = {}
+            diagnostics = smoke.Diagnostics(receipt)
+            with (
+                self.subTest(expected=expected),
+                self.assertRaises(type(error)),
+            ):
+                with diagnostics.stage("session", "review-wide"):
+                    raise error
+            self.assertEqual(
+                receipt["diagnostics"]["primary_failure"]["category"], expected
+            )
+            self.assertNotIn("RAW_PRIVATE_SENTINEL", json.dumps(receipt))
+        with self.assertRaises(smoke.SmokeFailure):
+            with smoke.Diagnostics({}).stage("RAW_PRIVATE_SENTINEL"):
+                pass
+
+    def diagnostic_run(self, error, compound=False, second=False):
+        events = []
+        server = FakeServer(events)
+        original_rmtree = smoke.shutil.rmtree
+
+        class InjectedDriver(FakeDriver):
+            def create(self, chrome, profile, width):
+                value = super().create(chrome, profile, width)
+                if not second or width == 320:
+                    raise error
+                return value
+
+            def close(self):
+                super().close()
+                if compound:
+                    raise RuntimeError("RAW_PRIVATE_SENTINEL delete")
+
+        def cleanup(process):
+            events.append("cleanup")
+            if compound:
+                raise OSError("RAW_PRIVATE_SENTINEL group")
+
+        def rmtree(path, *args, **kwargs):
+            if compound and Path(path).name == "Falsewide":
+                raise OSError("RAW_PRIVATE_SENTINEL profile")
+            return original_rmtree(path, *args, **kwargs)
+
+        def shutdown():
+            events.append("shutdown")
+            raise OSError("RAW_PRIVATE_SENTINEL server")
+
+        if compound:
+            server.shutdown = shutdown
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "out"
+            with (
+                patch.object(smoke, "request", return_value=smoke.MARKER),
+                patch.object(smoke.shutil, "rmtree", side_effect=rmtree),
+            ):
+                with self.assertRaises(BaseException):
+                    smoke.run(
+                        {},
+                        output,
+                        "/fake/chrome",
+                        "/fake/driver",
+                        spawn=lambda *args, **kwargs: FakeProcess(events),
+                        driver_factory=lambda _: InjectedDriver(server, events),
+                        server_factory=lambda _: server,
+                        cleanup=cleanup,
+                    )
+            receipt = json.loads((output / "receipt.json").read_text())
+            self.assertEqual(receipt["status"], "failed")
+            self.assertNotIn("RAW_PRIVATE_SENTINEL", json.dumps(receipt))
+            self.assertNotIn("sessionId", json.dumps(receipt))
+            self.assertEqual(
+                len(list(output.glob("*.png"))), 1 if second else 0
+            )
+        self.assertIn("server_close", events)
+        return receipt
+
+    def test_primary_preserved_across_compound_cleanup_failure(self):
+        receipt = self.diagnostic_run(
+            ValueError("RAW_PRIVATE_SENTINEL primary"), compound=True
+        )
+        diagnostics = receipt["diagnostics"]
+        self.assertEqual(
+            diagnostics["primary_failure"],
+            {
+                "stage": "session",
+                "scenario": "review-wide",
+                "status": "failed",
+                "category": "invalid_data",
+            },
+        )
+        failed = {
+            item["stage"]
+            for item in diagnostics["cleanup"]
+            if item["status"] == "failed"
+        }
+        self.assertEqual(
+            failed,
+            {
+                "session_cleanup",
+                "process_cleanup",
+                "profile_cleanup",
+                "server_shutdown",
+            },
+        )
+        self.assertEqual(
+            diagnostics["cleanup"][-1]["stage"], "temporary_cleanup"
+        )
+        self.assertEqual(diagnostics["cleanup"][-1]["status"], "passed")
+
+    def test_one_png_then_next_scenario_failure(self):
+        receipt = self.diagnostic_run(
+            RuntimeError("RAW_PRIVATE_SENTINEL"), second=True
+        )
+        self.assertEqual(
+            receipt["diagnostics"]["primary_failure"]["scenario"],
+            "review-narrow",
+        )
+        self.assertEqual(len(receipt["checks"]), 1)
+        self.assertEqual(receipt["checks"][0]["scenario"], "review-wide")
+
+    def test_cancellation_and_unexpected_base_remain_failed(self):
+        class UnknownBase(BaseException):
+            pass
+
+        for error in (
+            KeyboardInterrupt("RAW_PRIVATE_SENTINEL"),
+            SystemExit("RAW_PRIVATE_SENTINEL"),
+            UnknownBase("RAW_PRIVATE_SENTINEL"),
+        ):
+            with self.subTest(kind=type(error).__name__):
+                receipt = self.diagnostic_run(error)
+                self.assertIsNotNone(receipt["diagnostics"]["primary_failure"])
+
+    def test_main_never_prints_raw_unknown_or_cancelled_errors(self):
+        for error in (
+            RuntimeError("RAW_PRIVATE_SENTINEL"),
+            KeyboardInterrupt("RAW_PRIVATE_SENTINEL"),
+            SystemExit("RAW_PRIVATE_SENTINEL"),
+        ):
+            output = io.StringIO()
+            with (
+                patch.dict(os.environ, {"FIXTURE_HOSTED_RUN": "1"}),
+                patch.object(smoke, "checked_sources", side_effect=error),
+                patch("sys.stdout", output),
+                patch("sys.stderr", output),
+            ):
+                with self.assertRaises(SystemExit) as caught:
+                    smoke.main()
+            self.assertEqual(caught.exception.code, 1)
+            self.assertIn(
+                "PUBLIC_FIXTURE_RENDER_CHECKS_FAILED", output.getvalue()
+            )
+            self.assertNotIn("RAW_PRIVATE_SENTINEL", output.getvalue())
+            self.assertNotIn("Traceback", output.getvalue())
+
+    def test_png_write_failure_has_safe_stage(self):
+        with patch.object(
+            Path, "write_bytes", side_effect=OSError("RAW_PRIVATE_SENTINEL")
+        ):
+            self.lifecycle("write")
+
+    def test_temporary_setup_failure_has_safe_stage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "out"
+            with patch.object(
+                smoke.tempfile,
+                "TemporaryDirectory",
+                side_effect=OSError("RAW_PRIVATE_SENTINEL"),
+            ):
+                with self.assertRaises(OSError):
+                    smoke.run({}, output, "/fake/chrome", "/fake/driver")
+            receipt = json.loads((output / "receipt.json").read_text())
+            self.assertEqual(receipt["status"], "failed")
+            self.assertEqual(
+                receipt["diagnostics"]["primary_failure"]["stage"], "setup"
+            )
+            self.assertNotIn("RAW_PRIVATE_SENTINEL", json.dumps(receipt))
+
+    def test_internal_check_codes_closed_and_safe(self):
+        class Hostile:
+            def __str__(self):
+                raise AssertionError("string read")
+
+            def __hash__(self):
+                raise AssertionError("hash read")
+
+        for code in smoke.CHECK_CODES:
+            self.assertEqual(
+                smoke.failure_category(smoke.SmokeFailure(code)),
+                "check_" + code.replace("-", "_"),
+            )
+        for value in ("RAW_PRIVATE_SENTINEL", Hostile(), None):
+            error = smoke.SmokeFailure(value)
+            self.assertEqual(smoke.failure_category(error), "check_failed")
+            self.assertEqual(error.args, ("check_failed",))
+        mutated = smoke.SmokeFailure("version")
+        mutated.code = "RAW_PRIVATE_SENTINEL"
+        self.assertEqual(smoke.failure_category(mutated), "check_failed")
+
+    def test_failure_summary_rejects_unlisted_values(self):
+        receipt = {"checks": [None] * 99}
+        diagnostics = smoke.Diagnostics(receipt)
+        diagnostics.record["primary_failure"] = {
+            "stage": "RAW_PRIVATE_SENTINEL",
+            "category": "RAW_PRIVATE_SENTINEL",
+            "scenario": "RAW_PRIVATE_SENTINEL",
+        }
+        diagnostics.record["cleanup"] = [
+            {"stage": "RAW_PRIVATE_SENTINEL", "status": "failed"},
+            {"stage": "process_cleanup", "status": "failed"},
+        ]
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            diagnostics.emit_failure(receipt, receipt_write_failed=True)
+        self.assertNotIn("RAW_PRIVATE_SENTINEL", output.getvalue())
+        summary = json.loads(output.getvalue().split(" ", 1)[1])
+        self.assertEqual(summary["primary_stage"], "unavailable")
+        self.assertEqual(summary["failed_cleanup_stages"], ["process_cleanup"])
+        self.assertEqual(summary["saved_png_count"], 4)
+        self.assertEqual(summary["receipt_write"], "failed")
+
+    def test_compound_failure_summary_preserves_primary(self):
+        output = io.StringIO()
+        with patch("sys.stdout", output):
+            self.diagnostic_run(
+                ValueError("RAW_PRIVATE_SENTINEL"), compound=True
+            )
+        summary = json.loads(output.getvalue().split(" ", 1)[1])
+        self.assertEqual(summary["primary_stage"], "session")
+        self.assertEqual(summary["primary_category"], "invalid_data")
+        self.assertEqual(summary["scenario"], "review-wide")
+        self.assertEqual(summary["saved_png_count"], 0)
+        self.assertEqual(len(summary["failed_cleanup_stages"]), 4)
+        self.assertNotIn("RAW_PRIVATE_SENTINEL", output.getvalue())
+
+    def test_receipt_write_failure_emits_safe_token(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = io.StringIO()
+            with (
+                patch.object(
+                    smoke.tempfile,
+                    "TemporaryDirectory",
+                    side_effect=ValueError("RAW_PRIVATE_SENTINEL"),
+                ),
+                patch.object(
+                    smoke,
+                    "write_receipt_temp",
+                    side_effect=OSError("RAW_PRIVATE_SENTINEL receipt"),
+                ),
+                patch("sys.stdout", output),
+            ):
+                with self.assertRaises(OSError):
+                    smoke.run(
+                        {}, Path(temp) / "out", "/fake/chrome", "/fake/driver"
+                    )
+            self.assertNotIn("RAW_PRIVATE_SENTINEL", output.getvalue())
+            summary = json.loads(output.getvalue().split(" ", 1)[1])
+            self.assertEqual(summary["receipt_write"], "failed")
+            self.assertEqual(summary["primary_stage"], "setup")
+            self.assertEqual(summary["primary_category"], "invalid_data")
+
+    def test_late_staging_write_failure_publishes_no_receipt(self):
+        real_write = smoke.write_receipt_temp
+        calls = []
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "out"
+            output.mkdir()
+            receipt = {"status": "passed", "checks": []}
+            diagnostics = smoke.Diagnostics(receipt)
+
+            def late_write(path, data):
+                calls.append(path)
+                real_write(path, data)
+                raise OSError("RAW_PRIVATE_SENTINEL late close")
+
+            stdout = io.StringIO()
+            with (
+                patch.object(
+                    smoke, "write_receipt_temp", side_effect=late_write
+                ),
+                patch("sys.stdout", stdout),
+            ):
+                with self.assertRaises(OSError):
+                    smoke.publish_receipt(output, receipt, diagnostics)
+            self.assertEqual(len(calls), 1)
+            self.assertNotEqual(calls[0], output / "receipt.json")
+            self.assertFalse((output / "receipt.json").exists())
+            self.assertFalse(calls[0].exists())
+            self.assertEqual(receipt["status"], "failed")
+            self.assertNotIn("RAW_PRIVATE_SENTINEL", stdout.getvalue())
+            self.assertEqual(
+                json.loads(stdout.getvalue().split(" ", 1)[1])["receipt_write"],
+                "failed",
+            )
+
+    def test_replace_failure_before_and_after_effect_invalidates(self):
+        real_replace = Path.replace
+        for after_effect in (False, True):
+            calls = []
+            with tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "out"
+                output.mkdir()
+                receipt = {"status": "passed", "checks": []}
+                diagnostics = smoke.Diagnostics(receipt)
+
+                def replace(path, target):
+                    calls.append((path, target))
+                    if after_effect:
+                        real_replace(path, target)
+                    raise OSError("RAW_PRIVATE_SENTINEL replace")
+
+                with (
+                    patch.object(Path, "replace", replace),
+                    patch("sys.stdout", io.StringIO()),
+                ):
+                    with self.assertRaises(OSError):
+                        smoke.publish_receipt(output, receipt, diagnostics)
+                self.assertEqual(len(calls), 1)
+                self.assertFalse((output / "receipt.json").exists())
+                self.assertFalse(calls[0][0].exists())
+                self.assertEqual(receipt["status"], "failed")
+
+    def test_failed_invalidation_never_leaves_standalone_passed_receipt(self):
+        real_replace, real_unlink = Path.replace, Path.unlink
+        calls = []
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "out"
+            output.mkdir()
+            receipt = {"status": "passed", "checks": []}
+            diagnostics = smoke.Diagnostics(receipt)
+
+            def replace(path, target):
+                calls.append("replace")
+                real_replace(path, target)
+                raise OSError("RAW_PRIVATE_SENTINEL after replace")
+
+            def unlink(path, *args, **kwargs):
+                calls.append(path.name)
+                if path.name == "receipt.json":
+                    raise PermissionError("RAW_PRIVATE_SENTINEL invalidation")
+                return real_unlink(path, *args, **kwargs)
+
+            stdout = io.StringIO()
+            with (
+                patch.object(Path, "replace", replace),
+                patch.object(Path, "unlink", unlink),
+                patch("sys.stdout", stdout),
+            ):
+                with self.assertRaises(OSError):
+                    smoke.publish_receipt(output, receipt, diagnostics)
+            persisted = json.loads((output / "receipt.json").read_text())
+            self.assertEqual(persisted["status"], "pending_job_conclusion")
+            self.assertIs(persisted["job_conclusion_required"], True)
+            self.assertEqual(calls.count("replace"), 1)
+            self.assertEqual(calls.count("receipt.json"), 1)
+            self.assertEqual(receipt["status"], "failed")
+            self.assertNotIn("RAW_PRIVATE_SENTINEL", stdout.getvalue())
+            summary = json.loads(stdout.getvalue().split(" ", 1)[1])
+            self.assertEqual(summary["receipt_write"], "failed")
+            self.assertEqual(summary["receipt_invalidation"], "failed")
 
 
 if __name__ == "__main__":

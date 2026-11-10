@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import zlib
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -41,8 +42,41 @@ ARTIFACT_NAMES = {
 }
 
 
+CHECK_CODES = frozenset(
+    {
+        "binary",
+        "cleanup-forced-or-unknown",
+        "diagnostic-enum",
+        "endpoint",
+        "envelope",
+        "geometry",
+        "hosted-only",
+        "http",
+        "inline",
+        "json",
+        "layout",
+        "png",
+        "provenance",
+        "readiness",
+        "render",
+        "server-cleanup",
+        "session",
+        "source",
+        "state",
+        "version",
+        "viewport-containment",
+        "webdriver",
+    }
+)
+
+
 class SmokeFailure(Exception):
-    """A bounded check failed; details must not enter public artifacts."""
+    """A bounded check with a sanitized, closed-set internal reason code."""
+
+    def __init__(self, code):
+        """Discard unknown/non-string inputs without converting them to text."""
+        self.code = code if type(code) is str and code in CHECK_CODES else None
+        super().__init__(self.code or "check_failed")
 
 
 def checked_sources(directory: Path) -> dict[str, bytes]:
@@ -625,6 +659,204 @@ def stop_process(
         raise SmokeFailure("cleanup-forced-or-unknown")
 
 
+STAGES = frozenset(
+    {
+        "setup",
+        "server_setup",
+        "server_readiness",
+        "driver_start",
+        "driver_readiness",
+        "session",
+        "navigation",
+        "render",
+        "measurement",
+        "png",
+        "write",
+        "session_cleanup",
+        "process_cleanup",
+        "profile_cleanup",
+        "server_shutdown",
+        "server_close",
+        "server_join",
+        "temporary_cleanup",
+    }
+)
+SCENARIOS = frozenset(
+    {"setup", "review-wide", "review-narrow", "blocked-wide", "blocked-narrow"}
+)
+CLEANUP_STAGES = frozenset(
+    {
+        "session_cleanup",
+        "process_cleanup",
+        "profile_cleanup",
+        "server_shutdown",
+        "server_close",
+        "server_join",
+        "temporary_cleanup",
+    }
+)
+
+
+def failure_category(error: BaseException) -> str:
+    """Classify without reading exception text, args, names or external data."""
+    if isinstance(error, (KeyboardInterrupt, SystemExit)):
+        return "cancelled"
+    if not isinstance(error, Exception):
+        return "unexpected_base_exception"
+    if isinstance(error, SmokeFailure):
+        # Only our exact class may expose its own plain bounded field. Unknown
+        # subclasses and mutated values never invoke arbitrary accessors here.
+        if type(error) is SmokeFailure:
+            code = error.code
+            if type(code) is str and code in CHECK_CODES:
+                return "check_" + code.replace("-", "_")
+        return "check_failed"
+    if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
+        return "timeout"
+    if isinstance(error, OSError):
+        return "io_error"
+    if isinstance(error, http.client.HTTPException):
+        return "protocol_error"
+    if isinstance(error, ValueError):
+        return "invalid_data"
+    return "unexpected_exception"
+
+
+class Diagnostics:
+    """Collect only finite stage/scenario/category enums in a public receipt."""
+
+    def __init__(self, receipt: dict):
+        """Add a versioned diagnostic record with no exception payloads."""
+        self.record = {
+            "version": 1,
+            "last_stage": "setup",
+            "scenario": "setup",
+            "primary_failure": None,
+            "cleanup": [],
+        }
+        receipt["diagnostics"] = self.record
+
+    def emit_failure(
+        self,
+        receipt: dict,
+        receipt_write_failed: bool = False,
+        invalidation_failed: bool = False,
+    ):
+        """Print one closed-value summary without requiring artifact access."""
+        primary = self.record["primary_failure"] or {}
+        categories = {
+            "check_failed",
+            "timeout",
+            "io_error",
+            "protocol_error",
+            "invalid_data",
+            "unexpected_exception",
+            "unexpected_base_exception",
+            "cancelled",
+        }
+        categories |= {
+            "check_" + code.replace("-", "_") for code in CHECK_CODES
+        }
+        stage = primary.get("stage")
+        scenario = primary.get("scenario")
+        category = primary.get("category")
+        summary = {
+            "primary_stage": stage
+            if type(stage) is str and stage in STAGES
+            else "unavailable",
+            "primary_category": category
+            if type(category) is str and category in categories
+            else "unavailable",
+            "scenario": scenario
+            if type(scenario) is str and scenario in SCENARIOS
+            else "setup",
+            "failed_cleanup_stages": sorted(
+                {
+                    item["stage"]
+                    for item in self.record["cleanup"]
+                    if item.get("status") == "failed"
+                    and type(item.get("stage")) is str
+                    and item["stage"] in CLEANUP_STAGES
+                }
+            ),
+            "saved_png_count": min(4, max(0, len(receipt["checks"]))),
+            "receipt_write": "failed" if receipt_write_failed else "not_failed",
+            "receipt_invalidation": "failed"
+            if invalidation_failed
+            else "not_failed",
+        }
+        print(
+            "PUBLIC_FIXTURE_FAILURE_SUMMARY "
+            + json.dumps(summary, sort_keys=True)
+        )
+
+    @contextmanager
+    def stage(self, stage: str, scenario: str = "setup"):
+        """Record failure before later cleanup can replace its exception."""
+        if stage not in STAGES or scenario not in SCENARIOS:
+            raise SmokeFailure("diagnostic-enum")
+        self.record["last_stage"] = stage
+        self.record["scenario"] = scenario
+        result = {"stage": stage, "scenario": scenario, "status": "passed"}
+        try:
+            yield
+        except BaseException as error:
+            result["status"] = "failed"
+            result["category"] = failure_category(error)
+            if (
+                stage not in CLEANUP_STAGES
+                and self.record["primary_failure"] is None
+            ):
+                self.record["primary_failure"] = dict(result)
+            raise
+        finally:
+            if stage in CLEANUP_STAGES:
+                self.record["cleanup"].append(result)
+
+
+def write_receipt_temp(path: Path, data: str):
+    """Write and close an exclusively owned staging file outside artifact paths."""
+    with path.open("x", encoding="utf-8") as stream:
+        stream.write(data)
+
+
+def publish_receipt(output: Path, receipt: dict, diagnostics: Diagnostics):
+    """Publish atomically; standalone receipts never certify overall success.
+
+    Filesystem operations can fail after taking effect. A residual receipt from
+    ambiguous publication remains pending, and must be paired with job success.
+    """
+    target = output / "receipt.json"
+    temporary = output.parent / ("." + output.name + ".receipt.tmp")
+    pending = dict(receipt)
+    pending["job_conclusion_required"] = True
+    pending["checks_status"] = (
+        "passed" if receipt["status"] == "passed" else "not_confirmed"
+    )
+    if pending["status"] == "passed":
+        pending["status"] = "pending_job_conclusion"
+    try:
+        write_receipt_temp(temporary, json.dumps(pending, indent=2) + "\n")
+        temporary.replace(target)
+    except BaseException:
+        receipt["status"] = "failed"
+        invalidation_failed = False
+        for path in (target, temporary):
+            try:
+                path.unlink(missing_ok=True)
+            except BaseException:
+                invalidation_failed = True
+        diagnostics.emit_failure(
+            receipt,
+            receipt_write_failed=True,
+            invalidation_failed=invalidation_failed,
+        )
+        raise
+    else:
+        if receipt["status"] != "passed":
+            diagnostics.emit_failure(receipt)
+
+
 def run(
     sources: dict[str, bytes],
     output: Path,
@@ -636,7 +868,7 @@ def run(
     provenance=None,
     cleanup=stop_process,
 ):
-    """Own the full fixture/driver/profile lifecycle and sanitize artifacts."""
+    """Own lifecycle and preserve sanitized primary/cleanup failures separately."""
     output.mkdir(parents=True, exist_ok=False)
     receipt = {
         "scope": "public-synthetic-render-only",
@@ -647,51 +879,67 @@ def run(
         "checks": [],
         "provenance": provenance or {"kind": "injected-offline-test"},
     }
+    diagnostics = Diagnostics(receipt)
+    temporary = None
     try:
-        with tempfile.TemporaryDirectory(prefix="public-fixture-") as temporary:
-            home = Path(temporary)
-            server = server_factory(sources)
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
+        with diagnostics.stage("setup"):
+            temporary = tempfile.TemporaryDirectory(prefix="public-fixture-")
+            home = Path(temporary.name)
+        try:
+            with diagnostics.stage("server_setup"):
+                server = server_factory(sources)
             started = False
             try:
-                thread.start()
-                started = True
-                wait_ready(
-                    lambda: request(
-                        server.server_port, "GET", "/health", limit=128
+                with diagnostics.stage("server_setup"):
+                    thread = threading.Thread(
+                        target=server.serve_forever, daemon=True
                     )
-                    == MARKER
-                )
+                    thread.start()
+                    started = True
+                with diagnostics.stage("server_readiness"):
+                    wait_ready(
+                        lambda: request(
+                            server.server_port, "GET", "/health", limit=128
+                        )
+                        == MARKER
+                    )
                 for blocked in (False, True):
                     server.blocked = blocked
                     for width, size in ((1200, "wide"), (320, "narrow")):
-                        # Ask the OS for an ephemeral port, then start a driver.
-                        # Bind races fail closed at status/session checks.
-                        with socket.socket() as reservation:
-                            reservation.bind(("127.0.0.1", 0))
-                            port = reservation.getsockname()[1]
-                        process = None
-                        driver = driver_factory(port)
+                        scenario = (
+                            ("blocked" if blocked else "review") + "-" + size
+                        )
+                        process, driver = None, None
                         profile = home / (str(blocked) + size)
                         try:
-                            process = spawn(
-                                [driver_binary, "--port=" + str(port)],
-                                start_new_session=True,
-                                env=clean_env(home),
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,
-                            )
-                            wait_ready(driver.ready)
-                            versions = driver.create(chrome, profile, width)
-                            driver.command(
-                                "POST",
-                                "/url",
-                                {
-                                    "url": "http://127.0.0.1:"
-                                    + str(server.server_port)
-                                    + "/viewer"
-                                },
-                            )
+                            with diagnostics.stage("driver_start", scenario):
+                                with socket.socket() as reservation:
+                                    reservation.bind(("127.0.0.1", 0))
+                                    port = reservation.getsockname()[1]
+                                driver = driver_factory(port)
+                                process = spawn(
+                                    [driver_binary, "--port=" + str(port)],
+                                    start_new_session=True,
+                                    env=clean_env(home),
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                )
+                            with diagnostics.stage(
+                                "driver_readiness", scenario
+                            ):
+                                wait_ready(driver.ready)
+                            with diagnostics.stage("session", scenario):
+                                versions = driver.create(chrome, profile, width)
+                            with diagnostics.stage("navigation", scenario):
+                                driver.command(
+                                    "POST",
+                                    "/url",
+                                    {
+                                        "url": "http://127.0.0.1:"
+                                        + str(server.server_port)
+                                        + "/viewer"
+                                    },
+                                )
                             observed = None
 
                             def rendered():
@@ -706,54 +954,69 @@ def run(
                                     and observed.get("loaded") is True
                                 )
 
-                            wait_ready(rendered)
-                            check_measure(observed, width, blocked)
-                            png = png_bytes(
-                                driver.command("GET", "/screenshot"), width
-                            )
-                            name = (
-                                ("blocked" if blocked else "review")
-                                + "-"
-                                + size
-                                + ".png"
-                            )
-                            (output / name).write_bytes(png)
-                            receipt["checks"].append(
-                                {
-                                    "scenario": name[:-4],
-                                    "width": width,
-                                    "height": 2400,
-                                    "status": "passed",
-                                    "runtime": versions,
-                                    "png_sha256": hashlib.sha256(
-                                        png
-                                    ).hexdigest(),
-                                }
-                            )
+                            with diagnostics.stage("render", scenario):
+                                wait_ready(rendered)
+                            with diagnostics.stage("measurement", scenario):
+                                check_measure(observed, width, blocked)
+                            with diagnostics.stage("png", scenario):
+                                png = png_bytes(
+                                    driver.command("GET", "/screenshot"), width
+                                )
+                            with diagnostics.stage("write", scenario):
+                                (output / (scenario + ".png")).write_bytes(png)
+                                receipt["checks"].append(
+                                    {
+                                        "scenario": scenario,
+                                        "width": width,
+                                        "height": 2400,
+                                        "status": "passed",
+                                        "runtime": versions,
+                                        "png_sha256": hashlib.sha256(
+                                            png
+                                        ).hexdigest(),
+                                    }
+                                )
                         finally:
                             try:
-                                driver.close()
+                                if driver is not None:
+                                    with diagnostics.stage(
+                                        "session_cleanup", scenario
+                                    ):
+                                        driver.close()
                             finally:
                                 try:
-                                    cleanup(process)
+                                    with diagnostics.stage(
+                                        "process_cleanup", scenario
+                                    ):
+                                        cleanup(process)
                                 finally:
-                                    if profile.exists():
-                                        shutil.rmtree(profile)
+                                    with diagnostics.stage(
+                                        "profile_cleanup", scenario
+                                    ):
+                                        if profile.exists():
+                                            shutil.rmtree(profile)
             finally:
                 try:
                     if started:
-                        server.shutdown()
+                        with diagnostics.stage("server_shutdown"):
+                            server.shutdown()
                 finally:
-                    server.server_close()
-                    if started:
-                        thread.join(timeout=3)
-                        if thread.is_alive():
-                            raise SmokeFailure("server-cleanup")
+                    try:
+                        with diagnostics.stage("server_close"):
+                            server.server_close()
+                    finally:
+                        if started:
+                            with diagnostics.stage("server_join"):
+                                thread.join(timeout=3)
+                                if thread.is_alive():
+                                    raise SmokeFailure("server-cleanup")
+        finally:
+            if temporary is not None:
+                with diagnostics.stage("temporary_cleanup"):
+                    temporary.cleanup()
         receipt["status"] = "passed"
     finally:
-        (output / "receipt.json").write_text(
-            json.dumps(receipt, indent=2) + "\n"
-        )
+        publish_receipt(output, receipt, diagnostics)
 
 
 def main() -> int:
@@ -786,17 +1049,11 @@ def main() -> int:
             "PUBLIC_FIXTURE_RENDER_CHECKS_PASSED; manual PNG inspection pending"
         )
         return 0
-    except (
-        SmokeFailure,
-        OSError,
-        ValueError,
-        http.client.HTTPException,
-        subprocess.SubprocessError,
-    ):
+    except BaseException:
         print(
-            "PUBLIC_FIXTURE_RENDER_CHECKS_FAILED; no raw diagnostics retained"
+            "PUBLIC_FIXTURE_RENDER_CHECKS_FAILED; sanitized receipt if initialized"
         )
-        return 1
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
