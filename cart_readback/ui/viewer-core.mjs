@@ -63,7 +63,7 @@ export function validateViewer(data) {
       || m.provider !== 'google-gemini-generate-content'
       || !['gemini-2.5-flash-lite', 'gemini-3.5-flash-lite'].includes(m.model_version)
       || m.model_version !== data.viewer.configured_model
-      || m.prompt_version !== 'cartreadback-prompt-v2-wire'
+      || !['cartreadback-prompt-v2-wire', 'cartreadback-prompt-v3-span-hints'].includes(m.prompt_version)
       || m.adapter_version !== 'genuine-gemini-generation-v1'
       || m.validator_version !== 'strict-spans-v1+ordered-results-v1'
       || m.is_fixture !== false || m.execution_mode !== MODE || !KINDS.includes(m.execution_kind)
@@ -114,4 +114,5 @@ export function accountingText(c) {
       : 'Provider usage recorded; not an invoice or a correctness judgment.'} Accounting: ${a.accounting_state.toUpperCase()}. ${
     a.accounting_state === 'unknown' ? 'UNKNOWN is retained; capacity stays held. Do not retry or renew the analysis.' : 'Accounting does not establish semantic truth.'}`;
 }
+
 
