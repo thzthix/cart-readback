@@ -24,7 +24,8 @@ from cartreadback_app.responses_http import _check_deadline, _StrictHTTPResponse
 from cartreadback_app.validation import AppError
 
 _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
-_KEY = re.compile(r"[A-Za-z0-9_-]{1,256}")
+# Opaque header value; 4096 is our defensive bound, not a Google format.
+_KEY = re.compile(r"[!-~]{1,4096}")
 
 
 def _expected_length(response):
