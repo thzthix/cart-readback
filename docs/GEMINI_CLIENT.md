@@ -1,4 +1,4 @@
-# Gemini generateContent client, not yet connected
+# Gemini generateContent client and current evidence boundary
 
 The owner selected an existing Gemini key. The OpenAI Responses request and
 runtime cannot accept that key: Gemini uses a different endpoint,
@@ -6,13 +6,26 @@ authentication, request schema and response/usage envelope. This change adds a
 concrete Gemini client and HTTPS implementation, without claiming a successful
 provider call. The [separate host-only Service bridge](GEMINI_SERVICE.md) now
 selects these modules through durable authorization and a two-stage runner.
-The default app/HTTP/UI remain fixture-only. No actual key setup or provider
-observation has been verified.
+The default app/HTTP/UI remain fixture-only. The original implementation
+evidence below used fabricated responses. For subsequent real authentication,
+generation and limited application observations, see the dated
+[current status](../README.md#current-integration-status--november-10-2026).
+A validated transport/usage observation is not an accepted proposal or working
+PayPal checkout.
 
 ## Implemented contract
 
 `GeminiClient` prepares canonical UTF-8 text-only requests using the exact
-verified v2 evidence system/user prompt and schema. Two exact endpoints are
+verified production prompt bundle and schema. PR84 identifies the current
+bundle as `cartreadback-prompt-v3-span-hints`, even though its artifact directory
+retains the `v2-wire` name. The host derives optional `evidence_span_hints` from
+source text only: at most 16 exact source-ID/codepoint-start/end/quote entries,
+with at most 1,000 codepoints per quote, within 8 KiB of canonical UTF-8 JSON. Hints label no semantic match/conflict
+status. Request-size fallback occurs before dispatch, never as a retry. The
+output schema and exact evidence validation remain strict: no quote repair or
+conversion of invalid output to success. General model improvement or the
+isolated causal benefit of hints remains unverified.
+Two exact endpoints are
 allowlisted, one for the explicitly selected model:
 
 - `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent`
@@ -36,10 +49,13 @@ conditions, and exact code-point evidence spans. An optional standard-base64
 `thoughtSignature` may accompany that final text; it is bounded, validated and
 discarded, never persisted/replayed or treated as authority. A missing/False
 `thought` marker is supported; actual thought content is rejected. Multiple
-parts and tools remain unsupported. No Markdown repair, fallback or conversion
-of technical failures to successful unknown results occurs. Required input,
-candidate and total usage counters and optional thoughts must be nonnegative
-integers with consistent sum. Output observation includes both candidate and
+visible text Parts are concatenated in order; unsupported parts and tools are
+rejected. No Markdown repair, fallback or conversion
+of technical failures to successful unknown results occurs. Omitted
+`candidatesTokenCount` and optional `thoughtsTokenCount` default to zero;
+`promptTokenCount` and `totalTokenCount` remain required. This is not permission
+to invent unknown usage. Present counters must be nonnegative integers with
+consistent sums and all existing model/accounting checks. Output observation includes both candidate and
 thinking tokens and is capped by the requested output limit. Nonzero thoughts
 fail for the 2.5 zero-thinking contract. Nonzero cache/tool or unknown token
 counters, contradictory details and non-text token details fail closed. Empty
@@ -82,8 +98,8 @@ transport never replenishes external capacity.
 1. Obtain a supported secure route to the owner's existing key, verify its
    Google account/project and current model/tier/pricing. Do not paste a key into
    chat or commit it. Creation of a new key is not an automatic fallback.
-2. Obtain required action-time approval for credential transmission/provisioning
-   and any persistent access. Select a concrete synthetic catalog/data scope,
+2. Establish the applicable authorization for the concrete credential use,
+   data transmission, spending and any persistent access. Select a concrete synthetic catalog/data scope,
    owner, finite generation attempts, input/output limits and maximum spend.
    A billing-cap notification alone grants none of this authority.
 3. Review the host-only [Gemini Service/runner](GEMINI_SERVICE.md) against its
@@ -93,7 +109,9 @@ transport never replenishes external capacity.
    provider behavior. PayPal and inference authority remain independent.
 4. With those gates satisfied, run a bounded provider acceptance test, retain
    sanitized actual observations and usage, then test source-backed semantics
-   and buyer benefit against the same-source table. These stages have not run.
+   and buyer benefit against the same-source table. See the dated current status
+   for actual observations; accepted application output, native viewing and buyer
+   benefit are not established by the diagnostic generation alone.
 
 ## Evidence and sources
 
@@ -122,7 +140,9 @@ MINIMAL thinking without a zero-thinking guarantee. Sources also include:
 - https://ai.google.dev/gemini-api/docs/deprecations
 - https://ai.google.dev/gemini-api/docs/generate-content/thinking
 
-No live API/schema or current price was verified. This client adds no vendor SDK,
-changes no frozen prompt/payment source, and creates no persistent credential.
+No live API/schema or current price was verified in that November 7 research.
+The later v3 production prompt change is described above; corpus/gold and payment
+authority are not changed. This client adds no vendor SDK or persistent credential.
 The separate Service bridge adds Gemini ledger tables without changing runtime
 defaults.
+
