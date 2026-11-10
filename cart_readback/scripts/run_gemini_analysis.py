@@ -132,7 +132,7 @@ class InheritedPipeCredential:
         return self._binding
 
     def borrow(self, *, expected_binding, deadline):
-        """Read at most 256 ASCII key bytes after durable dispatch authorization."""
+        """Read bounded opaque key bytes after durable dispatch authorization."""
         if expected_binding != self._binding or type(deadline) is not Deadline:
             raise _blocked()
         deadline.remaining()
@@ -154,16 +154,17 @@ class InheritedPipeCredential:
                 if not readable:
                     raise _blocked()
                 try:
-                    part = os.read(self._descriptor, 257 - len(raw))
+                    part = os.read(self._descriptor, 4097 - len(raw))
                 except BlockingIOError:
                     continue
                 if not part:
                     break
                 raw.extend(part)
-                if len(raw) > 256:
+                if len(raw) > 4096:
                     raise _blocked()
+            # Local defensive cap, not a provider key-format guarantee.
             value = raw.decode("ascii")
-            if re.fullmatch(r"[A-Za-z0-9_-]{1,256}", value) is None:
+            if re.fullmatch(r"[!-~]{1,4096}", value) is None:
                 raise _blocked()
             deadline.remaining()
             return value

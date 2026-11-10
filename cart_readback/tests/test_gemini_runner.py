@@ -281,10 +281,50 @@ class PipeTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 0.5)
 
     def test_overlong_key_rejected(self):
-        os.write(self.write, b"x" * 257)
+        os.write(self.write, b"x" * 4097)
         os.close(self.write)
         with self.assertRaises(AppError):
             self.borrow(self.handle())
+
+    def test_opaque_key_preserved_at_local_limit(self):
+        value = b"fake.authorization+token/with=" + b"x" * 4066
+        self.assertEqual(len(value), 4096)
+        os.write(self.write, value)
+        os.close(self.write)
+        handle = self.handle()
+        self.assertEqual(self.borrow(handle), value.decode("ascii"))
+        with self.assertRaises(AppError):
+            self.borrow(handle)
+
+    def test_invalid_graphic_ascii_rejected_and_consumed(self):
+        os.close(self.write)
+        for value in (
+            b"",
+            b" ",
+            b"fake key",
+            b"fake\t",
+            b"fake\r",
+            b"fake\n",
+            b"fake\x00",
+            b"fake\x7f",
+            b"fake\xff",
+            "é".encode("utf-8"),
+            b"x" * 4097,
+        ):
+            with self.subTest(value=value[:10]):
+                read, write = os.pipe()
+                try:
+                    os.write(write, value)
+                finally:
+                    os.close(write)
+                try:
+                    handle = runner.InheritedPipeCredential(read, self.binding)
+                    with self.assertRaises(AppError):
+                        self.borrow(handle)
+                    with self.assertRaises(AppError):
+                        self.borrow(handle)
+                finally:
+                    os.close(read)
 
     def test_newline_key_rejected(self):
         os.write(self.write, b"synthetic_key\n")
