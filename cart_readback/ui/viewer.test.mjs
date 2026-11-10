@@ -70,6 +70,41 @@ test('reload only reads, failures never retry or proceed after uncertain redempt
   }
 });
 const html = readFileSync(new URL('./viewer.html', import.meta.url), 'utf8');
+function diagnosticFixture() {
+  const d = fixture();
+  Object.assign(d.checkout, {state: 'ANALYSIS_BLOCKED', snapshot_hash: null, results: [], analysis_error: 'MODEL_OUTCOME_UNKNOWN',
+    analysis_diagnostic: {stage: 'status', category: 'MODEL_UNAVAILABLE', http_status: 400}});
+  Object.assign(d.checkout.analysis, {accounting_state: 'unknown', usage_observed: false, evidence_kind: 'none'});
+  return d;
+}
+test('bounded optional failure diagnostics preserve UNKNOWN display and no actions', () => {
+  for (const status of [null, 100, 200, 400, 401, 403, 429, 500, 599]) {
+    const d = diagnosticFixture(); d.checkout.analysis_diagnostic.http_status = status;
+    const document = dom(); renderViewer(d, document);
+    const nodes = flatten(document.getElementById('viewer-content'));
+    assert.match(nodes.map(n => n.textContent).join(' '), /UNKNOWN is retained/);
+    assert.equal(nodes.some(n => ['button', 'input', 'form', 'a'].includes(n.tag)), false);
+    assert.equal(d.checkout.snapshot_hash, null); assert.equal(d.checkout.results.length, 0);
+  }
+  const d = diagnosticFixture(); delete d.checkout.analysis_diagnostic; validateViewer(d);
+});
+test('only exact server diagnostic vocabulary is accepted on blocked checkouts', () => {
+  for (const stage of ['preconnect', 'guard', 'connect', 'credential', 'request', 'status', 'body', 'cleanup', 'exchange', 'exchange-validation']) {
+    for (const category of ['MODEL_TIMEOUT', 'MODEL_UNAVAILABLE', 'GEMINI_CAPACITY_BLOCKED', 'GEMINI_RUN_BLOCKED', 'UNEXPECTED_FAILURE', 'MODEL_OUTCOME_UNKNOWN', 'MODEL_REFUSED', 'MODEL_INCOMPLETE', 'INVALID_PROPOSAL', 'STALE_SNAPSHOT']) {
+      const d = diagnosticFixture(); Object.assign(d.checkout.analysis_diagnostic, {stage, category}); validateViewer(d);
+    }
+  }
+  for (const change of [d => d.checkout.analysis_diagnostic = null, d => d.checkout.analysis_diagnostic = [],
+    d => delete d.checkout.analysis_diagnostic.stage, d => d.checkout.analysis_diagnostic.extra = 'unsafe',
+    d => d.checkout.analysis_diagnostic.stage = 'private detail', d => d.checkout.analysis_diagnostic.category = 'private detail',
+    ...[null, true, 1, {}, [], new String('status')].map(stage => d => d.checkout.analysis_diagnostic.stage = stage),
+    ...[null, false, 1, {}, [], new String('MODEL_UNAVAILABLE')].map(category => d => d.checkout.analysis_diagnostic.category = category),
+    ...[true, false, '400', 99, 600, 400.5, NaN, Infinity, {}, []].map(status => d => d.checkout.analysis_diagnostic.http_status = status)]) {
+    const d = diagnosticFixture(); change(d); assert.throws(() => validateViewer(d));
+  }
+  const d = fixture(); d.checkout.analysis_diagnostic = diagnosticFixture().checkout.analysis_diagnostic;
+  assert.throws(() => validateViewer(d));
+});
 const inline = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 test('first inline bootstrap strips capability before any module/asset request', async () => {
   const events = []; const code = inline.replace("import('/viewer.mjs')", "load('/viewer.mjs')");
@@ -176,3 +211,4 @@ test('blocked UNKNOWN keeps all approved conditions visible without accepted res
   assert.ok(summary); assert.match(summary.textContent, /UK QWERTY/); assert.match(summary.textContent, /any cable/);
   assert.match(flatten(document.getElementById('viewer-content')).map(n => n.textContent).join(' '), /No accepted proposal/);
 });
+

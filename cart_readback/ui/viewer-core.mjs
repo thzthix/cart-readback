@@ -6,6 +6,14 @@ const exact = (v, keys) => v !== null && typeof v === 'object' && !Array.isArray
   && Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
 const text = (v, max = 16000) => typeof v === 'string' && v.length > 0 && Array.from(v).length <= max;
 const fail = () => { throw new Error('Unsupported or inconsistent review data. No action is available.'); };
+const DIAGNOSTIC_STAGES = new Set(['preconnect', 'guard', 'connect', 'credential', 'request', 'status', 'body', 'cleanup', 'exchange', 'exchange-validation']);
+const DIAGNOSTIC_CATEGORIES = new Set(['MODEL_TIMEOUT', 'MODEL_UNAVAILABLE', 'GEMINI_CAPACITY_BLOCKED', 'GEMINI_RUN_BLOCKED', 'UNEXPECTED_FAILURE', 'MODEL_OUTCOME_UNKNOWN', 'MODEL_REFUSED', 'MODEL_INCOMPLETE', 'INVALID_PROPOSAL', 'STALE_SNAPSHOT']);
+function validateDiagnostic(checkout) {
+  const d = checkout.analysis_diagnostic;
+  if (checkout.state !== 'ANALYSIS_BLOCKED' || !exact(d, ['stage', 'category', 'http_status'])
+      || !DIAGNOSTIC_STAGES.has(d.stage) || !DIAGNOSTIC_CATEGORIES.has(d.category)
+      || !(d.http_status === null || (Number.isInteger(d.http_status) && d.http_status >= 100 && d.http_status <= 599))) fail();
+}
 function source(s) {
   if (!exact(s, ['source_id', 'revision', 'sha256', 'text']) || !text(s.source_id, 128)
       || !Number.isSafeInteger(s.revision) || s.revision < 1 || !/^[a-f0-9]{64}$/.test(s.sha256)
@@ -42,6 +50,10 @@ export function validateViewer(data) {
   const checkoutKeys = ['review_id', 'state', 'sku_id', 'conditions', 'results', 'snapshot_hash', 'confirmation_id', 'order', 'amount', 'source', 'model', 'analysis'];
   if (c && Object.hasOwn(c, 'stale')) checkoutKeys.push('stale');
   if (c && Object.hasOwn(c, 'analysis_error')) checkoutKeys.push('analysis_error');
+  if (c && Object.hasOwn(c, 'analysis_diagnostic')) {
+    checkoutKeys.push('analysis_diagnostic');
+    validateDiagnostic(c);
+  }
   if (!exact(c, checkoutKeys) || (Object.hasOwn(c, 'analysis_error')
       && (c.state !== 'ANALYSIS_BLOCKED' || !text(c.analysis_error, 128)))
       || !exact(c.amount, ['minor', 'currency']) || !['REVIEW_REQUIRED', 'ANALYSIS_BLOCKED'].includes(c.state)
@@ -102,3 +114,4 @@ export function accountingText(c) {
       : 'Provider usage recorded; not an invoice or a correctness judgment.'} Accounting: ${a.accounting_state.toUpperCase()}. ${
     a.accounting_state === 'unknown' ? 'UNKNOWN is retained; capacity stays held. Do not retry or renew the analysis.' : 'Accounting does not establish semantic truth.'}`;
 }
+
