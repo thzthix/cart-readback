@@ -28,8 +28,9 @@ fixed conditions, accepted by the schema and exact-evidence validators, with
 no retry. It does not establish general model accuracy, semantic entailment,
 buyer benefit, native rendering, PayPal acceptance or a zero-charge invoice.
 The isolated causal benefit of hints is not established. Earlier UNKNOWN and
-invalid outcomes remain separate history; the original bad coordinates are
-still unknown and were not repaired or reinterpreted.
+invalid outcomes remain separate history; the original offset-versus-quotation
+mismatch remains unexplained. The discarded output was not repaired or
+reinterpreted.
 
 Native viewer rendering/keyboard behavior and real PayPal Sandbox integration
 remain unverified. A local browser probe encountered connection failure and then
