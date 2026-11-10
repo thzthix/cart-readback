@@ -218,3 +218,37 @@ uploaded file and its compressed size. The ZIP content was not readable, so its
 filename and the number of saved PNGs were not verified. Actual pixels observed
 remain zero; saved PNG count is unknown, not proven zero. New injected unit-test
 PNG counts are separate synthetic test observations, not evidence about that run.
+
+## Issue #94: bounded operation and HTTP diagnostics
+
+The latest approved render failure was localized to `session/check_http` in
+`review-wide`, before navigation, with saved PNG count zero in its safe summary.
+That observation alone did not distinguish session creation from timeout
+configuration, or non-200 response from an oversized response. This change
+only adds discriminating metadata; it neither fixes browser startup nor proves
+the cause. No additional hosted experiment is authorized by these source files.
+
+Known check failures during session setup now carry a closed `operation` label:
+`session_create`, `session_timeouts`, or `version`. Other/unrecognized exceptions
+remain `unavailable` rather than being relabeled by their message. HTTP check
+failures carry `http_kind: non_200` or `oversize`, with `http_status` only when it
+is a plain integer from 100 through 599. Boolean, string, out-of-range and hostile
+values become `unavailable`. A non-200 response takes precedence if its body is
+also oversized; the oversized non-200 body is not parsed.
+
+For a bounded non-200 JSON body, only `value.error` is matched against an exact
+closed list of standard WebDriver errors. Examples are `session_not_created`,
+`invalid_argument`, `timeout`, and `unknown_error`; unrecognized labels become
+`unavailable`. No message, stacktrace, URL, session ID, data object, response body
+or arbitrary type name enters receipt or stdout. This classification is not a
+substring-based causal inference. An allowed error label still does not prove
+why Chrome failed or justify changing sandbox/security flags.
+
+The four safe metadata fields are validated again when recorded and printed.
+Only exact owned `SmokeFailure` instances expose their sanitized fields;
+unrecognized subclasses do not have their accessors inspected. Source files,
+request limits/routes, Chrome arguments, assertions, atomic pending receipts,
+cleanup invariants and manual run guards are unchanged. The workflow diff is
+only the two QA helper hash pins. Offline tests capture fake failure-summary
+stdout inside tests, while preserving the normal unittest results; an offline
+negative control must not look like a live hosted render failure.

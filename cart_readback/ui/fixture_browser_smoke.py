@@ -70,13 +70,112 @@ CHECK_CODES = frozenset(
 )
 
 
+OPERATIONS = frozenset({"session_create", "session_timeouts", "version"})
+HTTP_KINDS = frozenset({"non_200", "oversize"})
+WEBDRIVER_ERRORS = {
+    "session not created": "session_not_created",
+    "invalid argument": "invalid_argument",
+    "timeout": "timeout",
+    "unknown error": "unknown_error",
+    "invalid session id": "invalid_session_id",
+    "unknown command": "unknown_command",
+    "unsupported operation": "unsupported_operation",
+    "javascript error": "javascript_error",
+    "script timeout": "script_timeout",
+    "no such window": "no_such_window",
+}
+
+
 class SmokeFailure(Exception):
     """A bounded check with a sanitized, closed-set internal reason code."""
 
-    def __init__(self, code):
+    def __init__(
+        self,
+        code,
+        *,
+        operation=None,
+        http_kind=None,
+        http_status=None,
+        webdriver_error=None,
+    ):
         """Discard unknown/non-string inputs without converting them to text."""
         self.code = code if type(code) is str and code in CHECK_CODES else None
+        self.operation = (
+            operation
+            if type(operation) is str and operation in OPERATIONS
+            else "unavailable"
+        )
+        self.http_kind = (
+            http_kind
+            if self.code == "http"
+            and type(http_kind) is str
+            and http_kind in HTTP_KINDS
+            else "unavailable"
+        )
+        self.http_status = (
+            http_status
+            if self.code == "http"
+            and type(http_status) is int
+            and 100 <= http_status <= 599
+            else "unavailable"
+        )
+        self.webdriver_error = (
+            webdriver_error
+            if type(webdriver_error) is str
+            and webdriver_error in WEBDRIVER_ERRORS.values()
+            else "unavailable"
+        )
         super().__init__(self.code or "check_failed")
+
+
+@contextmanager
+def failure_operation(operation: str):
+    """Tag only owned check failures; never inspect arbitrary error objects."""
+    if operation not in OPERATIONS:
+        raise SmokeFailure("diagnostic-enum")
+    try:
+        yield
+    except SmokeFailure as error:
+        if type(error) is SmokeFailure:
+            error.operation = operation
+        raise
+
+
+def safe_failure_metadata(
+    operation=None, http_kind=None, http_status=None, webdriver_error=None
+):
+    """Return only known labels and a plain bounded HTTP integer."""
+    return {
+        "webdriver_error": webdriver_error
+        if type(webdriver_error) is str
+        and webdriver_error in WEBDRIVER_ERRORS.values()
+        else "unavailable",
+        "operation": operation
+        if type(operation) is str and operation in OPERATIONS
+        else "unavailable",
+        "http_kind": http_kind
+        if type(http_kind) is str and http_kind in HTTP_KINDS
+        else "unavailable",
+        "http_status": http_status
+        if type(http_status) is int and 100 <= http_status <= 599
+        else "unavailable",
+    }
+
+
+def bounded_webdriver_error(data: bytes) -> str:
+    """Classify only a standard error label, never message or other fields."""
+    try:
+        root = json.loads(data)
+    except (ValueError, UnicodeError):
+        return "unavailable"
+    if not isinstance(root, dict) or not isinstance(root.get("value"), dict):
+        return "unavailable"
+    label = root["value"].get("error")
+    return (
+        WEBDRIVER_ERRORS.get(label, "unavailable")
+        if type(label) is str
+        else "unavailable"
+    )
 
 
 def checked_sources(directory: Path) -> dict[str, bytes]:
@@ -302,8 +401,18 @@ def request(port: int, method: str, path: str, payload=None, limit=MAX_BODY):
         )
         response = connection.getresponse()
         data = response.read(limit + 1)
-        if response.status != 200 or len(data) > limit:
-            raise SmokeFailure("http")
+        status = response.status
+        if type(status) is not int or status != 200:
+            raise SmokeFailure(
+                "http",
+                http_kind="non_200",
+                http_status=status,
+                webdriver_error=bounded_webdriver_error(data)
+                if len(data) <= limit
+                else "unavailable",
+            )
+        if len(data) > limit:
+            raise SmokeFailure("http", http_kind="oversize", http_status=status)
         return data
     finally:
         connection.close()
@@ -388,45 +497,53 @@ class Driver:
                 }
             },
         }
-        value = self.call(
-            "POST",
-            "/session",
-            {
-                "capabilities": {
-                    "alwaysMatch": {
-                        "browserName": "chrome",
-                        "goog:chromeOptions": options,
+        with failure_operation("session_create"):
+            value = self.call(
+                "POST",
+                "/session",
+                {
+                    "capabilities": {
+                        "alwaysMatch": {
+                            "browserName": "chrome",
+                            "goog:chromeOptions": options,
+                        }
                     }
-                }
-            },
-        )
-        if not isinstance(value, dict) or not re.fullmatch(
-            r"[a-zA-Z0-9-]{1,128}", str(value.get("sessionId", ""))
-        ):
-            raise SmokeFailure("session")
-        self.session = value["sessionId"]
-        self.command(
-            "POST",
-            "/timeouts",
-            {"implicit": 0, "pageLoad": 10000, "script": 5000},
-        )
-        capabilities = value.get("capabilities", {})
-        if not isinstance(capabilities, dict) or not isinstance(
-            capabilities.get("chrome"), dict
-        ):
-            raise SmokeFailure("version")
-        version = capabilities.get("browserVersion", "")
-        driver_version = capabilities["chrome"].get("chromedriverVersion", "")
-        if not isinstance(version, str) or not isinstance(driver_version, str):
-            raise SmokeFailure("version")
-        driver_version = driver_version.split(" ")[0]
-        if not all(
-            re.fullmatch(r"[0-9.]{1,40}", v) for v in (version, driver_version)
-        ):
-            raise SmokeFailure("version")
-        if version.split(".")[0] != driver_version.split(".")[0]:
-            raise SmokeFailure("version")
-        return {"chrome": version, "chromedriver": driver_version}
+                },
+            )
+            if not isinstance(value, dict) or not re.fullmatch(
+                r"[a-zA-Z0-9-]{1,128}", str(value.get("sessionId", ""))
+            ):
+                raise SmokeFailure("session")
+            self.session = value["sessionId"]
+        with failure_operation("session_timeouts"):
+            self.command(
+                "POST",
+                "/timeouts",
+                {"implicit": 0, "pageLoad": 10000, "script": 5000},
+            )
+        with failure_operation("version"):
+            capabilities = value.get("capabilities", {})
+            if not isinstance(capabilities, dict) or not isinstance(
+                capabilities.get("chrome"), dict
+            ):
+                raise SmokeFailure("version")
+            version = capabilities.get("browserVersion", "")
+            driver_version = capabilities["chrome"].get(
+                "chromedriverVersion", ""
+            )
+            if not isinstance(version, str) or not isinstance(
+                driver_version, str
+            ):
+                raise SmokeFailure("version")
+            driver_version = driver_version.split(" ")[0]
+            if not all(
+                re.fullmatch(r"[0-9.]{1,40}", v)
+                for v in (version, driver_version)
+            ):
+                raise SmokeFailure("version")
+            if version.split(".")[0] != driver_version.split(".")[0]:
+                raise SmokeFailure("version")
+            return {"chrome": version, "chromedriver": driver_version}
 
     def command(self, method: str, suffix: str, payload=None):
         """Call a fixed session endpoint only after session creation."""
@@ -785,6 +902,14 @@ class Diagnostics:
             if invalidation_failed
             else "not_failed",
         }
+        summary.update(
+            safe_failure_metadata(
+                primary.get("operation"),
+                primary.get("http_kind"),
+                primary.get("http_status"),
+                primary.get("webdriver_error"),
+            )
+        )
         print(
             "PUBLIC_FIXTURE_FAILURE_SUMMARY "
             + json.dumps(summary, sort_keys=True)
@@ -803,6 +928,15 @@ class Diagnostics:
         except BaseException as error:
             result["status"] = "failed"
             result["category"] = failure_category(error)
+            if type(error) is SmokeFailure:
+                result.update(
+                    safe_failure_metadata(
+                        error.operation,
+                        error.http_kind,
+                        error.http_status,
+                        error.webdriver_error,
+                    )
+                )
             if (
                 stage not in CLEANUP_STAGES
                 and self.record["primary_failure"] is None
