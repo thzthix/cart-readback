@@ -4,16 +4,33 @@ name: Offline application checks
 # Adding push/pull_request triggers or dispatching a run needs that cost gate.
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Manual mode; any run consumes the separately approved run-4 slot
+        type: choice
+        options:
+        - offline-fixture
+        - gemini-connectivity
+        default: offline-fixture
+      reviewed_sha:
+        description: Exact separately reviewed 40-hex branch revision
+        type: string
+      window_start:
+        description: Absolute UTC epoch seconds; maximum 600-second window
+        type: string
+      window_end:
+        description: Absolute UTC expiry; never renewable for the run-4 slot
+        type: string
 
 permissions:
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   fixture-checks:
+    if: ${{ inputs.mode != 'gemini-connectivity' }}
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: true
     name: Python 3.11 / Node 22 fixture checks
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -105,3 +122,134 @@ jobs:
           (cd prompts && sha256sum -c SHA256SUMS)
       - name: Ensure checks left tracked source unchanged
         run: git diff --exit-code
+
+  gemini-connectivity:
+    if: ${{ inputs.mode == 'gemini-connectivity' && github.repository_id == '1443556432' && github.repository_owner_id == '95135403' && github.actor_id == '95135403' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/feat/64-disabled-connectivity-diagnostic' && github.run_number == 4 && github.run_attempt == 1 }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    concurrency:
+      group: cartreadback-gemini-connectivity-one-shot
+      cancel-in-progress: false
+    steps:
+    - name: Guard context and fetch only the hash-pinned probe
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        GITHUB_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        PROBE_MODE: ${{ inputs.mode }}
+        PROBE_REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+        PROBE_WINDOW_START: ${{ inputs.window_start }}
+        PROBE_WINDOW_END: ${{ inputs.window_end }}
+      run: |
+        python - <<'PYTHON'
+        import hashlib
+        import http.client
+        import json
+        import os
+        import pathlib
+        import re
+        import ssl
+        import time
+  
+        connection = response = None
+        headers = {}
+        try:
+            expected = {
+                "GITHUB_REPOSITORY": "thzthix/cart-readback",
+                "GITHUB_REPOSITORY_ID": "1443556432",
+                "GITHUB_REPOSITORY_OWNER_ID": "95135403",
+                "GITHUB_ACTOR_ID": "95135403",
+                "GITHUB_TRIGGERING_ACTOR": "thzthix",
+                "GITHUB_EVENT_NAME": "workflow_dispatch",
+                "GITHUB_REF": "refs/heads/feat/64-disabled-connectivity-diagnostic",
+                "GITHUB_WORKFLOW_REF": "thzthix/cart-readback/.github/workflows/application-checks.yml@refs/heads/feat/64-disabled-connectivity-diagnostic",
+                "GITHUB_RUN_NUMBER": "4", "GITHUB_RUN_ATTEMPT": "1",
+                "GITHUB_SERVER_URL": "https://github.com",
+                "GITHUB_API_URL": "https://api.github.com",
+                "PROBE_MODE": "gemini-connectivity",
+            }
+            if any(os.environ.get(k) != v for k, v in expected.items()):
+                raise ValueError()
+            reviewed = os.environ.get("PROBE_REVIEWED_SHA", "")
+            if re.fullmatch("[0-9a-f]{40}", reviewed) is None:
+                raise ValueError()
+            if os.environ.get("GITHUB_SHA") != reviewed or os.environ.get("GITHUB_WORKFLOW_SHA") != reviewed:
+                raise ValueError()
+            window = [os.environ.get(k, "") for k in ("PROBE_WINDOW_START", "PROBE_WINDOW_END")]
+            if any(re.fullmatch("[0-9]{10}", v) is None for v in window):
+                raise ValueError()
+            start, end = map(int, window)
+            if not 0 < end - start <= 600 or not start <= time.time() < end:
+                raise ValueError()
+            expires = time.monotonic() + min(10, end - time.time())
+  
+            def remaining():
+                value = min(expires - time.monotonic(), end - time.time())
+                if value <= 0:
+                    raise TimeoutError()
+                return value
+  
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.load_default_certs(ssl.Purpose.SERVER_AUTH)
+            context.keylog_filename = None
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            context.set_alpn_protocols(["http/1.1"])
+            connection = http.client.HTTPSConnection("api.github.com", 443, timeout=remaining(), context=context)
+            connection.set_debuglevel(0)
+            connection.auto_open = 0
+            connection.connect()
+            established_socket = connection.sock
+            established_socket.settimeout(remaining())
+            token = os.environ.pop("GITHUB_TOKEN")
+            headers = {"Authorization": "Bearer " + token,
+                       "Accept": "application/vnd.github.raw+json",
+                       "Accept-Encoding": "identity", "User-Agent": "cartreadback-one-shot",
+                       "Connection": "close", "X-GitHub-Api-Version": "2022-11-28"}
+            try:
+                connection.request("GET", "/repos/thzthix/cart-readback/contents/cart_readback/scripts/gemini_connectivity_diagnostic.py?ref=" + reviewed, headers=headers)
+            finally:
+                token = None
+                headers.clear()
+            established_socket.settimeout(remaining())
+            response = connection.getresponse()
+            if response.status != 200:
+                raise ValueError()
+            data = bytearray()
+            while True:
+                if isinstance(response, http.client.HTTPResponse) and response.isclosed():
+                    break
+                established_socket.settimeout(remaining())
+                chunk = response.read1(min(8192, 65537 - len(data)))
+                if not chunk:
+                    break
+                data.extend(chunk)
+                if len(data) > 65536:
+                    raise ValueError()
+            remaining()
+            if hashlib.sha256(data).hexdigest() != "63f70d552803e668ca01da01915fd2112d9020af477c9b6be6f07463cba3d790":
+                raise ValueError()
+            path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "cartreadback-gemini-probe.py"
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as output:
+                output.write(data)
+        except BaseException:
+            print(json.dumps({"status": "NOT_RUN"}))
+            raise SystemExit(2) from None
+        finally:
+            headers.clear()
+            for resource in (response, connection):
+                if resource is not None:
+                    try:
+                        resource.close()
+                    except BaseException:
+                        raise SystemExit(2) from None
+        PYTHON
+    - name: One guarded Google generation POST; no retry
+      env:
+        GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
+        GITHUB_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        PROBE_MODE: ${{ inputs.mode }}
+        PROBE_REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+        PROBE_WINDOW_START: ${{ inputs.window_start }}
+        PROBE_WINDOW_END: ${{ inputs.window_end }}
+        PROBE_SOURCE_SHA256: 63f70d552803e668ca01da01915fd2112d9020af477c9b6be6f07463cba3d790
+      run: python "$RUNNER_TEMP/cartreadback-gemini-probe.py"
