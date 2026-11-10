@@ -13,7 +13,7 @@ import threading
 import unittest
 import zlib
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import fixture_browser_smoke as smoke
 
@@ -137,6 +137,14 @@ class FakeDriver:
 
 
 class FixtureTests(unittest.TestCase):
+    def setUp(self):
+        # Test-only capture: fake negative controls must not look like hosted
+        # render failures in the preceding offline step's job output.
+        self.offline_stdout = io.StringIO()
+        capture = patch("sys.stdout", self.offline_stdout)
+        capture.start()
+        self.addCleanup(capture.stop)
+
     def test_source_manifest_exact_and_mutation(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp)
@@ -965,6 +973,190 @@ class FixtureTests(unittest.TestCase):
             summary = json.loads(stdout.getvalue().split(" ", 1)[1])
             self.assertEqual(summary["receipt_write"], "failed")
             self.assertEqual(summary["receipt_invalidation"], "failed")
+
+    def test_http_kind_status_bounds_and_body_limit(self):
+        for status, body, kind, expected_status in (
+            (500, b"private body", "non_200", 500),
+            (100, b"x", "non_200", 100),
+            (599, b"x", "non_200", 599),
+            (99, b"x", "non_200", "unavailable"),
+            (600, b"x", "non_200", "unavailable"),
+            (True, b"x", "non_200", "unavailable"),
+            ("500", b"x", "non_200", "unavailable"),
+            (200, b"12345", "oversize", 200),
+        ):
+            connection, response = Mock(), Mock()
+            connection.getresponse.return_value = response
+            response.status = status
+            response.read.side_effect = lambda n: body[:n]
+            with patch.object(
+                smoke.http.client, "HTTPConnection", return_value=connection
+            ):
+                with self.assertRaises(smoke.SmokeFailure) as caught:
+                    smoke.request(1, "POST", "/session", {}, limit=4)
+            self.assertEqual(caught.exception.http_kind, kind)
+            self.assertEqual(caught.exception.http_status, expected_status)
+            response.read.assert_called_once_with(5)
+            connection.close.assert_called_once()
+        response.status = 200
+        response.read.side_effect = lambda n: b"1234"
+        with patch.object(
+            smoke.http.client, "HTTPConnection", return_value=connection
+        ):
+            self.assertEqual(
+                smoke.request(1, "GET", "/status", limit=4), b"1234"
+            )
+
+    def test_http_w3c_error_whitelist_drops_private_fields(self):
+        for label, expected in list(smoke.WEBDRIVER_ERRORS.items()) + [
+            ("RAW_PRIVATE_SENTINEL", "unavailable")
+        ]:
+            body = json.dumps(
+                {
+                    "value": {
+                        "error": label,
+                        "message": "RAW_PRIVATE_SENTINEL https://secret.invalid/session/SECRET",
+                        "stacktrace": "SECRET",
+                        "data": {"sessionId": "SECRET"},
+                    }
+                }
+            ).encode()
+            connection, response = Mock(), Mock()
+            connection.getresponse.return_value = response
+            response.status, response.read.return_value = 500, body
+            with patch.object(
+                smoke.http.client, "HTTPConnection", return_value=connection
+            ):
+                with self.assertRaises(smoke.SmokeFailure) as caught:
+                    smoke.request(1, "POST", "/session", {})
+            self.assertEqual(caught.exception.webdriver_error, expected)
+            self.assertEqual(caught.exception.args, ("http",))
+            receipt = {"checks": []}
+            diagnostics = smoke.Diagnostics(receipt)
+            with self.assertRaises(smoke.SmokeFailure):
+                with diagnostics.stage("session", "review-wide"):
+                    with smoke.failure_operation("session_create"):
+                        raise caught.exception
+            stdout = io.StringIO()
+            with patch("sys.stdout", stdout):
+                diagnostics.emit_failure(receipt)
+            summary = json.loads(stdout.getvalue().split(" ", 1)[1])
+            self.assertEqual(summary["operation"], "session_create")
+            self.assertEqual(summary["webdriver_error"], expected)
+            self.assertEqual(summary["http_kind"], "non_200")
+            self.assertEqual(summary["http_status"], 500)
+            self.assertNotIn("SECRET", stdout.getvalue() + json.dumps(receipt))
+            self.assertNotIn(
+                "secret.invalid", stdout.getvalue() + json.dumps(receipt)
+            )
+        for body in (b"bad", b"[]", b'{"value":[]}', b'{"value":{"error":5}}'):
+            self.assertEqual(smoke.bounded_webdriver_error(body), "unavailable")
+
+    def test_oversized_error_body_not_parsed(self):
+        connection, response = Mock(), Mock()
+        connection.getresponse.return_value = response
+        response.status, response.read.return_value = 500, b"12345"
+        with (
+            patch.object(
+                smoke.http.client, "HTTPConnection", return_value=connection
+            ),
+            patch.object(smoke, "bounded_webdriver_error") as parser,
+        ):
+            with self.assertRaises(smoke.SmokeFailure) as caught:
+                smoke.request(1, "POST", "/session", {}, limit=4)
+        parser.assert_not_called()
+        self.assertEqual(caught.exception.http_kind, "non_200")
+        self.assertEqual(caught.exception.webdriver_error, "unavailable")
+
+    def test_exact_session_operation_and_version_check(self):
+        for operation in ("session_create", "session_timeouts", "version"):
+            calls = []
+
+            def transport(port, method, path, payload):
+                calls.append(path)
+                if (operation == "session_create" and path == "/session") or (
+                    operation == "session_timeouts"
+                    and path.endswith("/timeouts")
+                ):
+                    raise smoke.SmokeFailure(
+                        "http",
+                        http_kind="non_200",
+                        http_status=500,
+                        webdriver_error="session_not_created",
+                    )
+                if path == "/session":
+                    return json.dumps(
+                        {
+                            "value": {
+                                "sessionId": "PRIVATESESSION",
+                                "capabilities": {
+                                    "browserVersion": "156.0",
+                                    "chrome": {"chromedriverVersion": "155.0"},
+                                },
+                            }
+                        }
+                    ).encode()
+                return b'{"value":null}'
+
+            driver = smoke.Driver(1, transport)
+            receipt = {"checks": []}
+            diagnostics = smoke.Diagnostics(receipt)
+            with self.assertRaises(smoke.SmokeFailure):
+                with diagnostics.stage("session", "review-wide"):
+                    driver.create("/fixed/chrome", Path("/fixed/profile"), 1200)
+            primary = receipt["diagnostics"]["primary_failure"]
+            self.assertEqual(primary["operation"], operation)
+            self.assertEqual(
+                primary["category"],
+                "check_version" if operation == "version" else "check_http",
+            )
+            self.assertEqual(
+                len(calls), 1 if operation == "session_create" else 2
+            )
+            self.assertNotIn("PRIVATESESSION", json.dumps(receipt))
+
+    def test_http_metadata_hostility_and_subclass_fallback(self):
+        class Hostile:
+            def __str__(self):
+                raise AssertionError("str accessed")
+
+            def __hash__(self):
+                raise AssertionError("hash accessed")
+
+        class HostileFailure(smoke.SmokeFailure):
+            @property
+            def operation(self):
+                raise AssertionError("subclass accessor read")
+
+        for value in (Hostile(), True, 99, 600, "RAW_PRIVATE_SENTINEL"):
+            error = smoke.SmokeFailure(
+                "http",
+                operation=value,
+                http_kind=value,
+                http_status=value,
+                webdriver_error=value,
+            )
+            metadata = smoke.safe_failure_metadata(
+                error.operation,
+                error.http_kind,
+                error.http_status,
+                error.webdriver_error,
+            )
+            self.assertEqual(set(metadata.values()), {"unavailable"})
+        error = HostileFailure.__new__(HostileFailure)
+        Exception.__init__(error, "RAW_PRIVATE_SENTINEL")
+        receipt = {"checks": []}
+        diagnostics = smoke.Diagnostics(receipt)
+        with self.assertRaises(HostileFailure):
+            with diagnostics.stage("session", "review-wide"):
+                with smoke.failure_operation("session_create"):
+                    raise error
+        self.assertEqual(
+            receipt["diagnostics"]["primary_failure"]["category"],
+            "check_failed",
+        )
+        self.assertNotIn("operation", receipt["diagnostics"]["primary_failure"])
+        self.assertNotIn("RAW_PRIVATE_SENTINEL", json.dumps(receipt))
 
 
 if __name__ == "__main__":
