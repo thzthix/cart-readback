@@ -19,6 +19,7 @@ from cartreadback_app.genuine_responses import (
     GenuineExchange,
     PreparedGeneration,
 )
+from cartreadback_app.inference import rejection_rule
 from cartreadback_app.responses_adapter import Deadline
 from cartreadback_app.validation import AppError, canonical, text_hash
 
@@ -172,7 +173,14 @@ class GenuineGeminiAdapter:
 
     @staticmethod
     def classify(exchange, policy, prepared):
-        """Keep valid accounting when semantic/refusal validation rejects prose."""
+        """Keep the existing three-value accounting/proposal contract."""
+        return GenuineGeminiAdapter.classify_with_rule(
+            exchange, policy, prepared
+        )[:3]
+
+    @staticmethod
+    def classify_with_rule(exchange, policy, prepared):
+        """Add one fixed rejection rule without changing the verdict."""
         try:
             usage = json.loads(parse_accounting(exchange.envelope, policy))
             fault = (
@@ -183,7 +191,8 @@ class GenuineGeminiAdapter:
         except AppError:
             fault = True
         if fault:
-            return True, "MODEL_OUTCOME_UNKNOWN", None
+            return True, "MODEL_OUTCOME_UNKNOWN", None, None
+        rule = "RULE_PREPARED_REQUEST"
         try:
             inputs = json.loads(prepared.inputs_json)
             client = GeminiClient(
@@ -196,8 +205,9 @@ class GenuineGeminiAdapter:
             rebuilt = client.prepare(inputs["source"], inputs["conditions"])
             if rebuilt.body != prepared.request:
                 raise blocked()
+            rule = "RULE_UNCLASSIFIED"
             observation = client.parse(rebuilt, exchange.envelope)
-            return False, "", observation.results
+            return False, "", observation.results, None
         except AppError as error:
             code = (
                 error.code
@@ -205,6 +215,13 @@ class GenuineGeminiAdapter:
                 in {"MODEL_REFUSED", "MODEL_INCOMPLETE", "MODEL_UNAVAILABLE"}
                 else "INVALID_PROPOSAL"
             )
-            return False, code, None
+            return (
+                False,
+                code,
+                None,
+                (rejection_rule(error) or rule)
+                if code == "INVALID_PROPOSAL"
+                else None,
+            )
         except Exception:
-            return False, "INVALID_PROPOSAL", None
+            return False, "INVALID_PROPOSAL", None, "RULE_UNCLASSIFIED"

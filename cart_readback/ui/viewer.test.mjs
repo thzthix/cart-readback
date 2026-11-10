@@ -90,7 +90,7 @@ test('bounded optional failure diagnostics preserve UNKNOWN display and no actio
 });
 test('only exact server diagnostic vocabulary is accepted on blocked checkouts', () => {
   for (const stage of ['preconnect', 'guard', 'connect', 'credential', 'request', 'status', 'body', 'cleanup', 'exchange', 'exchange-validation']) {
-    for (const category of ['MODEL_TIMEOUT', 'MODEL_UNAVAILABLE', 'GEMINI_CAPACITY_BLOCKED', 'GEMINI_RUN_BLOCKED', 'UNEXPECTED_FAILURE', 'MODEL_OUTCOME_UNKNOWN', 'MODEL_REFUSED', 'MODEL_INCOMPLETE', 'INVALID_PROPOSAL', 'STALE_SNAPSHOT']) {
+    for (const category of ['MODEL_TIMEOUT', 'MODEL_UNAVAILABLE', 'GEMINI_CAPACITY_BLOCKED', 'GEMINI_RUN_BLOCKED', 'UNEXPECTED_FAILURE', 'MODEL_OUTCOME_UNKNOWN', 'MODEL_REFUSED', 'MODEL_INCOMPLETE', 'INVALID_PROPOSAL', 'STALE_SNAPSHOT', 'RULE_CANDIDATE_INDEX', 'RULE_CONDITION_REFERENCE', 'RULE_CONTENT', 'RULE_COUNT', 'RULE_ENVELOPE_JSON', 'RULE_EVIDENCE_ARRAY', 'RULE_EVIDENCE_REQUIRED', 'RULE_EXPLANATION', 'RULE_MODEL_VERSION', 'RULE_ORDER', 'RULE_OUTPUT_JSON', 'RULE_PART', 'RULE_PARTS', 'RULE_PREPARED_REQUEST', 'RULE_RESPONSE_ID', 'RULE_RESULT_FIELDS', 'RULE_RESULT_STATUS', 'RULE_ROOT_FIELDS', 'RULE_SIGNATURE', 'RULE_SPAN_END', 'RULE_SPAN_FIELDS', 'RULE_SPAN_QUOTE', 'RULE_SPAN_QUOTE_FORMAT', 'RULE_SPAN_SOURCE', 'RULE_SPAN_START', 'RULE_UNCLASSIFIED']) {
       const d = diagnosticFixture(); Object.assign(d.checkout.analysis_diagnostic, {stage, category}); validateViewer(d);
     }
   }
@@ -104,6 +104,31 @@ test('only exact server diagnostic vocabulary is accepted on blocked checkouts',
   }
   const d = fixture(); d.checkout.analysis_diagnostic = diagnosticFixture().checkout.analysis_diagnostic;
   assert.throws(() => validateViewer(d));
+});
+test('proposal rule categories remain nonrendered diagnostics with no action authority', () => {
+  const rules = ['RULE_CANDIDATE_INDEX', 'RULE_CONDITION_REFERENCE', 'RULE_CONTENT', 'RULE_COUNT', 'RULE_ENVELOPE_JSON', 'RULE_EVIDENCE_ARRAY', 'RULE_EVIDENCE_REQUIRED', 'RULE_EXPLANATION', 'RULE_MODEL_VERSION', 'RULE_ORDER', 'RULE_OUTPUT_JSON', 'RULE_PART', 'RULE_PARTS', 'RULE_PREPARED_REQUEST', 'RULE_RESPONSE_ID', 'RULE_RESULT_FIELDS', 'RULE_RESULT_STATUS', 'RULE_ROOT_FIELDS', 'RULE_SIGNATURE', 'RULE_SPAN_END', 'RULE_SPAN_FIELDS', 'RULE_SPAN_QUOTE', 'RULE_SPAN_QUOTE_FORMAT', 'RULE_SPAN_SOURCE', 'RULE_SPAN_START', 'RULE_UNCLASSIFIED'];
+  for (const category of rules) {
+    const d = diagnosticFixture(); d.checkout.analysis_diagnostic.category = category;
+    const before = structuredClone(d); const document = dom(); renderViewer(d, document);
+    assert.deepEqual(d, before);
+    const nodes = flatten(document.getElementById('viewer-content'));
+    const text = nodes.map(n => n.textContent).join(' ');
+    assert.match(text, /UNKNOWN is retained/); assert.equal(text.includes(category), false);
+    assert.equal(nodes.some(n => ['button', 'input', 'form', 'select', 'a'].includes(n.tag)), false);
+    const known = structuredClone(d);
+    Object.assign(known.checkout.analysis, {accounting_state: 'known', usage_observed: true, evidence_kind: 'fabricated-offline'});
+    known.checkout.analysis_error = 'INVALID_PROPOSAL';
+    validateViewer(known); renderViewer(known, dom());
+    assert.equal(known.checkout.state, 'ANALYSIS_BLOCKED');
+    assert.equal(known.checkout.snapshot_hash, null); assert.equal(known.checkout.results.length, 0);
+    for (const change of [c => c.state = 'REVIEW_REQUIRED', c => c.snapshot_hash = 'a'.repeat(64),
+      c => c.confirmation_id = 'not-authorized', c => c.order = {}, c => c.results = fixture().checkout.results]) {
+      const bad = structuredClone(d); change(bad.checkout); assert.throws(() => validateViewer(bad));
+    }
+  }
+  for (const category of ['RULE_UNKNOWN', 'RULE_SPAN_QUOTE extra', 'RULE_SPAN_QUOTE\n', 'rule_span_quote']) {
+    const d = diagnosticFixture(); d.checkout.analysis_diagnostic.category = category; assert.throws(() => validateViewer(d));
+  }
 });
 const inline = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 test('first inline bootstrap strips capability before any module/asset request', async () => {

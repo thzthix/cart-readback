@@ -2129,9 +2129,15 @@ class Service:
         # Always classify against the original immutable policy, even after
         # current host replacement or timeout.
         policy = ledger.policy
-        protocol_fault, error_code, results = adapter.classify(
-            exchange, policy, prepared
-        )
+        rejection = None
+        if strategy is _GEMINI:
+            protocol_fault, error_code, results, rejection = (
+                adapter.classify_with_rule(exchange, policy, prepared)
+            )
+        else:
+            protocol_fault, error_code, results = adapter.classify(
+                exchange, policy, prepared
+            )
         late = late or (
             deadline_at is not None and time.monotonic() >= deadline_at
         )
@@ -2185,7 +2191,10 @@ class Service:
             diagnostic = safe_gemini_diagnostic(
                 {
                     "stage": "exchange-validation",
-                    "category": error_code or "STALE_SNAPSHOT",
+                    "category": rejection
+                    if error_code == "INVALID_PROPOSAL"
+                    and rejection is not None
+                    else error_code or "STALE_SNAPSHOT",
                     "http_status": 200,
                 }
             )

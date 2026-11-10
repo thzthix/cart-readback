@@ -4,6 +4,68 @@ from typing import Protocol
 
 from cartreadback_app.validation import AppError, integer, object_fields, string
 
+PROPOSAL_RULES = frozenset(
+    {
+        "RULE_RESPONSE_ID",
+        "RULE_CONDITION_REFERENCE",
+        "RULE_EXPLANATION",
+        "RULE_CONTENT",
+        "RULE_UNCLASSIFIED",
+        "RULE_OUTPUT_JSON",
+        "RULE_SPAN_SOURCE",
+        "RULE_SPAN_FIELDS",
+        "RULE_PART",
+        "RULE_PREPARED_REQUEST",
+        "RULE_EVIDENCE_REQUIRED",
+        "RULE_ORDER",
+        "RULE_RESULT_STATUS",
+        "RULE_CANDIDATE_INDEX",
+        "RULE_EVIDENCE_ARRAY",
+        "RULE_SIGNATURE",
+        "RULE_SPAN_END",
+        "RULE_ENVELOPE_JSON",
+        "RULE_SPAN_QUOTE_FORMAT",
+        "RULE_RESULT_FIELDS",
+        "RULE_SPAN_START",
+        "RULE_SPAN_QUOTE",
+        "RULE_ROOT_FIELDS",
+        "RULE_MODEL_VERSION",
+        "RULE_COUNT",
+        "RULE_PARTS",
+    }
+)
+
+
+def rejection_rule(error):
+    """Return one fixed rule label, never error text or proposal values."""
+    if type(error) is AppError:
+        value = getattr(error, "rejection_rule", None)
+        if type(value) is str and value in PROPOSAL_RULES:
+            return next(item for item in PROPOSAL_RULES if item == value)
+    return None
+
+
+def proposal_rejection(rule):
+    """Annotate an unchanged INVALID_PROPOSAL verdict with a fixed rule."""
+    error = AppError("INVALID_PROPOSAL", "Invalid proposal.", 422)
+    error.rejection_rule = (
+        rule
+        if type(rule) is str and rule in PROPOSAL_RULES
+        else "RULE_UNCLASSIFIED"
+    )
+    return error
+
+
+def _at_proposal_rule(rule, validator, *args, **kwargs):
+    try:
+        return validator(*args, **kwargs)
+    except AppError as error:
+        # Do not annotate a possibly reused exception owned by a validator.
+        annotated = AppError(error.code, error.message, error.status)
+        annotated.rejection_rule = rule
+        raise annotated from None
+
+
 FIXTURE_MODEL = {
     "provider": "synthetic-local-fixture",
     "model_version": "no-model",
@@ -123,11 +185,13 @@ def validate_proposal(
 ) -> list[dict]:
     """Validate schema and exact spans, not unrestricted semantic correctness."""
     if type(proposal) is not list or len(proposal) != len(conditions):
-        raise AppError("INVALID_PROPOSAL", "Wrong result count.", 422)
+        raise proposal_rejection("RULE_COUNT")
     expected = {condition["condition_id"] for condition in conditions}
     observed = set()
     for result in proposal:
-        object_fields(
+        _at_proposal_rule(
+            "RULE_RESULT_FIELDS",
+            object_fields,
             result,
             {
                 "condition_id",
@@ -138,37 +202,66 @@ def validate_proposal(
         )
         cid = result["condition_id"]
         if type(cid) is not str or cid not in expected or cid in observed:
-            raise AppError(
-                "INVALID_PROPOSAL", "Wrong condition reference.", 422
-            )
+            raise proposal_rejection("RULE_CONDITION_REFERENCE")
         observed.add(cid)
         if type(result["status"]) is not str or result["status"] not in {
             "match",
             "conflict",
             "unknown",
         }:
-            raise AppError("INVALID_PROPOSAL", "Wrong result status.", 422)
+            raise proposal_rejection("RULE_RESULT_STATUS")
         if type(result["explanation"]) is not str or not (
             1 <= len(result["explanation"]) <= 500
         ):
-            raise AppError("INVALID_PROPOSAL", "Invalid explanation.", 422)
-        string(result["explanation"], "explanation", 500)
+            raise proposal_rejection("RULE_EXPLANATION")
+        _at_proposal_rule(
+            "RULE_EXPLANATION",
+            string,
+            result["explanation"],
+            "explanation",
+            500,
+        )
         evidence = result["evidence"]
         if type(evidence) is not list or len(evidence) > 4:
-            raise AppError("INVALID_PROPOSAL", "Invalid evidence array.", 422)
+            raise proposal_rejection("RULE_EVIDENCE_ARRAY")
         if result["status"] != "unknown" and not evidence:
-            raise AppError("INVALID_PROPOSAL", "Missing supporting span.", 422)
+            raise proposal_rejection("RULE_EVIDENCE_REQUIRED")
         for span in evidence:
-            object_fields(span, {"source_id", "start", "end", "quote"})
-            string(span["quote"], "quote", 1000, multiline=True)
-            start = integer(span["start"], "start", 0, len(source["text"]))
-            end = integer(span["end"], "end", start + 1, len(source["text"]))
+            _at_proposal_rule(
+                "RULE_SPAN_FIELDS",
+                object_fields,
+                span,
+                {"source_id", "start", "end", "quote"},
+            )
+            _at_proposal_rule(
+                "RULE_SPAN_QUOTE_FORMAT",
+                string,
+                span["quote"],
+                "quote",
+                1000,
+                multiline=True,
+            )
+            start = _at_proposal_rule(
+                "RULE_SPAN_START",
+                integer,
+                span["start"],
+                "start",
+                0,
+                len(source["text"]),
+            )
+            end = _at_proposal_rule(
+                "RULE_SPAN_END",
+                integer,
+                span["end"],
+                "end",
+                start + 1,
+                len(source["text"]),
+            )
+            if span["source_id"] != source["source_id"]:
+                raise proposal_rejection("RULE_SPAN_SOURCE")
             if (
-                span["source_id"] != source["source_id"]
-                or type(span["quote"]) is not str
+                type(span["quote"]) is not str
                 or source["text"][start:end] != span["quote"]
             ):
-                raise AppError(
-                    "INVALID_PROPOSAL", "Evidence span mismatch.", 422
-                )
+                raise proposal_rejection("RULE_SPAN_QUOTE")
     return proposal

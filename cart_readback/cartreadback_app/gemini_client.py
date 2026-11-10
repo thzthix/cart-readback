@@ -12,6 +12,7 @@ import re
 from dataclasses import asdict, dataclass
 from types import MappingProxyType
 
+from cartreadback_app.inference import proposal_rejection, rejection_rule
 from cartreadback_app.inference_config import load_bundle
 from cartreadback_app.provider_json import PARSER_VERSION, strict_provider_json
 from cartreadback_app.responses_adapter import (
@@ -366,19 +367,23 @@ class GeminiClient:
         self, prepared: PreparedGeminiRequest, raw: bytes
     ) -> GeminiObservation:
         """Validate actual returned facts without repairing provider output."""
+        rule = "RULE_PREPARED_REQUEST"
         inputs = self._check_prepared(prepared)
         try:
+            rule = "RULE_ENVELOPE_JSON"
             envelope = strict_provider_json(
                 raw, max_bytes=MAX_RESPONSE_BYTES, max_depth=32
             )
             if envelope.get("error") is not None:
                 raise unavailable()
             usage = _usage(envelope, self.config)
+            rule = "RULE_MODEL_VERSION"
             if (
                 envelope.get("modelVersion")
                 != self.config.expected_model_version
             ):
                 raise unavailable("INVALID_PROPOSAL")
+            rule = "RULE_RESPONSE_ID"
             response_id = envelope.get("responseId")
             if (
                 type(response_id) is not str
@@ -400,6 +405,7 @@ class GeminiClient:
             candidate = candidates[0]
             if candidate.get("finishReason") != "STOP":
                 raise unavailable("MODEL_INCOMPLETE")
+            rule = "RULE_CANDIDATE_INDEX"
             if "index" in candidate and (
                 type(candidate["index"]) is not int or candidate["index"] != 0
             ):
@@ -411,6 +417,7 @@ class GeminiClient:
                 for item in ratings
             ):
                 raise unavailable("MODEL_REFUSED")
+            rule = "RULE_CONTENT"
             content = candidate.get("content")
             if (
                 type(content) is not dict
@@ -418,11 +425,13 @@ class GeminiClient:
                 or content["role"] != "model"
             ):
                 raise unavailable("INVALID_PROPOSAL")
+            rule = "RULE_PARTS"
             parts = content["parts"]
             if type(parts) is not list or not parts:
                 raise unavailable("INVALID_PROPOSAL")
             texts = []
             for part in parts:
+                rule = "RULE_PART"
                 if (
                     type(part) is not dict
                     or not {"text"}
@@ -432,6 +441,7 @@ class GeminiClient:
                     or part.get("thought", False) is not False
                 ):
                     raise unavailable("INVALID_PROPOSAL")
+                rule = "RULE_SIGNATURE"
                 if "thoughtSignature" in part:
                     signature = part["thoughtSignature"]
                     if (
@@ -446,9 +456,11 @@ class GeminiClient:
                         raise unavailable("INVALID_PROPOSAL") from None
                     # Opaque continuation data: never persist or replay it.
                 texts.append(part["text"])
+            rule = "RULE_OUTPUT_JSON"
             wire = strict_provider_json(
                 "".join(texts).encode("utf-8"), max_bytes=65_536, max_depth=8
             )
+            rule = "RULE_UNCLASSIFIED"
             results = _validate_results(
                 inputs["source"], inputs["conditions"], wire
             )
@@ -462,9 +474,13 @@ class GeminiClient:
                 *usage,
             )
         except AppError as error:
+            if error.code == "INVALID_PROPOSAL":
+                raise proposal_rejection(
+                    rejection_rule(error) or rule
+                ) from None
             raise unavailable(error.code) from None
         except Exception:
-            raise unavailable("INVALID_PROPOSAL") from None
+            raise proposal_rejection(rule) from None
 
     def exchange(
         self, prepared: PreparedGeminiRequest, *, deadline: Deadline

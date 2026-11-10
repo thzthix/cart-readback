@@ -19,6 +19,7 @@ from cartreadback_app.gemini_client import (
     MAX_RESPONSE_BYTES,
     unavailable,
 )
+from cartreadback_app.inference import PROPOSAL_RULES
 from cartreadback_app.responses_adapter import Deadline
 from cartreadback_app.responses_http import _check_deadline, _StrictHTTPResponse
 from cartreadback_app.validation import AppError
@@ -42,19 +43,22 @@ _DIAGNOSTIC_STAGES = frozenset(
         "exchange-validation",
     }
 )
-_DIAGNOSTIC_CATEGORIES = frozenset(
-    {
-        "MODEL_TIMEOUT",
-        "MODEL_UNAVAILABLE",
-        "GEMINI_CAPACITY_BLOCKED",
-        "GEMINI_RUN_BLOCKED",
-        "UNEXPECTED_FAILURE",
-        "MODEL_OUTCOME_UNKNOWN",
-        "MODEL_REFUSED",
-        "MODEL_INCOMPLETE",
-        "INVALID_PROPOSAL",
-        "STALE_SNAPSHOT",
-    }
+_DIAGNOSTIC_CATEGORIES = (
+    frozenset(
+        {
+            "MODEL_TIMEOUT",
+            "MODEL_UNAVAILABLE",
+            "GEMINI_CAPACITY_BLOCKED",
+            "GEMINI_RUN_BLOCKED",
+            "UNEXPECTED_FAILURE",
+            "MODEL_OUTCOME_UNKNOWN",
+            "MODEL_REFUSED",
+            "MODEL_INCOMPLETE",
+            "INVALID_PROPOSAL",
+            "STALE_SNAPSHOT",
+        }
+    )
+    | PROPOSAL_RULES
 )
 
 
