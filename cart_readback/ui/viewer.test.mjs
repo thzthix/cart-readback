@@ -46,10 +46,17 @@ test('provider/model/version/adapter/accounting contradictions fail closed', () 
 });
 test('blocked UNKNOWN and late usage remain visible, stale source explicitly historical', () => {
   const d = structuredClone(fixture()); d.checkout.state = 'ANALYSIS_BLOCKED'; d.checkout.snapshot_hash = null; d.checkout.results = []; d.checkout.analysis.accounting_state = 'unknown';
-  d.checkout.stale = true; d.catalog[0].source.text = 'New current source';
+  d.checkout.stale = true;
+  d.catalog[0].source = {...d.catalog[0].source, revision: 2, sha256: 'c'.repeat(64), text: 'New current source'};
+  assert.notStrictEqual(d.catalog[0].source, d.checkout.source);
+  assert.equal(d.checkout.source.text, source.text);
   const document = dom(); renderViewer(d, document);
   const all = flatten(document.getElementById('viewer-content')); const text = all.map(x => x.textContent).join(' ');
   assert.match(text, /UNKNOWN is retained/); assert.match(text, /STALE historical/); assert.match(text, /Historical source/);
+  const sourceRegions = all.filter(n => n.className === 'source-text');
+  assert.deepEqual(sourceRegions.map(n => n.textContent), ['New current source', source.text]);
+  assert.equal(d.checkout.results.length, 0);
+  assert.equal(d.checkout.snapshot_hash, null);
   assert.equal(all.some(x => ['button', 'input', 'form', 'select', 'a'].includes(x.tag)), false);
 });
 test('render source only as text with honest configuration and fabricated evidence', () => {
