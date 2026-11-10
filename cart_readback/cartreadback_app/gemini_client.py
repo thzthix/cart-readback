@@ -127,7 +127,7 @@ def _usage(envelope, config):
     if type(usage) is not dict:
         raise unavailable("MODEL_BUDGET_EXCEEDED")
     counts = [
-        usage.get(key)
+        usage.get(key, 0) if key == "candidatesTokenCount" else usage.get(key)
         for key in (
             "promptTokenCount",
             "candidatesTokenCount",
@@ -419,33 +419,35 @@ class GeminiClient:
             ):
                 raise unavailable("INVALID_PROPOSAL")
             parts = content["parts"]
-            if (
-                type(parts) is not list
-                or len(parts) != 1
-                or type(parts[0]) is not dict
-                or not {"text"}
-                <= set(parts[0])
-                <= {"text", "thought", "thoughtSignature"}
-                or type(parts[0]["text"]) is not str
-                or parts[0].get("thought", False) is not False
-            ):
+            if type(parts) is not list or not parts:
                 raise unavailable("INVALID_PROPOSAL")
-            if "thoughtSignature" in parts[0]:
-                signature = parts[0]["thoughtSignature"]
+            texts = []
+            for part in parts:
                 if (
-                    type(signature) is not str
-                    or not 1 <= len(signature) <= 65_536
+                    type(part) is not dict
+                    or not {"text"}
+                    <= set(part)
+                    <= {"text", "thought", "thoughtSignature"}
+                    or type(part["text"]) is not str
+                    or part.get("thought", False) is not False
                 ):
                     raise unavailable("INVALID_PROPOSAL")
-                try:
-                    if not base64.b64decode(signature, validate=True):
+                if "thoughtSignature" in part:
+                    signature = part["thoughtSignature"]
+                    if (
+                        type(signature) is not str
+                        or not 1 <= len(signature) <= 65_536
+                    ):
                         raise unavailable("INVALID_PROPOSAL")
-                except (ValueError, binascii.Error):
-                    raise unavailable("INVALID_PROPOSAL") from None
-                # Single-turn, no-tools contract: signatures are opaque provider
-                # continuation data, not authority. Never persist or replay them.
+                    try:
+                        if not base64.b64decode(signature, validate=True):
+                            raise unavailable("INVALID_PROPOSAL")
+                    except (ValueError, binascii.Error):
+                        raise unavailable("INVALID_PROPOSAL") from None
+                    # Opaque continuation data: never persist or replay it.
+                texts.append(part["text"])
             wire = strict_provider_json(
-                parts[0]["text"].encode("utf-8"), max_bytes=65_536, max_depth=8
+                "".join(texts).encode("utf-8"), max_bytes=65_536, max_depth=8
             )
             results = _validate_results(
                 inputs["source"], inputs["conditions"], wire

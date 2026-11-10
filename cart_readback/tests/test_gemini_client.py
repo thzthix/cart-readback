@@ -14,6 +14,7 @@ from cartreadback_app.gemini_client import (
     MODEL,
     GeminiClient,
     GeminiConfig,
+    classify_gemini_usage,
 )
 from cartreadback_app.responses_adapter import Deadline
 from cartreadback_app.validation import AppError, canonical
@@ -105,6 +106,92 @@ class GeminiClientTests(unittest.TestCase):
         self.assertEqual(
             self.prepared, self.client.prepare(self.source, self.conditions)
         )
+
+    def test_repeated_visible_parts_keep_exact_json_validation(self):
+        candidate = self.value["candidates"][0]
+        text = candidate["content"]["parts"][0]["text"]
+        candidate.pop("index")
+        candidate["avgLogprobs"] = -0.1
+        self.value["promptFeedback"] = {"safetyRatings": []}
+        self.value["usageMetadata"]["cachedContentTokenCount"] = 0
+        candidate["content"]["parts"] = [
+            {"text": text[:12], "thoughtSignature": "ZmFrZQ=="},
+            {"text": text[12:], "thought": False},
+        ]
+        self.assertEqual(self.results, self.parse().results)
+        self.assertNotIn("ZmFrZQ==", repr(self.parse()))
+        for extra in (
+            {"text": "{}", "thought": True},
+            {"inlineData": {"mimeType": "image/png", "data": "ZmFrZQ=="}},
+            {"functionCall": {"name": "fake"}},
+            {"text": "", "thoughtSignature": "not base64"},
+        ):
+            with self.subTest(extra=extra):
+                candidate["content"]["parts"].append(extra)
+                self.assert_error(self.parse, "INVALID_PROPOSAL")
+                candidate["content"]["parts"].pop()
+
+    def test_repeated_parts_do_not_relax_domain_evidence(self):
+        self.results[0]["evidence"][0]["quote"] = "WRONG"
+        text = canonical({"results": self.results})
+        self.value["candidates"][0]["content"]["parts"] = [
+            {"text": text[:12]},
+            {"text": text[12:]},
+        ]
+        self.assert_error(self.parse, "INVALID_PROPOSAL")
+
+    def test_incomplete_omitted_zero_output_retains_only_usage(self):
+        current = GeminiClient(GeminiConfig(CURRENT_MODEL, model=CURRENT_MODEL))
+        prepared = current.prepare(self.source, self.conditions)
+        self.value["modelVersion"] = CURRENT_MODEL
+        self.value["candidates"][0].update(finishReason="MAX_TOKENS")
+        self.value["candidates"][0].pop("content")
+        usage = self.value["usageMetadata"]
+        usage.pop("candidatesTokenCount")
+        usage.update(thoughtsTokenCount=7, totalTokenCount=107)
+        observed = classify_gemini_usage(encoded(self.value), current.config)
+        self.assertEqual(
+            (0, 7, 107),
+            (
+                observed.candidate_tokens,
+                observed.output_tokens,
+                observed.total_tokens,
+            ),
+        )
+        self.assert_error(
+            lambda: current.parse(prepared, encoded(self.value)),
+            "MODEL_INCOMPLETE",
+        )
+        usage["totalTokenCount"] = 120
+        self.assert_error(
+            lambda: classify_gemini_usage(encoded(self.value), current.config),
+            "MODEL_BUDGET_EXCEEDED",
+        )
+
+    def test_omission_is_not_null_or_missing_accounting(self):
+        for field, value in (
+            ("candidatesTokenCount", None),
+            ("candidatesTokenCount", True),
+            ("candidatesTokenCount", -1),
+        ):
+            with self.subTest(field=field, value=value):
+                data = envelope(self.results)
+                data["usageMetadata"][field] = value
+                self.assert_error(
+                    lambda: classify_gemini_usage(
+                        encoded(data), self.client.config
+                    ),
+                    "MODEL_BUDGET_EXCEEDED",
+                )
+        for field in ("promptTokenCount", "totalTokenCount"):
+            data = envelope(self.results)
+            data["usageMetadata"].pop(field)
+            self.assert_error(
+                lambda: classify_gemini_usage(
+                    encoded(data), self.client.config
+                ),
+                "MODEL_BUDGET_EXCEEDED",
+            )
 
     def test_success_and_no_mutable_result_alias(self):
         observation = self.parse()
