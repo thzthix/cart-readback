@@ -85,7 +85,7 @@ reconciliation. These are source-defined expectations, not newly executed result
 
 For broader checks, follow the exact commands and limitations in
 [README checks](../README.md#checks) and
-[the manual application-check workflow](../README.md#manual-application-check-workflow).
+[the manual application-check workflow](../README.md#historical-offline-application-check-workflow-setup).
 Backend tests use Python; UI check scripts additionally require Node.js 22+
 with global Fetch, structuredClone and crypto.randomUUID. Optional development
 lint uses Ruff 0.14.3; prompt preflight requires jsonschema 4.26.0 and the reviewed
@@ -172,5 +172,99 @@ Official submission requirements were re-read on November 11, 2026. The status
 correction references main `2fa2cb46ce5701e97e7ceaf01f2f559552ce267d` without
 importing its application code into this older documentation branch. The launch
 commands retain their original source-check scope above. No fresh application,
-provider, browser or aggregate pass is claimed. The branch must be reconciled
-with current main and reviewed again before integration.
+provider, browser or aggregate pass is claimed. The documentation branch now incorporates that main revision without changing
+its application files. The fixture entry point, smoke command options and final
+state expectations were rechecked against that revision. The historical
+application-workflow heading link was corrected. Static review is still distinct
+from running the application; fresh separate-worker review is required.
+
+## Recording plan: 2 minutes 50 seconds, not yet recorded
+
+This is an English rehearsal script for the current fixture build, not a
+submission-ready end-to-end integration demo. No footage, native-browser pass or
+recorded duration is established here. Record only after the displayed steps
+actually work in an authorized browser. Keep a visible "FIXTURE: synthetic
+analysis and payment" label throughout fixture footage. Do not replace missing
+screen recordings with a mockup and describe it as working software.
+
+Timing includes pauses and screen actions. Rehearse aloud and shorten if needed;
+the timestamps are targets, not a measured recording. Do not run a paid/model
+request or retry a spent operation for recording.
+
+### 0:00–0:20 | Buyer problem
+
+Show the actual comparison table and selected item's full original description.
+
+Narration: "CartReadback helps someone check the keyboard they already chose.
+A keyboard's physical shape does not establish its language layout, and a pictured
+cable may not be included. We compare the selected item with up to two
+requirements before checkout."
+
+### 0:20–0:45 | Honest baseline
+
+Show the same-source table before requesting analysis. Select one item and enter
+requirements that are visibly supported or not stated in its displayed source.
+Do not invent a SKU-specific result or claim an unobserved outcome.
+
+Narration: "The original description and comparison table are available first.
+They use the same source material as the readback. If this table solves the
+problem with less effort, the AI layer has not earned its place. Customer benefit
+has not yet been measured."
+
+### 0:45–1:20 | Review and uncertainty
+
+Request fixture analysis. Show the observed result, original source and exact
+quotation if present. If a conflict or unknown occurs, show its separate,
+initially unchecked acknowledgement. Do not force an unknown into a match.
+
+Narration: "This local flow uses a deterministic test double. Results distinguish
+support, conflict and missing information. The buyer reviews the evidence and
+acknowledges each conflict or unknown separately. Acknowledging uncertainty
+does not change the facts. Exact quotation checks alone do not establish that
+a model's interpretation is correct."
+
+### 1:20–1:55 | Buyer authority
+
+Confirm the reviewed snapshot, create the synthetic order, simulate approval,
+request server verification, then give fresh final capture intent. Show only the
+state actually returned; stop on a failed step rather than editing in success.
+
+Narration: "The buyer confirms this exact review. Order creation, simulated
+approval, server verification and final capture intent are separate steps.
+The server owns the amount and currency. The model cannot authorize payment.
+Every payment shown here is simulated; no PayPal sandbox transaction is shown."
+
+### 1:55–2:20 | Recovery, visibly separate
+
+Only if separately executed successfully, show the terminal command
+`python scripts/smoke_http.py --fault capture_timeout_before_success`
+and its actual synthetic state output. Label this "Separate API fixture test",
+not a continuation of the previous browser order. If it has not run, use the
+design explanation only, clearly labelled "Expected behavior, not executed".
+
+Narration: "The recovery design keeps an uncertain outcome unknown and checks
+the same order. It does not create a replacement payment to manufacture success.
+This separate synthetic timeout scenario is a test of that boundary, not proof
+of PayPal's behavior."
+
+### 2:20–2:50 | Genuine evidence and remaining work
+
+Show the dated integration record linked above, clearly labelled historical
+provider evidence, separate from this fixture session. Do not show credentials,
+private databases, raw provider bodies or account identifiers.
+
+Narration: "Separately, one approved synthetic keyboard case received a real
+Gemini response and passed schema and exact-evidence validation. Earlier failed
+outcomes remain recorded. This does not prove general accuracy, buyer benefit,
+or a connected PayPal checkout. Genuine PayPal sandbox integration, end-to-end
+verification and unrestricted judging access remain open."
+
+### Final recording gate
+
+Recheck the current integration record before recording; do not silently expand
+the one-case statement to later experiments. A compliant final submission needs
+actual central PayPal sandbox integration and a working build, as stated above.
+After that is implemented and verified, rewrite and rerecord the relevant section
+against its real evidence. A fixture label does not cure a missing required
+integration. Public repository licensing, public video publication and submission
+remain separate decisions; this script authorizes none of them.

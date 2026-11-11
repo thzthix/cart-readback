@@ -12,7 +12,11 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Iterable, Protocol
 
-from cartreadback_app.inference import validate_proposal
+from cartreadback_app.inference import (
+    proposal_rejection,
+    rejection_rule,
+    validate_proposal,
+)
 from cartreadback_app.inference_budget import request_hash
 from cartreadback_app.inference_config import (
     ENDPOINT,
@@ -204,17 +208,19 @@ def _validate_results(
     source: dict, conditions: list[dict], wire: dict
 ) -> list[dict]:
     try:
+        rule = "RULE_ROOT_FIELDS"
         object_fields(wire, {"results"})
+        rule = "RULE_UNCLASSIFIED"
         results = validate_proposal(source, conditions, wire["results"])
         # Input validation bounds IDs/source fields. The unchanged full local
         # validator enforces all remaining local schema rules and exact spans.
         if [item["condition_id"] for item in results] != [
             item["condition_id"] for item in conditions
         ]:
-            raise _error()
+            raise proposal_rejection("RULE_ORDER")
         return results
     except AppError as error:
-        raise _error() from error
+        raise proposal_rejection(rejection_rule(error) or rule) from None
 
 
 def _usage(envelope: dict, maximum_output: int) -> tuple[int, int, int]:

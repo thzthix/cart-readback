@@ -14,9 +14,29 @@ credentials and wire responses are fabricated. No real key, TLS connection,
 provider call, deployment or PayPal experiment was used to develop this slice.
 
 Issue #50's explicit free/paid contract below supersedes only the original C13
-positive-only admission requirement. The frozen prompt preflight still binds that API
-contract's original bytes; no prompt/corpus/gold/scorer artifacts are changed.
+positive-only admission requirement. In that original slice, prompt preflight
+bound that API contract's original bytes and prompt/corpus/gold/scorer artifacts
+were unchanged; the later production prompt identity is described below.
 The HTTP/API selection remains disabled.
+
+## Current use and historical implementation scope
+
+The preceding test claims describe the original Issues #48/#50 slice, not all
+subsequent observations. See the dated [current status](../README.md#current-integration-status--november-10-2026).
+The private Actions host uses an already owner-configured repository Secret
+inside its reviewed launcher; the application runner itself still accepts only
+the inherited private pipe and does not discover environment keys. Do not paste
+the Secret into chat or a command. The current v3 prompt identity and optional
+bounded span hints are described in [GEMINI_CLIENT](GEMINI_CLIENT.md); prepare/run
+must bind the exact changed request and runtime, never reuse an old record.
+
+The commands below are host-interface examples, not a self-contained setup:
+`host-plan`, independently approved record, existing private DB/owner and an
+opened/inherited credential descriptor must already be supplied. No developer
+signup or credential creation is required or performed by these commands.
+The manual launcher proposed in draft PR63 is not included on this main revision;
+`docs/GEMINI_MANUAL_LAUNCHER.md` is not an available main-branch runbook.
+Do not substitute that draft for the reviewed current host path.
 
 ## Approval boundary
 
@@ -178,8 +198,11 @@ The descriptor route is ephemeral; it does not authorize saving credentials or
 creating persistent access.
 
 The borrower checks exact credential binding, permits one borrow only, reads at
-most 256 ASCII key bytes with nonblocking I/O and the operation deadline, and
-requires EOF. A stalled writer cannot block indefinitely. Regular files, sockets
+most 4096 opaque graphic-ASCII key bytes with nonblocking I/O and the operation
+deadline, and
+requires EOF. This is a local defensive cap, not a Google key-format contract.
+Whitespace/control bytes are rejected; the accepted value is not trimmed or
+rewritten. A stalled writer cannot block indefinitely. Regular files, sockets
 and terminals are rejected. No read or descriptor mode change occurs until after
 the durable claim and per-step guard. Buffers are cleared best-effort; Python
 cannot promise erasure of every immutable temporary string.
@@ -290,3 +313,4 @@ the Service lifecycle regressions in free mode, including subprocess crashes,
 and exercises the real runner/Service with a synthetic pipe and replaced wire.
 Zero reservation/accounting coexists with permanently consumed call/input/output
 capacity. This is local admission evidence, not actual free-tier execution.
+

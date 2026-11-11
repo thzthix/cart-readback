@@ -12,6 +12,8 @@ import re
 from dataclasses import asdict, dataclass
 from types import MappingProxyType
 
+from cartreadback_app.evidence_spans import evidence_span_hints
+from cartreadback_app.inference import proposal_rejection, rejection_rule
 from cartreadback_app.inference_config import load_bundle
 from cartreadback_app.provider_json import PARSER_VERSION, strict_provider_json
 from cartreadback_app.responses_adapter import (
@@ -127,7 +129,7 @@ def _usage(envelope, config):
     if type(usage) is not dict:
         raise unavailable("MODEL_BUDGET_EXCEEDED")
     counts = [
-        usage.get(key)
+        usage.get(key, 0) if key == "candidatesTokenCount" else usage.get(key)
         for key in (
             "promptTokenCount",
             "candidatesTokenCount",
@@ -316,34 +318,47 @@ class GeminiClient:
             **inputs,
             "response_language": self.config.response_language,
         }
-        before, rest = self.bundle.user_template.split("{{request_json}}")
-        middle, after = rest.split("{{output_schema_json}}")
-        user = (
-            before
-            + canonical(request_input)
-            + middle
-            + self.bundle.wire_schema_json
-            + after
-        )
-        body = canonical(
-            {
-                "systemInstruction": {"parts": [{"text": self.bundle.system}]},
-                "contents": [{"role": "user", "parts": [{"text": user}]}],
-                "generationConfig": {
-                    "candidateCount": 1,
-                    "maxOutputTokens": MAX_OUTPUT_TOKENS,
-                    "responseMimeType": "application/json",
-                    "responseJsonSchema": json.loads(
-                        self.bundle.wire_schema_json
-                    ),
-                    "thinkingConfig": (
-                        {"thinkingBudget": 0}
-                        if self.config.model == MODEL
-                        else {"thinkingLevel": "MINIMAL"}
-                    ),
-                },
-            }
-        ).encode("utf-8")
+
+        def encode_request():
+            before, rest = self.bundle.user_template.split("{{request_json}}")
+            middle, after = rest.split("{{output_schema_json}}")
+            user = (
+                before
+                + canonical(request_input)
+                + middle
+                + self.bundle.wire_schema_json
+                + after
+            )
+            return canonical(
+                {
+                    "systemInstruction": {
+                        "parts": [{"text": self.bundle.system}]
+                    },
+                    "contents": [{"role": "user", "parts": [{"text": user}]}],
+                    "generationConfig": {
+                        "candidateCount": 1,
+                        "maxOutputTokens": MAX_OUTPUT_TOKENS,
+                        "responseMimeType": "application/json",
+                        "responseJsonSchema": json.loads(
+                            self.bundle.wire_schema_json
+                        ),
+                        "thinkingConfig": (
+                            {"thinkingBudget": 0}
+                            if self.config.model == MODEL
+                            else {"thinkingLevel": "MINIMAL"}
+                        ),
+                    },
+                }
+            ).encode("utf-8")
+
+        hints = evidence_span_hints(inputs["source"])
+        if hints is not None:
+            request_input["evidence_span_hints"] = hints
+        body = encode_request()
+        if len(body) > MAX_REQUEST_BYTES and hints is not None:
+            # Optional request data only; never a provider retry or output repair.
+            del request_input["evidence_span_hints"]
+            body = encode_request()
         if len(body) > MAX_REQUEST_BYTES:
             raise unavailable("MODEL_BUDGET_EXCEEDED")
         return PreparedGeminiRequest(
@@ -366,19 +381,23 @@ class GeminiClient:
         self, prepared: PreparedGeminiRequest, raw: bytes
     ) -> GeminiObservation:
         """Validate actual returned facts without repairing provider output."""
+        rule = "RULE_PREPARED_REQUEST"
         inputs = self._check_prepared(prepared)
         try:
+            rule = "RULE_ENVELOPE_JSON"
             envelope = strict_provider_json(
                 raw, max_bytes=MAX_RESPONSE_BYTES, max_depth=32
             )
             if envelope.get("error") is not None:
                 raise unavailable()
             usage = _usage(envelope, self.config)
+            rule = "RULE_MODEL_VERSION"
             if (
                 envelope.get("modelVersion")
                 != self.config.expected_model_version
             ):
                 raise unavailable("INVALID_PROPOSAL")
+            rule = "RULE_RESPONSE_ID"
             response_id = envelope.get("responseId")
             if (
                 type(response_id) is not str
@@ -400,6 +419,7 @@ class GeminiClient:
             candidate = candidates[0]
             if candidate.get("finishReason") != "STOP":
                 raise unavailable("MODEL_INCOMPLETE")
+            rule = "RULE_CANDIDATE_INDEX"
             if "index" in candidate and (
                 type(candidate["index"]) is not int or candidate["index"] != 0
             ):
@@ -411,6 +431,7 @@ class GeminiClient:
                 for item in ratings
             ):
                 raise unavailable("MODEL_REFUSED")
+            rule = "RULE_CONTENT"
             content = candidate.get("content")
             if (
                 type(content) is not dict
@@ -418,35 +439,42 @@ class GeminiClient:
                 or content["role"] != "model"
             ):
                 raise unavailable("INVALID_PROPOSAL")
+            rule = "RULE_PARTS"
             parts = content["parts"]
-            if (
-                type(parts) is not list
-                or len(parts) != 1
-                or type(parts[0]) is not dict
-                or not {"text"}
-                <= set(parts[0])
-                <= {"text", "thought", "thoughtSignature"}
-                or type(parts[0]["text"]) is not str
-                or parts[0].get("thought", False) is not False
-            ):
+            if type(parts) is not list or not parts:
                 raise unavailable("INVALID_PROPOSAL")
-            if "thoughtSignature" in parts[0]:
-                signature = parts[0]["thoughtSignature"]
+            texts = []
+            for part in parts:
+                rule = "RULE_PART"
                 if (
-                    type(signature) is not str
-                    or not 1 <= len(signature) <= 65_536
+                    type(part) is not dict
+                    or not {"text"}
+                    <= set(part)
+                    <= {"text", "thought", "thoughtSignature"}
+                    or type(part["text"]) is not str
+                    or part.get("thought", False) is not False
                 ):
                     raise unavailable("INVALID_PROPOSAL")
-                try:
-                    if not base64.b64decode(signature, validate=True):
+                rule = "RULE_SIGNATURE"
+                if "thoughtSignature" in part:
+                    signature = part["thoughtSignature"]
+                    if (
+                        type(signature) is not str
+                        or not 1 <= len(signature) <= 65_536
+                    ):
                         raise unavailable("INVALID_PROPOSAL")
-                except (ValueError, binascii.Error):
-                    raise unavailable("INVALID_PROPOSAL") from None
-                # Single-turn, no-tools contract: signatures are opaque provider
-                # continuation data, not authority. Never persist or replay them.
+                    try:
+                        if not base64.b64decode(signature, validate=True):
+                            raise unavailable("INVALID_PROPOSAL")
+                    except (ValueError, binascii.Error):
+                        raise unavailable("INVALID_PROPOSAL") from None
+                    # Opaque continuation data: never persist or replay it.
+                texts.append(part["text"])
+            rule = "RULE_OUTPUT_JSON"
             wire = strict_provider_json(
-                parts[0]["text"].encode("utf-8"), max_bytes=65_536, max_depth=8
+                "".join(texts).encode("utf-8"), max_bytes=65_536, max_depth=8
             )
+            rule = "RULE_UNCLASSIFIED"
             results = _validate_results(
                 inputs["source"], inputs["conditions"], wire
             )
@@ -460,9 +488,13 @@ class GeminiClient:
                 *usage,
             )
         except AppError as error:
+            if error.code == "INVALID_PROPOSAL":
+                raise proposal_rejection(
+                    rejection_rule(error) or rule
+                ) from None
             raise unavailable(error.code) from None
         except Exception:
-            raise unavailable("INVALID_PROPOSAL") from None
+            raise proposal_rejection(rule) from None
 
     def exchange(
         self, prepared: PreparedGeminiRequest, *, deadline: Deadline

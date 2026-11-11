@@ -277,7 +277,11 @@ class GeminiHTTPTests(unittest.TestCase):
             "",
             None,
             True,
-            "x" * 257,
+            "x" * 4097,
+            "x\t",
+            "x\x7f",
+            "x\x00",
+            "é",
         ):
             with self.subTest(key=key):
                 self.events.clear()
@@ -286,6 +290,21 @@ class GeminiHTTPTests(unittest.TestCase):
                 self.assertFalse(
                     any(event[0] == "request" for event in self.events)
                 )
+                self.assertEqual(1, self.connection.closed)
+
+    def test_opaque_key_is_preserved_with_local_size_bound(self):
+        for key in (
+            "fake.authorization+token/with=punctuation",
+            "x" * 257,
+            "x" * 4096,
+        ):
+            with self.subTest(size=len(key)):
+                self.events.clear()
+                transport = self.make(credential=key)
+                self.assertEqual(b"{}", self.send(transport))
+                request = next(x for x in self.events if x[0] == "request")
+                self.assertEqual(key, request[4]["x-goog-api-key"])
+                self.assert_error(lambda: self.send(transport))
                 self.assertEqual(1, self.connection.closed)
 
     def test_connect_failure_reads_no_key_and_no_retries(self):

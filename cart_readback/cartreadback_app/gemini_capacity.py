@@ -305,7 +305,12 @@ def _request_hash(
             max_bytes=65_536,
             max_depth=8,
         )
-        object_fields(inputs, {"source", "conditions", "response_language"})
+        fields = {"source", "conditions", "response_language"}
+        if "evidence_span_hints" in inputs:
+            fields.add("evidence_span_hints")
+        object_fields(inputs, fields)
+        # Optional hints are host-derived data, not trusted caller authority.
+        # The unchanged exact reconstruction below rejects any tampering.
         source, choices = inputs["source"], inputs["conditions"]
         config = GeminiConfig(
             policy.expected_model_version,

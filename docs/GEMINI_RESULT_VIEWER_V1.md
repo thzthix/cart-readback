@@ -2,8 +2,11 @@
 
 Issue #52 defines `gemini-host-result-viewer-v1`. This addendum supersedes only
 C13's prohibition on serving Gemini results, for the explicit host launcher below.
-The frozen API_CONTRACT, prompt preflight, prompts, corpus, gold and scorer remain
-unchanged. Ordinary LocalServer, fixture CLI, buyer UI and context UI are unchanged.
+That original viewer change left API_CONTRACT, prompt preflight, prompts, corpus,
+gold and scorer unchanged. Later PR84 changes the production prompt bundle to
+`cartreadback-prompt-v3-span-hints`; the viewer accepts that exact identity and
+legacy `cartreadback-prompt-v2-wire` history, not arbitrary versions. Ordinary
+LocalServer, fixture CLI, buyer UI and context UI are unchanged.
 This is a separate review-only page, not a Gemini selector for the ordinary UI.
 
 ## Host action and lifetime
@@ -16,7 +19,12 @@ DB/file identity, original owner, exact SKU/conditions, runtime, policy, key
 binding, finite call/token/spend bounds and inherited private pipe. It creates no
 approval, account fact, key or replacement owner. Free-tier facts and no-paid
 fallback still require the external verification described in GEMINI_SERVICE.
-The existing prepare/run CLI is unchanged. There is no default browser opener,
+The existing prepare/run CLI is unchanged. `view` is a trusted-host Python
+interface, not a CLI subcommand. A completed CI `run` receipt cannot be turned
+into a viewer by reopening its DB or reconstructing a runtime. The browser must
+reach the same host loopback while the original Service remains alive. Closing
+a browser tab does not terminate the host; host interruption/cleanup must stop
+and join the server before releasing ownership. There is no default browser opener,
 subprocess/shell launcher, credential discovery or live activation CLI.
 
 The host must explicitly authorize both the provider action and a trusted local
@@ -134,5 +142,11 @@ Lifecycle regressions include failed serving/handler thread starts, actively
 trickled bodies during shutdown, actual worker joins and standard CookieJar
 continuity across closed/new loopback ports.
 The Node/HTTP check consumes the actual server envelope and renders a fake DOM;
-it is not native browser evidence. No real key, Google/OpenAI call, billing/quota,
-model quality, PayPal, hosted Actions, deployment or contest claim is established.
+it is not native browser evidence. The later local browser reachability probe
+encountered connection failure and then URL-policy refusal; it produced no
+viewer pixels or keyboard evidence and was not bypassed. The actual opt-in
+Google observations in the [current status](../README.md#current-integration-status--november-10-2026)
+do not complete this viewer verification. These offline checks establish no
+real key, Google/OpenAI call, billing/quota, model quality, PayPal, hosted Actions,
+deployment or contest claim.
+
