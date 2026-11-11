@@ -1,8 +1,10 @@
 # Reviewer runbook: local fixture demonstration
 
-**Current status: genuine AI and PayPal sandbox are UNCONNECTED.**
-This is a runnable synthetic demonstration, not a contest-ready AI + PayPal
-integration or proof of buyer benefit. All catalog, proposal and payment results
+**This quickstart is fixture-only; real PayPal sandbox remains unverified.**
+Separate opt-in Gemini application evidence now exists; see the
+[November 10 integration record](https://github.com/thzthix/cart-readback/blob/2fa2cb46ce5701e97e7ceaf01f2f559552ce267d/README.md#current-integration-status--november-10-2026).
+That one public synthetic case does not make this quickstart a genuine AI + PayPal
+checkout or establish general accuracy or buyer benefit. All catalog, proposal and payment results
 in the quickstart below are fixtures. No provider accounts or keys are needed.
 
 ## Start from the repository root
@@ -104,9 +106,12 @@ The existing [Gemini host runner](GEMINI_SERVICE.md) and
 [read-only result viewer](GEMINI_RESULT_VIEWER_V1.md) are separate opt-in host
 paths, not activation controls in this fixture UI. A fabricated exchange, local
 approval record, runtime label or successful viewer test proves no genuine call.
-No actual Gemini credential setup, provider call or free-quota proof is established.
+The integration record above distinguishes actual provider observations from
+fixtures. It records one schema/span-validated application case, not general
+semantic quality or a verified zero-charge invoice. This runbook does not
+provision or activate that host path.
 
-Before a future genuine demonstration, retain redacted evidence tied to its exact
+For any genuine demonstration, retain redacted evidence tied to its exact
 revision and original operation:
 - Externally verified project/model eligibility, billing/free-tier facts, explicit
   data/spend authorization, and properly provisioned credentials outside the repo.
@@ -130,12 +135,25 @@ entry needs genuine AI and central PayPal sandbox integration, a public
 open-source repository, English content or translation, and a hosted demo **or**
 complete runnable instructions. Free, unrestricted judging access must remain
 available through
-December 15, 2026 at 16:00 UTC. A video under three minutes is a recommendation,
-not a hard rule asserted here.
+December 15, 2026 at 16:00 UTC.
+
+Submission deadline: **November 12, 2026 at 20:00 UTC** (November 13 at 05:00 KST).
+Before submitting, verify each required deliverable against the official rules:
+- A working application with central PayPal sandbox integration and an AI tool.
+- Public repository URL, detectable open-source license, necessary source/assets,
+  and complete run instructions or a working hosted demo.
+- English description, testing instructions and video, or English translations.
+- Public YouTube video URL entered in the submission form, showing the app running
+  on its intended device. Under three minutes is recommended; judges need not
+  watch beyond three minutes. Use only materials with the required permissions.
+- Free, unrestricted working-build access through the judging deadline above.
+
+These unchecked deliverables are a preparation checklist, not evidence of
+registration, publication, eligibility, rule acceptance or submission.
 
 This fixture runbook alone does not satisfy the integration requirement.
-Genuine integration/recovery, fresh semantic evaluation, rendered/native-keyboard
-flows and buyer value remain unverified. Public visibility, license selection,
+End-to-end AI plus PayPal integration/recovery, fresh semantic evaluation,
+rendered/native-keyboard flows and buyer value remain unverified. Public visibility, license selection,
 deployment, costs, legal acceptance and submission are separate decisions.
 Do not infer authority for any of them from a documentation PR or a merge.
 
@@ -147,3 +165,12 @@ No application, browser, provider or aggregate checks were executed for this
 documentation change. See [PR #61](https://github.com/thzthix/cart-readback/pull/61)
 for the current review state and any later fixed-head evidence; this note does
 not assert that review of the latest revision is complete.
+
+### November 11 documentation refresh
+
+Official submission requirements were re-read on November 11, 2026. The status
+correction references main `2fa2cb46ce5701e97e7ceaf01f2f559552ce267d` without
+importing its application code into this older documentation branch. The launch
+commands retain their original source-check scope above. No fresh application,
+provider, browser or aggregate pass is claimed. The branch must be reconciled
+with current main and reviewed again before integration.
