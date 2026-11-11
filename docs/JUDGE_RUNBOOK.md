@@ -3,8 +3,18 @@
 **This quickstart is fixture-only; real PayPal sandbox remains unverified.**
 Separate opt-in Gemini application evidence now exists; see the
 [November 10 integration record](https://github.com/thzthix/cart-readback/blob/2fa2cb46ce5701e97e7ceaf01f2f559552ce267d/README.md#current-integration-status--november-10-2026).
-That one public synthetic case does not make this quickstart a genuine AI + PayPal
-checkout or establish general accuracy or buyer benefit. All catalog, proposal and payment results
+That record describes the historical fourth sample. The subsequent
+[fifth sample](https://github.com/thzthix/cart-readback/actions/runs/42824418362)
+completed on November 10 at 13:26 UTC, attempt 1, workflow head
+`9d2f3818646ca2dee3b5c05f3e8897c8ed89a0f9`, using unchanged production source
+`8ba9e9623db4ee094d3245615417b7511b8d0e33`.
+Its safe job receipt reports `APP_ANALYSIS_VALIDATED`, known accounting,
+provider-observation, observed usage, `gemini-3.5-flash-lite`, and
+`conflict` / `unknown`; payment remained fixture. The fourth sample's
+`match` / `match` and fifth sample's `conflict` / `unknown` are two
+separate validated synthetic application cases, not a general accuracy study.
+Neither makes this quickstart a genuine AI + PayPal checkout or establishes
+buyer benefit. All catalog, proposal and payment results
 in the quickstart below are fixtures. No provider accounts or keys are needed.
 
 ## Start from the repository root
@@ -106,9 +116,9 @@ The existing [Gemini host runner](GEMINI_SERVICE.md) and
 [read-only result viewer](GEMINI_RESULT_VIEWER_V1.md) are separate opt-in host
 paths, not activation controls in this fixture UI. A fabricated exchange, local
 approval record, runtime label or successful viewer test proves no genuine call.
-The integration record above distinguishes actual provider observations from
-fixtures. It records one schema/span-validated application case, not general
-semantic quality or a verified zero-charge invoice. This runbook does not
+The historical integration record and fifth-run receipt above distinguish actual
+provider observations from fixtures. Together they record two schema/span-validated
+application cases, not general semantic quality or a verified zero-charge invoice. This runbook does not
 provision or activate that host path.
 
 For any genuine demonstration, retain redacted evidence tied to its exact
@@ -169,11 +179,10 @@ not assert that review of the latest revision is complete.
 ### November 11 documentation refresh
 
 Official submission requirements were re-read on November 11, 2026. The status
-correction references main `2fa2cb46ce5701e97e7ceaf01f2f559552ce267d` without
-importing its application code into this older documentation branch. The launch
-commands retain their original source-check scope above. No fresh application,
-provider, browser or aggregate pass is claimed. The documentation branch now incorporates that main revision without changing
-its application files. The fixture entry point, smoke command options and final
+correction first referenced main `2fa2cb46ce5701e97e7ceaf01f2f559552ce267d`.
+The later branch reconciliation incorporated that main revision while preserving
+all its application files unchanged. No fresh application, provider, browser or
+aggregate pass is claimed. The fixture entry point, smoke command options and final
 state expectations were rechecked against that revision. The historical
 application-workflow heading link was corrected. Static review is still distinct
 from running the application; fresh separate-worker review is required.
@@ -253,16 +262,16 @@ Show the dated integration record linked above, clearly labelled historical
 provider evidence, separate from this fixture session. Do not show credentials,
 private databases, raw provider bodies or account identifiers.
 
-Narration: "Separately, one approved synthetic keyboard case received a real
-Gemini response and passed schema and exact-evidence validation. Earlier failed
-outcomes remain recorded. This does not prove general accuracy, buyer benefit,
+Narration: "Separately, two synthetic cases received real Gemini responses and
+passed schema and exact-evidence validation: one returned two matches, the other
+conflict and unknown. Earlier failed outcomes remain recorded. This does not prove general accuracy, buyer benefit,
 or a connected PayPal checkout. Genuine PayPal sandbox integration, end-to-end
 verification and unrestricted judging access remain open."
 
 ### Final recording gate
 
-Recheck the current integration record before recording; do not silently expand
-the one-case statement to later experiments. A compliant final submission needs
+Recheck the dated integration record and fifth-run receipt before recording;
+do not silently expand these two cases to later experiments. A compliant final submission needs
 actual central PayPal sandbox integration and a working build, as stated above.
 After that is implemented and verified, rewrite and rerecord the relevant section
 against its real evidence. A fixture label does not cure a missing required
