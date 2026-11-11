@@ -61,8 +61,8 @@ jobs:
               (source, 'cart_readback/ui/viewer.mjs', ui / 'viewer.mjs', 'd65efc79097d1982f577e69a4dd9d50d5e98ef0889709fcbd89dc5c1811f1b15'),
               (source, 'cart_readback/ui/viewer-core.mjs', ui / 'viewer-core.mjs', '1be101c87184dcb831223921b97c9001877542fb000517c29b4847c8f11be5a3'),
               (source, 'cart_readback/ui/core.mjs', ui / 'core.mjs', 'be0bdf05874935f6c4d3c7c0c9e6cd510d30351364aa6e5c85440a05dd119c8a'),
-              (head, 'cart_readback/ui/fixture_browser_smoke.py', root / 'fixture_browser_smoke.py', '1e22c7064e94398ed10c93eb8037f9d687e4e1a8eb6d7f9ea4dfd8040b675442'),
-              (head, 'cart_readback/ui/test_fixture_browser_smoke.py', root / 'test_fixture_browser_smoke.py', '2ee284ff9322f3f87f5710e4b2de6cafbac1f9c13a6f1b84fdecfdbeba4d0d93'),
+              (head, 'cart_readback/ui/fixture_browser_smoke.py', root / 'fixture_browser_smoke.py', '929e7af5fd2f7dd4a9350bbd695c4fa8e151a74c4fdf0301ee731648958d5846'),
+              (head, 'cart_readback/ui/test_fixture_browser_smoke.py', root / 'test_fixture_browser_smoke.py', 'd9175a089643002a2f97ec646f0a6de485de01d5bce040b719db2d2e3953a57d'),
           ]
           opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
           try:

@@ -128,13 +128,28 @@ class SmokeFailure(Exception):
         super().__init__(self.code or "check_failed")
 
 
+class OperationTimeout(TimeoutError):
+    """Owned timeout metadata with no external exception payload."""
+
+    def __init__(self, operation: str):
+        """Retain only a closed operation label."""
+        self.operation = (
+            operation
+            if type(operation) is str and operation in OPERATIONS
+            else "unavailable"
+        )
+        super().__init__("transport timeout")
+
+
 @contextmanager
 def failure_operation(operation: str):
-    """Tag only owned check failures; never inspect arbitrary error objects."""
+    """Tag owned checks and transport timeouts without inspecting payloads."""
     if operation not in OPERATIONS:
         raise SmokeFailure("diagnostic-enum")
     try:
         yield
+    except TimeoutError:
+        raise OperationTimeout(operation) from None
     except SmokeFailure as error:
         if type(error) is SmokeFailure:
             error.operation = operation
@@ -937,6 +952,8 @@ class Diagnostics:
                         error.webdriver_error,
                     )
                 )
+            elif type(error) is OperationTimeout:
+                result.update(safe_failure_metadata(error.operation))
             if (
                 stage not in CLEANUP_STAGES
                 and self.record["primary_failure"] is None

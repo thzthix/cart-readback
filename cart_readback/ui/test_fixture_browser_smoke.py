@@ -145,6 +145,82 @@ class FixtureTests(unittest.TestCase):
         capture.start()
         self.addCleanup(capture.stop)
 
+    def test_transport_timeout_keeps_session_operation(self):
+        for operation, failed_path in (
+            ("session_create", "/session"),
+            ("session_timeouts", "/session/synthetic/timeouts"),
+        ):
+            with self.subTest(operation=operation):
+                calls = []
+
+                def transport(port, method, path, payload):
+                    calls.append((method, path))
+                    if path == failed_path:
+                        raise TimeoutError("PRIVATE-TIMEOUT-CANARY")
+                    return json.dumps(
+                        {"value": {"sessionId": "synthetic"}}
+                    ).encode()
+
+                receipt = {"checks": []}
+                diagnostics = smoke.Diagnostics(receipt)
+                with self.assertRaises(TimeoutError):
+                    with diagnostics.stage("session", "review-wide"):
+                        smoke.Driver(12345, transport).create(
+                            "/fake/chrome", Path("/fake/profile"), 1200
+                        )
+                primary = diagnostics.record["primary_failure"]
+                self.assertEqual(primary.get("operation"), operation)
+                self.assertEqual(primary["category"], "timeout")
+                self.assertEqual(primary["stage"], "session")
+                self.assertEqual(
+                    len(calls), 1 if operation == "session_create" else 2
+                )
+                diagnostics.emit_failure(receipt)
+                self.assertNotIn(
+                    "PRIVATE-TIMEOUT-CANARY", self.offline_stdout.getvalue()
+                )
+                self.assertNotIn("PRIVATE-TIMEOUT-CANARY", json.dumps(receipt))
+                self.assertEqual(primary["http_status"], "unavailable")
+
+    def test_timeout_metadata_never_inspects_external_exception(self):
+        class HostileTimeout(TimeoutError):
+            def __str__(self):
+                raise AssertionError("exception text inspected")
+
+            @property
+            def operation(self):
+                raise AssertionError("external metadata inspected")
+
+        receipt = {"checks": []}
+        diagnostics = smoke.Diagnostics(receipt)
+        with self.assertRaises(TimeoutError):
+            with diagnostics.stage("session", "review-wide"):
+                with smoke.failure_operation("session_create"):
+                    raise HostileTimeout("PRIVATE-TIMEOUT-CANARY")
+        self.assertEqual(
+            diagnostics.record["primary_failure"]["operation"],
+            "session_create",
+        )
+        diagnostics.emit_failure(receipt)
+        self.assertNotIn(
+            "PRIVATE-TIMEOUT-CANARY", self.offline_stdout.getvalue()
+        )
+
+    def test_timeout_metadata_does_not_relabel_other_failures(self):
+        for error in (OSError("private"), KeyboardInterrupt("private")):
+            receipt = {"checks": []}
+            diagnostics = smoke.Diagnostics(receipt)
+            with self.assertRaises(type(error)):
+                with diagnostics.stage("session", "review-wide"):
+                    with smoke.failure_operation("session_create"):
+                        raise error
+            self.assertNotIn(
+                "operation", diagnostics.record["primary_failure"]
+            )
+        self.assertEqual(
+            smoke.OperationTimeout("unlisted").operation, "unavailable"
+        )
+
     def test_source_manifest_exact_and_mutation(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp)
