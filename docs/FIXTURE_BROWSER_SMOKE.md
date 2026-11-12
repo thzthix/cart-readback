@@ -252,3 +252,26 @@ cleanup invariants and manual run guards are unchanged. The workflow diff is
 only the two QA helper hash pins. Offline tests capture fake failure-summary
 stdout inside tests, while preserving the normal unittest results; an offline
 negative control must not look like a live hosted render failure.
+
+## Issue #96: preserve transport-timeout operation
+
+Run 42919263062 on 2fa2cb46ce5701e97e7ceaf01f2f559552ce267d
+passed 39 offline tests, then reported session/timeout in review-wide,
+saved PNG count zero and no reported cleanup failure. The prior operation
+wrapper handled owned check failures only. Injected TimeoutError at either
+session creation or timeout configuration produced identical operation-less
+diagnostics; the actual run cannot retrospectively distinguish them.
+
+A known TimeoutError inside the operation context is now replaced with an owned
+OperationTimeout carrying only the closed operation label. Diagnostics retain
+the existing timeout category. No external exception text, args or attributes
+are inspected. Other exceptions and cancellation retain their previous handling.
+Primary failures remain separate from cleanup failures.
+
+Fake transport tests cover both session operations, hostile timeout objects and
+unrelated errors/cancellation. They simulate a delayed transport's timeout
+exception, not real elapsed-time or browser behavior. All 39 previous tests are
+retained. The three-second HTTP timeout, browser flags, readiness, routes,
+source pins, cleanup and manual execution guards are unchanged. Only the two
+helper hash pins change in the workflow. This repairs diagnostics, not the
+unexplained browser failure, and adds no authority to launch or retry a run.
