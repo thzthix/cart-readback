@@ -32,6 +32,10 @@ SOURCE_HASHES = {
     "core.mjs": "be0bdf05874935f6c4d3c7c0c9e6cd510d30351364aa6e5c85440a05dd119c8a",
 }
 MAX_BODY = 8 * 1024 * 1024
+DEFAULT_HTTP_TIMEOUT = 3
+PAGE_LOAD_TIMEOUT_MS = 10000
+SCRIPT_TIMEOUT_MS = 5000
+COMMAND_TRANSPORT_ALLOWANCE = 2
 MARKER = b"cartreadback-public-render-fixture-v1"
 ARTIFACT_NAMES = {
     "review-wide.png",
@@ -406,9 +410,27 @@ class FixtureHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+def command_http_timeout(method: str, path: str) -> float:
+    """Select finite socket waits, not an absolute whole-command deadline."""
+    if method == "POST":
+        match = re.fullmatch(
+            r"/session/[a-zA-Z0-9-]{1,128}/(url|execute/sync)", path
+        )
+        if match:
+            browser_ms = (
+                PAGE_LOAD_TIMEOUT_MS
+                if match[1] == "url"
+                else SCRIPT_TIMEOUT_MS
+            )
+            return browser_ms / 1000 + COMMAND_TRANSPORT_ALLOWANCE
+    return DEFAULT_HTTP_TIMEOUT
+
+
 def request(port: int, method: str, path: str, payload=None, limit=MAX_BODY):
     """Make bounded loopback-only HTTP; never honor proxies or redirects."""
-    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", port, timeout=command_http_timeout(method, path)
+    )
     try:
         body = None if payload is None else json.dumps(payload).encode()
         connection.request(
@@ -534,7 +556,11 @@ class Driver:
             self.command(
                 "POST",
                 "/timeouts",
-                {"implicit": 0, "pageLoad": 10000, "script": 5000},
+                {
+                    "implicit": 0,
+                    "pageLoad": PAGE_LOAD_TIMEOUT_MS,
+                    "script": SCRIPT_TIMEOUT_MS,
+                },
             )
         with failure_operation("version"):
             capabilities = value.get("capabilities", {})

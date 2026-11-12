@@ -137,6 +137,121 @@ class FakeDriver:
 
 
 class FixtureTests(unittest.TestCase):
+    def delayed_command(self, method, path, delay, error=None):
+        observed = {"requests": 0, "closes": 0, "elapsed": 0}
+
+        class Connection:
+            def __init__(self, host, port, timeout):
+                observed.update(host=host, port=port, timeout=timeout)
+
+            def request(self, actual_method, actual_path, body, headers):
+                observed["requests"] += 1
+                observed["request"] = (actual_method, actual_path)
+
+            def getresponse(self):
+                if error is not None:
+                    raise error
+                observed["elapsed"] = min(delay, observed["timeout"])
+                if delay > observed["timeout"]:
+                    raise TimeoutError("PRIVATE-DELAY-CANARY")
+                response = Mock(status=200)
+                response.read.return_value = b'{"value":null}'
+                return response
+
+            def close(self):
+                observed["closes"] += 1
+
+        with (
+            patch.object(smoke.http.client, "HTTPConnection", Connection),
+            patch.object(
+                smoke.socket, "socket", side_effect=AssertionError("network")
+            ),
+            patch.object(
+                smoke.subprocess, "Popen", side_effect=AssertionError("process")
+            ),
+        ):
+            try:
+                smoke.request(12345, method, path, {})
+            except BaseException as caught:
+                observed["error"] = caught
+        self.assertEqual(observed["requests"], 1)
+        self.assertEqual(observed["closes"], 1)
+        self.assertEqual(observed["host"], "127.0.0.1")
+        return observed
+
+    def test_command_budget_allows_valid_delayed_responses(self):
+        for suffix, delay in (
+            ("/url", 4),
+            ("/url", 9.9),
+            ("/execute/sync", 4),
+            ("/execute/sync", 4.9),
+        ):
+            with self.subTest(suffix=suffix, delay=delay):
+                observed = self.delayed_command(
+                    "POST", "/session/synthetic" + suffix, delay
+                )
+                self.assertNotIn("error", observed)
+                self.assertEqual(observed["elapsed"], delay)
+
+    def test_command_budget_exact_selection_and_expiry(self):
+        cases = (
+            ("POST", "/session/synthetic/url", 12),
+            ("POST", "/session/synthetic/execute/sync", 7),
+            ("POST", "/session", 3),
+            ("GET", "/status", 3),
+            ("POST", "/session/synthetic/timeouts", 3),
+            ("DELETE", "/session/synthetic", 3),
+            ("GET", "/session/synthetic/screenshot", 3),
+            ("GET", "/session/synthetic/url", 3),
+            ("POST", "/session/synthetic/url?extra=1", 3),
+            ("POST", "/session/synthetic/execute/sync/extra", 3),
+            ("POST", "/session/bad/id/url", 3),
+            ("POST", "/session/" + "a" * 129 + "/url", 3),
+        )
+        for method, path, expected in cases:
+            with self.subTest(method=method, path=path):
+                observed = self.delayed_command(method, path, expected + 0.1)
+                self.assertEqual(observed["timeout"], expected)
+                self.assertEqual(observed["elapsed"], expected)
+                self.assertIsInstance(observed["error"], TimeoutError)
+
+    def test_command_budget_preserves_errors_and_cancellation(self):
+        class HostileTimeout(TimeoutError):
+            def __str__(self):
+                raise AssertionError("error text read")
+
+            @property
+            def operation(self):
+                raise AssertionError("error metadata read")
+
+        for error in (
+            HostileTimeout("PRIVATE-DELAY-CANARY"),
+            OSError("PRIVATE-DELAY-CANARY"),
+            KeyboardInterrupt("PRIVATE-DELAY-CANARY"),
+            SystemExit(9),
+        ):
+            observed = self.delayed_command(
+                "POST", "/session/synthetic/url", 0, error
+            )
+            self.assertIs(observed["error"], error)
+        self.assertNotIn(
+            "PRIVATE-DELAY-CANARY", self.offline_stdout.getvalue()
+        )
+
+    def test_command_budget_does_not_admit_new_endpoints(self):
+        transport = Mock()
+        driver = smoke.Driver(12345, transport)
+        driver.session = "synthetic"
+        for method, path in (
+            ("GET", "/session/synthetic/url"),
+            ("POST", "/session/synthetic/url?extra=1"),
+            ("POST", "/session/other/url"),
+            ("POST", "/session/synthetic/execute/sync/extra"),
+        ):
+            with self.assertRaises(smoke.SmokeFailure):
+                driver.call(method, path)
+        transport.assert_not_called()
+
     def setUp(self):
         # Test-only capture: fake negative controls must not look like hosted
         # render failures in the preceding offline step's job output.
