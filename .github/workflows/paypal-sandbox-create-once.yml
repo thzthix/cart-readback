@@ -1,0 +1,77 @@
+name: One-use PayPal sandbox create acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: paypal-sandbox-create-once-permanent-slot
+  cancel-in-progress: false
+
+jobs:
+  create-once:
+    if: >-
+      github.repository == 'thzthix/cart-readback' &&
+      github.repository_id == '1443556432' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      github.workflow_ref == 'thzthix/cart-readback/.github/workflows/paypal-sandbox-create-once.yml@refs/heads/main' &&
+      github.run_number == 1 && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fetch reviewed wrapper from this immutable workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: wrapper
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /cart_readback/scripts/hosted_sandbox_create_once.py
+            /cart_readback/tests/test_hosted_sandbox_create_once.py
+            /.github/workflows/paypal-sandbox-create-once.yml
+      - name: Fetch fixed reviewed application source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 75d5b7e3bafdecc1cfb322cfd6c19d49a0abd30a
+          path: core
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /cart_readback/scripts/sandbox_create_acceptance.py
+            /cart_readback/cartreadback_app/paypal_https.py
+            /cart_readback/cartreadback_app/paypal_sandbox.py
+            /cart_readback/cartreadback_app/payments.py
+            /cart_readback/cartreadback_app/provider_json.py
+            /cart_readback/cartreadback_app/validation.py
+      - name: Offline wrapper tests before secret provisioning
+        run: |
+          python3 -I -S - <<'PYTHON'
+          import sys
+          if sys.version_info < (3, 11):
+              raise SystemExit("Python 3.11 or later required")
+          import unittest
+          suite = unittest.defaultTestLoader.discover(
+              'wrapper/cart_readback/tests', pattern='test_hosted_sandbox_create_once.py')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          raise SystemExit(0 if result.wasSuccessful() and result.testsRun > 0
+                           and not result.skipped else 1)
+          PYTHON
+      - name: Nonsecret source pipe and host preflight
+        run: python3 -I -S wrapper/cart_readback/scripts/hosted_sandbox_create_once.py preflight
+      - name: Provision private pipe and perform one sandbox create observation
+        if: >-
+          success() && github.run_number == 1 && github.run_attempt == 1 &&
+          github.repository == 'thzthix/cart-readback' &&
+          github.repository_id == '1443556432' &&
+          github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/main' &&
+          github.workflow_ref == 'thzthix/cart-readback/.github/workflows/paypal-sandbox-create-once.yml@refs/heads/main'
+        env:
+          PAYPAL_SANDBOX_CLIENT_ID: ${{ secrets.PAYPAL_SANDBOX_CLIENT_ID }}
+          PAYPAL_SANDBOX_CLIENT_SECRET: ${{ secrets.PAYPAL_SANDBOX_CLIENT_SECRET }}
+          PAYPAL_SANDBOX_MERCHANT_ID: ${{ secrets.PAYPAL_SANDBOX_MERCHANT_ID }}
+        run: python3 -I -S wrapper/cart_readback/scripts/hosted_sandbox_create_once.py run

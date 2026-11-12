@@ -25,7 +25,12 @@ Run requires the same directory and exact plan hash plus an inherited read-only
 FIFO descriptor >=3 containing bounded JSON `client_id`/`client_secret` values.
 The secure launcher must provide the existing approved credentials privately,
 close its writer after the JSON, and give the child sole read ownership. Do not
-put secrets in command arguments, environment, logs, files or chat. No credential
+put secrets in command arguments, ambient environment, logs, files or chat.
+The separately reviewed [hosted provisioning shim](HOSTED_SANDBOX_CREATE_ONCE.md)
+is a narrow exception: GitHub injects three explicitly selected secrets into
+that shim step only; it immediately removes them from the environment before
+creating the launcher process and supplies credentials through the private pipe.
+This is not ambient credential discovery. No credential
 source or secure-store integration is automatically discovered by this tool.
 The runtime's directory and credential pipe must belong to the current UID;
 files and pipe must not grant group/other access. No credential persistence is
