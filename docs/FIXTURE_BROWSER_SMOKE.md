@@ -275,3 +275,38 @@ retained. The three-second HTTP timeout, browser flags, readiness, routes,
 source pins, cleanup and manual execution guards are unchanged. Only the two
 helper hash pins change in the workflow. This repairs diagnostics, not the
 unexplained browser failure, and adds no authority to launch or retry a run.
+## Issue #98: align command socket budgets
+
+The helper previously limited every HTTP blocking operation to three seconds
+while allowing navigation for ten seconds and scripts for five seconds in
+WebDriver. Injected response delays of four seconds reproduce premature client
+timeouts for both commands. This is a later-command contract defect, not an
+explanation or fix for run 43129376100's earlier `session_create` timeout.
+
+Only exact POST session `url` and `execute/sync` routes receive extended HTTP
+socket waits: the existing browser limit plus a fixed two-second transport
+allowance, giving twelve and seven seconds respectively. The browser limits and
+the HTTP selection share constants so their values cannot drift independently.
+Two seconds is a finite operating allowance, not measured Chrome startup evidence.
+New Session, status, timeout configuration, screenshots, fixture HTTP and cleanup
+keep three-second waits. The Driver endpoint allowlist is unchanged; selecting a
+timeout does not authorize an otherwise rejected endpoint or another session.
+
+Python's HTTPConnection timeout applies to blocking operations, including
+connection establishment and subsequent socket I/O. It is not an absolute
+whole-command deadline; multiple waits or incremental responses can take longer.
+This change adds no thread cancellation guarantee, retry, fallback or browser
+security flag. The existing body-size limit and unconditional connection close
+remain unchanged. Failure/UNKNOWN behavior is preserved.
+
+Offline tests inject delays rather than waiting or starting a browser. They
+cover valid four-second navigation/script responses, exact finite selection,
+expiry, a single attempt with closed connections, hostile exceptions,
+cancellation and unchanged endpoint rejection. These are not observed browser
+timings or a render pass. Only two QA helper hashes change in the workflow;
+runner, guards, five-minute job limit and execution permissions are unchanged.
+No additional hosted run is authorized by this source correction.
+
+References: [WebDriver timeouts](https://www.w3.org/TR/2018/REC-webdriver1-20180605/#timeouts)
+and [Python HTTPConnection](https://docs.python.org/3/library/http.client.html#http.client.HTTPConnection).
+
