@@ -40,9 +40,16 @@ requires separately reviewed host inputs and a private credential pipe; there is
 no main-branch manual-key launcher or one-command live viewer. See
 [GEMINI_SERVICE](docs/GEMINI_SERVICE.md) and
 [the same-lifetime viewer contract](docs/GEMINI_RESULT_VIEWER_V1.md).
-Do not put Secret values in chat, logs or repository files. No new developer
-account, public deployment, open-source publication or contest submission is
-established by these results.
+Do not put Secret values in chat, logs or repository files. Those historical
+model results did not establish a new developer account, public deployment,
+open-source publication or contest submission.
+
+Separately, on November 12, 2026, the owner authorized this GitHub repository's
+public release under the [MIT license](LICENSE), added in
+[PR104](https://github.com/thzthix/cart-readback/pull/104) at commit
+`85978d1ddfb2ba11d3d169ca5489e6582c850828`. Anonymous repository and license access
+were verified. This source publication is not a hosted deployment or a completed
+contest submission, and does not establish real PayPal Sandbox validation.
 
 Older issue-specific implementation evidence below is historical unless stated
 otherwise; it does not replace the current status above.
